@@ -6,7 +6,7 @@ This document defines the security policy and operational safety requirements fo
 
 If you discover a security vulnerability in RER, please report it privately rather than opening a public issue.
 
-- **Primary Contact**: Project maintainer Ronald Edward Reeves Jr at `gold.emerald@proton.me`
+- **Primary Contact**: Project maintainer Ronald Edward Reeves Jr at `rer@ronaldreeves.com`
 - **GitHub Security**: Use GitHub Private Vulnerability Reporting on the [rer repository](https://github.com/emeraldsongold/rer/security/advisories).
 
 Please include:
