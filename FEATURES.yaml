@@ -1,0 +1,386 @@
+# RER roadmap: structured source of truth (schema v1).
+#
+# Converted from docs/SPEC.md §20 (implementation sequence). Acceptance criteria
+# are drawn from the sections listed in each item's spec_refs plus the §21
+# definition of done. ROADMAP.md is generated from this file; do not edit it
+# by hand.
+#
+# Owner controls (`autonomy`): ready-auto | investigate-only |
+# needs-design-approval | needs-impl-approval | blocked | deferred | no-auto.
+# A status here is only ever advanced with linked evidence (merged PR + CI run);
+# a roadmap entry existing does not mean the feature exists (§18).
+schema_version: 1
+project: rer
+items:
+  - id: RER-F-001
+    order: 1
+    phase: Foundation
+    title: Repository bootstrap, project policy, architecture, CI and license confirmation
+    type: infra
+    priority: P1
+    risk: low
+    autonomy: ready-auto
+    approvals_required: [license]
+    spec_refs: ["§1", "§3", "§18", "§19", "§22"]
+    test_profile: fast
+    acceptance:
+      - A Cargo workspace builds in GitHub Actions on hosted Linux runners; no local compilation is required.
+      - CI runs cargo fmt --check, cargo check, cargo clippy --all-targets --all-features -- -D warnings and cargo test on every push and pull request.
+      - README.md, AGENTS.md, ARCHITECTURE.md, DECISIONS.md, KNOWN_ISSUES.md, PLATFORM_SUPPORT.md, CONTRIBUTING.md, SECURITY.md and CHANGELOG.md exist and describe only implemented behavior.
+      - The owner's confirmation of Apache-2.0 is recorded before LICENSE and NOTICE are finalized.
+      - Dependency license and advisory checks run in CI with free tooling.
+      - CI caches are keyed on Cargo.lock and the toolchain version.
+    notes: The repository already contains a GitHub-generated Apache-2.0 LICENSE; it is not treated as confirmed until the owner approves (§3).
+
+  - id: RER-F-002
+    order: 2
+    phase: Foundation
+    title: Configuration model and validation
+    priority: P1
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-001]
+    spec_refs: ["§7", "§17"]
+    test_profile: standard
+    acceptance:
+      - A documented YAML configuration format exists with example configurations.
+      - rer validate reports each invalid field with its path and reason and exits non-zero on failure.
+      - Unknown fields, conflicting settings and duplicate instance or stream identities are rejected.
+      - Validation output is available as JSON for automation.
+      - Effective-configuration output never prints secret values.
+      - A configuration schema is maintained and checked in CI.
+
+  - id: RER-F-003
+    order: 3
+    phase: Core relay
+    title: Basic UDP relay with unit and integration tests
+    priority: P1
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-002]
+    spec_refs: ["§5", "§17"]
+    test_profile: standard
+    acceptance:
+      - UDP-to-UDP forwarding preserves datagram boundaries and payload bytes, verified by loopback integration tests.
+      - All queues are bounded; the overload drop policy is documented and every drop is counted, never silent.
+      - Unavailable destinations and socket errors are counted and reported without stopping the relay.
+      - Graceful startup and shutdown on SIGINT and SIGTERM is tested.
+      - rer run only starts from a configuration that passes validation.
+
+  - id: RER-F-004
+    order: 4
+    phase: Core relay
+    title: Initial traffic generator and simulation harness
+    type: test
+    priority: P1
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-003]
+    spec_refs: ["§13"]
+    test_profile: standard
+    acceptance:
+      - The generator emits packets with unique IDs and sequence numbers and configurable size, rate, burst, duration and seed.
+      - The same seed reproduces the same packet stream.
+      - A receiver verifies expected counts and payload hashes and reports loss, duplication and reordering as JSON.
+      - The harness runs unprivileged in ordinary CI.
+
+  - id: RER-F-005
+    order: 5
+    phase: Core relay
+    title: TCP relay and the four UDP/TCP conversion combinations
+    priority: P1
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-003, RER-F-004]
+    spec_refs: ["§5", "§13"]
+    test_profile: standard
+    acceptance:
+      - UDP-to-UDP, UDP-to-TCP, TCP-to-UDP and TCP-to-TCP each have harness-driven integration tests.
+      - Framing between TCP byte streams and UDP datagrams is explicit, documented and tested.
+      - TCP connection lifecycle, reconnect with backoff and timeouts are tested against destination outages.
+      - Backpressure from slow TCP readers is bounded and counted.
+
+  - id: RER-F-006
+    order: 6
+    phase: Core relay
+    title: Logical interfaces, paired directional streams, multiple streams and fan-out
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-005]
+    spec_refs: ["§5", "§6"]
+    test_profile: standard
+    acceptance:
+      - Logical interfaces with one or two directional streams are expressed in YAML and shown in CLI output.
+      - Each direction has independent counters, endpoints, errors and routing.
+      - Fan-out is tested, including one destination failing while the others continue.
+      - Pairing is documented as configuration context, not packet correlation.
+      - Multiple simultaneous interfaces run in one instance under test.
+
+  - id: RER-F-007
+    order: 7
+    phase: Diagnostics
+    title: Management API and CLI status, health and counters
+    priority: P2
+    risk: high
+    autonomy: needs-design-approval
+    approvals_required: [design]
+    depends_on: [RER-F-002, RER-F-003]
+    spec_refs: ["§7", "§9", "§17"]
+    test_profile: full
+    acceptance:
+      - The owner approves a design for the versioned JSON management API, its transports and authentication before implementation.
+      - Local Unix-domain-socket management works by default; remote management is off by default and authenticated and encrypted when enabled.
+      - A management-plane failure cannot stop the data plane (tested).
+      - rer status, rer streams and rer metrics report health, version, stream state and counters, with JSON output.
+      - Read-only operations are separated from behavior-changing ones; no operation executes shell commands or arbitrary code.
+
+  - id: RER-F-008
+    order: 8
+    phase: Diagnostics
+    title: Structured diagnostic events and production, debug and test modes
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-007]
+    spec_refs: ["§8", "§10"]
+    test_profile: standard
+    acceptance:
+      - Production mode emits no per-packet logs or payload contents by default and always reports failures and health transitions.
+      - Debug mode emits per-packet receive, classify, route and send events with stream IDs, timestamps, endpoints and lengths.
+      - Test mode collects events for a bounded run with correlation IDs and reverts after its configured expiry.
+      - Event buffers and rates are bounded, and dropped diagnostic events are counted and reported.
+      - Events distinguish received, accepted, routed or queued, send attempted and send succeeded (§8 stages 2-6).
+      - Emitting diagnostics never blocks the forwarding path (tested under load).
+
+  - id: RER-F-009
+    order: 9
+    phase: Diagnostics
+    title: Sequence tracking and packet inspection
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-008]
+    spec_refs: ["§8"]
+    test_profile: standard
+    acceptance:
+      - Sequence extraction is configurable (offset, width, byte order) and off by default.
+      - Gaps, duplicates, out-of-order packets and rollover are detected and counted in harness tests.
+      - Hex and ASCII previews are opt-in and length-bounded.
+      - rer inspect shows per-stream sequence state as text and JSON.
+
+  - id: RER-F-010
+    order: 10
+    phase: Diagnostics
+    title: Multi-instance topology simulation and distributed test correlation
+    type: test
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-004, RER-F-006, RER-F-007, RER-F-008]
+    spec_refs: ["§11", "§13"]
+    test_profile: full
+    acceptance:
+      - Multi-relay chains run in CI with deterministic seeds.
+      - Each test run has a unique ID, and per-hop observations are collected and correlated.
+      - The first point of divergence (gap, duplicate or mismatch) is identified.
+      - An unreachable relay yields incomplete or unknown, never pass.
+      - Local send success is never reported as downstream delivery.
+
+  - id: RER-F-011
+    order: 11
+    phase: Diagnostics
+    title: Capture import, controlled replay and destination-side verification
+    priority: P2
+    risk: high
+    autonomy: needs-design-approval
+    approvals_required: [design]
+    depends_on: [RER-F-004, RER-F-008]
+    spec_refs: ["§12", "§17"]
+    test_profile: full
+    acceptance:
+      - A documented initial subset of PCAP/PCAPNG link types is supported; unsupported or malformed input is rejected safely, with fuzz or regression tests.
+      - Interface-level replay supports original timing, scaled speed and maximum rate, with stream, endpoint and time-range filters.
+      - Replay requires an explicit destination and refuses non-test endpoints by default.
+      - Replay reports selected, attempted, injected and failed packet counts as JSON.
+      - Raw captures are never committed; test fixtures are synthetic or sanitized.
+
+  - id: RER-F-012
+    order: 12
+    phase: Diagnostics
+    title: Prometheus/OpenMetrics metrics
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-007]
+    spec_refs: ["§15"]
+    test_profile: standard
+    acceptance:
+      - Per-stream counters, drops, queue depth and errors are exposed in OpenMetrics format.
+      - The metrics endpoint is optional, bound to loopback by default, and never required for forwarding.
+      - Metric names and labels are documented and checked against a parser in tests.
+
+  - id: RER-F-013
+    order: 13
+    phase: Deployment
+    title: Docker image and Docker Compose deployment
+    type: packaging
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-003]
+    spec_refs: ["§16", "§17"]
+    test_profile: full
+    acceptance:
+      - Multi-arch (amd64 and arm64) images build in CI, run as non-root with no added capabilities, and ship no shell or package manager in the runtime image.
+      - The health check exercises real application health.
+      - Graceful shutdown on SIGTERM is tested in CI.
+      - Single-instance and relay-chain Compose examples pass docker compose config and a CI smoke test with test traffic.
+      - An SBOM and an image vulnerability scan are produced with free tooling.
+      - Image version metadata matches the binary version.
+
+  - id: RER-F-014
+    order: 14
+    phase: Deployment
+    title: Helm chart and Kubernetes deployment tests
+    type: packaging
+    priority: P3
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-013]
+    spec_refs: ["§16"]
+    test_profile: full
+    acceptance:
+      - helm lint, helm template and values-schema validation pass in CI.
+      - The chart sets a non-root security context, probes and resources, and configurable services and ports.
+      - A smoke deployment runs on free CI Kubernetes (for example kind) where feasible; otherwise the limitation is documented.
+      - The documentation states that scaling replicas does not preserve UDP/TCP routing semantics automatically.
+
+  - id: RER-F-015
+    order: 15
+    phase: Deployment
+    title: .deb, .rpm and standalone binary packaging
+    type: packaging
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-003]
+    spec_refs: ["§4", "§16"]
+    test_profile: full
+    acceptance:
+      - Linux x86-64 and ARM64 binaries are built in CI with checksums and version metadata.
+      - The .deb and .rpm packages install the binary, docs, example configuration under /etc/rer/ and a systemd unit that is not enabled or started automatically.
+      - Clean install, upgrade (configuration preserved) and uninstall (no silent data loss) are smoke-tested in containers.
+
+  - id: RER-F-016
+    order: 16
+    phase: Protocols
+    title: CCSDS parsing module where justified
+    priority: P3
+    risk: medium
+    autonomy: investigate-only
+    depends_on: [RER-F-009]
+    spec_refs: ["§14"]
+    test_profile: standard
+    acceptance:
+      - The owner approves a written justification and supported-subset proposal (primary header APID, sequence and length) before implementation.
+      - Header and length validation rejects malformed packets safely.
+      - The documentation states the exact supported subset and claims no full CCSDS compatibility.
+
+  - id: RER-F-017
+    order: 17
+    phase: Hardening
+    title: Long-duration, adversarial, fault-injection and performance testing
+    type: performance
+    priority: P3
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-010]
+    spec_refs: ["§13", "§17", "§21"]
+    test_profile: stress
+    acceptance:
+      - Benchmark definitions are repeatable, with recorded baselines labelled by environment.
+      - Fault-injection scenarios (loss, delay, jitter, reorder, disconnect, slow reader, saturation, restart) run outside the unprivileged suite.
+      - Long-duration runs report memory and queue stability.
+      - No performance claim is made without measured before-and-after data.
+
+  - id: RER-F-018
+    order: 18
+    phase: Hardening
+    title: Legacy OS compatibility experiments and documented results
+    type: test
+    priority: P3
+    risk: low
+    autonomy: ready-auto
+    depends_on: [RER-F-015]
+    spec_refs: ["§4"]
+    test_profile: full
+    acceptance:
+      - The packaged artifacts are tested in clean Debian 10, Ubuntu 20.04 and RHEL 7-compatible containers where images are available.
+      - Results and limitations are recorded in PLATFORM_SUPPORT.md; a successful compile alone is never claimed as support.
+
+  - id: RER-F-019
+    order: 19
+    phase: Protocols
+    title: BPv7 research and integration proposal
+    type: research
+    priority: P3
+    risk: medium
+    autonomy: investigate-only
+    depends_on: [RER-F-006, RER-F-008, RER-F-010]
+    spec_refs: ["§14"]
+    test_profile: fast
+    acceptance:
+      - A survey of the BPv7 standard and existing DTN implementations, including their licenses.
+      - An integration proposal (bundle inspection, endpoint identifiers, metadata, diagnostics) reviewed by the owner.
+      - No Bundle Protocol support is claimed.
+
+  - id: RER-F-020
+    order: 20
+    phase: Protocols
+    title: LTP research and integration proposal
+    type: research
+    priority: P3
+    risk: medium
+    autonomy: investigate-only
+    depends_on: [RER-F-006, RER-F-008, RER-F-010]
+    spec_refs: ["§14"]
+    test_profile: fast
+    acceptance:
+      - A survey of LTP session, timer, report and retransmission requirements and of existing implementations.
+      - A design proposal for integration reviewed by the owner.
+      - No LTP support is claimed.
+
+  - id: RER-F-021
+    order: 21
+    phase: Release
+    title: Release hardening, security review, documentation and reproducible release process
+    type: release
+    priority: P3
+    risk: high
+    autonomy: no-auto
+    approvals_required: [release]
+    depends_on: [RER-F-012, RER-F-013, RER-F-014, RER-F-015, RER-F-016, RER-F-017, RER-F-018]
+    spec_refs: ["§16", "§17", "§19", "§21"]
+    test_profile: full
+    acceptance:
+      - A tag-driven release workflow validates the binaries, packages, image, Compose examples and Helm chart for one version.
+      - A security review and dependency audit are completed, with findings recorded.
+      - Documentation matches actual behavior.
+      - Publishing a release requires the owner's approval.
+
+  - id: RER-T-001
+    kind: track
+    order: 101
+    title: Simulation harness grows with every networking feature
+    type: test
+    spec_refs: ["§13", "§20"]
+    notes: Every networking task from RER-F-003 onward adds harness scenarios and regression tests.
+
+  - id: RER-T-002
+    kind: track
+    order: 102
+    title: Documentation and project state stay in sync with behavior
+    type: docs
+    spec_refs: ["§18", "§21"]
+    notes: Every task updates docs, FEATURES.yaml status and KNOWN_ISSUES.md with linked evidence.
