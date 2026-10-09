@@ -1,6 +1,7 @@
 name: ci
 
-# Fast profile (SPEC §19): fmt, check, clippy, test. Read-only token, GitHub-owned
+# Fast profile (SPEC §19): fmt, check, clippy, test, plus dependency license and advisory
+# checks with cargo-deny (policy in deny.toml). Read-only token, GitHub-owned
 # actions only. Until the Cargo workspace exists (RER-F-001) every job reports
 # "no Cargo.toml" and passes, so this workflow can be a required status check.
 on:
@@ -60,3 +61,28 @@ jobs:
       - name: cargo test
         if: steps.detect.outputs.cargo == 'true'
         run: cargo test --all-features --locked
+
+  deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: detect
+        name: detect Cargo workspace
+        run: |
+          if [ -f Cargo.toml ]; then echo "cargo=true" >> "$GITHUB_OUTPUT"; else echo "cargo=false" >> "$GITHUB_OUTPUT"; echo "no Cargo.toml yet: nothing to check"; fi
+
+      - uses: actions/cache@v4
+        if: steps.detect.outputs.cargo == 'true'
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-v1
+
+      - name: install cargo-deny
+        if: steps.detect.outputs.cargo == 'true'
+        run: command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
+
+      - name: cargo deny check
+        if: steps.detect.outputs.cargo == 'true'
+        run: cargo deny --all-features check advisories bans licenses sources
