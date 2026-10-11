@@ -4,7 +4,7 @@ RER (RER Engineering Relay) is an open-source, Rust-based network relay, telemet
 
 ## Current Status
 
-RER has completed **Milestone RER-F-001** (repository foundation and CI), **Milestone RER-F-002** (configuration model, validation CLI, and schema), and **Milestone RER-F-003** (basic UDP relay engine, bounded queues, drop policies, and graceful shutdown). The CLI provides configuration validation (`rer validate`), machine-readable JSON reports, secret-safe inspection (`rer inspect`), and UDP stream forwarding (`rer run`).
+RER has completed **Milestone RER-F-001** (repository foundation and CI), **Milestone RER-F-002** (configuration model, validation CLI, and schema), **Milestone RER-F-003** (basic UDP relay engine, bounded queues, drop policies, and graceful shutdown), and **Milestone RER-F-004** (deterministic traffic generator, verification test receiver, and unprivileged simulation harness). The CLI provides configuration validation (`rer validate`), machine-readable JSON reports, secret-safe inspection (`rer inspect`), UDP stream forwarding (`rer run`), and network simulation testing (`rer test`).
 
 Advanced transport features (TCP relays, paired streams, packet inspection, management API, and simulation harness) are defined in [`docs/SPEC.md`](docs/SPEC.md) and tracked in [`ROADMAP.md`](ROADMAP.md). They are scheduled for implementation in upcoming milestones.
 

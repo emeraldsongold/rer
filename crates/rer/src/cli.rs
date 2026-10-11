@@ -1,10 +1,16 @@
 use std::fs;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::{Config, ValidationError, ValidationReport};
+use crate::sim::{
+    GeneratorConfig, HarnessConfig, ImpairmentConfig, SimulationHarness, TrafficGenerator,
+    TrafficReceiver,
+};
 
 /// RER — RER Engineering Relay CLI
 #[derive(Parser, Debug)]
@@ -46,8 +52,8 @@ pub enum Commands {
     /// Replay captured traffic (planned)
     Replay(PlaceholderArgs),
 
-    /// Run network simulation and tests (planned)
-    Test(PlaceholderArgs),
+    /// Run network simulation and tests
+    Test(TestArgs),
 }
 
 #[derive(Args, Debug)]
@@ -112,6 +118,147 @@ pub enum InspectFormat {
 }
 
 #[derive(Args, Debug)]
+pub struct TestArgs {
+    #[command(subcommand)]
+    pub command: Option<TestSubcommand>,
+
+    /// Number of packets to generate and verify
+    #[arg(short = 'c', long, default_value = "100")]
+    pub count: u64,
+
+    /// Payload size in bytes
+    #[arg(short = 's', long, default_value = "256")]
+    pub size: usize,
+
+    /// Rate in packets per second (0 for unthrottled)
+    #[arg(short = 'r', long, default_value = "0")]
+    pub rate: f64,
+
+    /// Burst size
+    #[arg(short = 'b', long, default_value = "1")]
+    pub burst: usize,
+
+    /// Duration in seconds
+    #[arg(short = 'd', long)]
+    pub duration: Option<f64>,
+
+    /// PRNG seed
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Simulated packet loss rate (0.0 to 1.0)
+    #[arg(long, default_value = "0.0")]
+    pub loss_rate: f64,
+
+    /// Simulated packet duplication rate (0.0 to 1.0)
+    #[arg(long, default_value = "0.0")]
+    pub duplicate_rate: f64,
+
+    /// Simulated packet reorder rate (0.0 to 1.0)
+    #[arg(long, default_value = "0.0")]
+    pub reorder_rate: f64,
+
+    /// Output report as JSON
+    #[arg(long, default_value = "true")]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TestSubcommand {
+    /// Run an end-to-end unprivileged simulation harness
+    Harness(HarnessArgs),
+    /// Run traffic generator standalone
+    Generate(GenerateArgs),
+    /// Run traffic receiver standalone
+    Receive(ReceiveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct HarnessArgs {
+    /// Number of packets to generate and verify
+    #[arg(short = 'c', long, default_value = "100")]
+    pub count: u64,
+
+    /// Payload size in bytes
+    #[arg(short = 's', long, default_value = "256")]
+    pub size: usize,
+
+    /// Rate in packets per second (0 for unthrottled)
+    #[arg(short = 'r', long, default_value = "0")]
+    pub rate: f64,
+
+    /// Burst size
+    #[arg(short = 'b', long, default_value = "1")]
+    pub burst: usize,
+
+    /// Duration in seconds
+    #[arg(short = 'd', long)]
+    pub duration: Option<f64>,
+
+    /// PRNG seed
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Simulated packet loss rate (0.0 to 1.0)
+    #[arg(long, default_value = "0.0")]
+    pub loss_rate: f64,
+
+    /// Simulated packet duplication rate (0.0 to 1.0)
+    #[arg(long, default_value = "0.0")]
+    pub duplicate_rate: f64,
+
+    /// Simulated packet reorder rate (0.0 to 1.0)
+    #[arg(long, default_value = "0.0")]
+    pub reorder_rate: f64,
+
+    /// Output report as JSON
+    #[arg(long, default_value = "true")]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct GenerateArgs {
+    /// Target UDP address (e.g. 127.0.0.1:5000)
+    #[arg(short, long)]
+    pub target: String,
+
+    /// Number of packets to generate
+    #[arg(short = 'c', long, default_value = "100")]
+    pub count: u64,
+
+    /// Payload size in bytes
+    #[arg(short = 's', long, default_value = "256")]
+    pub size: usize,
+
+    /// Rate in packets per second
+    #[arg(short = 'r', long, default_value = "0")]
+    pub rate: f64,
+
+    /// Burst size
+    #[arg(short = 'b', long, default_value = "1")]
+    pub burst: usize,
+
+    /// PRNG seed
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ReceiveArgs {
+    /// Bind UDP address (e.g. 127.0.0.1:5000)
+    #[arg(short, long, default_value = "127.0.0.1:5000")]
+    pub bind: String,
+
+    /// Expected packet count
+    #[arg(short = 'c', long)]
+    pub count: Option<u64>,
+
+    /// Timeout in seconds to wait for packets
+    #[arg(short = 't', long, default_value = "2.0")]
+    pub timeout: f64,
+}
+
+#[derive(Args, Debug)]
 pub struct PlaceholderArgs {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
@@ -157,10 +304,7 @@ pub fn execute(cli: Cli) -> ExitCode {
             eprintln!("rer replay is not yet implemented (scheduled in roadmap milestone RER-F-011). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
         }
-        Commands::Test(_) => {
-            eprintln!("rer test is not yet implemented (scheduled in roadmap milestone RER-F-004). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Test(args) => execute_test(args),
     }
 }
 
@@ -405,6 +549,167 @@ fn execute_run(args: RunArgs) -> ExitCode {
         }
         Err(err) => {
             eprintln!("Failed to start relay: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn execute_test(args: TestArgs) -> ExitCode {
+    match args.command {
+        Some(TestSubcommand::Harness(h_args)) => run_harness_cli(h_args),
+        Some(TestSubcommand::Generate(g_args)) => run_generate_cli(g_args),
+        Some(TestSubcommand::Receive(r_args)) => run_receive_cli(r_args),
+        None => {
+            let h_args = HarnessArgs {
+                count: args.count,
+                size: args.size,
+                rate: args.rate,
+                burst: args.burst,
+                duration: args.duration,
+                seed: args.seed,
+                loss_rate: args.loss_rate,
+                duplicate_rate: args.duplicate_rate,
+                reorder_rate: args.reorder_rate,
+                json: args.json,
+            };
+            run_harness_cli(h_args)
+        }
+    }
+}
+
+fn run_harness_cli(args: HarnessArgs) -> ExitCode {
+    let duration = args.duration.map(Duration::from_secs_f64);
+    let rate = if args.rate > 0.0 {
+        Some(args.rate)
+    } else {
+        None
+    };
+    let burst = if args.burst > 1 {
+        Some(args.burst)
+    } else {
+        None
+    };
+
+    let generator = GeneratorConfig {
+        seed: args.seed,
+        packet_size: args.size,
+        rate,
+        burst,
+        duration,
+        count: Some(args.count),
+    };
+
+    let impairments =
+        if args.loss_rate > 0.0 || args.duplicate_rate > 0.0 || args.reorder_rate > 0.0 {
+            Some(ImpairmentConfig {
+                seed: args.seed.wrapping_add(1),
+                loss_rate: args.loss_rate,
+                duplicate_rate: args.duplicate_rate,
+                reorder_rate: args.reorder_rate,
+                delay_ms: 0,
+                jitter_ms: 0,
+            })
+        } else {
+            None
+        };
+
+    let harness_config = HarnessConfig {
+        test_id: Some("cli-sim-test".to_string()),
+        generator,
+        impairments,
+        use_relay: true,
+        relay_queue_capacity: None,
+        relay_drop_policy: None,
+    };
+
+    match SimulationHarness::run(harness_config) {
+        Ok(report) => {
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("--- Simulation Test Report ---");
+                println!("Result: {}", if report.pass { "PASS" } else { "FAIL" });
+                println!("Expected: {:?}", report.expected_count);
+                println!("Received: {}", report.received_count);
+                println!(
+                    "Lost: {} (loss rate: {:.2}%)",
+                    report.lost_count,
+                    report.loss_rate * 100.0
+                );
+                println!("Duplicates: {}", report.duplicate_count);
+                println!("Reordered: {}", report.reordered_count);
+                println!(
+                    "Payload Hashes Verified: {}",
+                    report.payload_hashes_verified
+                );
+            }
+            if report.pass {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            eprintln!("Simulation harness error: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_generate_cli(args: GenerateArgs) -> ExitCode {
+    let rate = if args.rate > 0.0 {
+        Some(args.rate)
+    } else {
+        None
+    };
+    let burst = if args.burst > 1 {
+        Some(args.burst)
+    } else {
+        None
+    };
+    let mut gen = TrafficGenerator::new(GeneratorConfig {
+        seed: args.seed,
+        packet_size: args.size,
+        rate,
+        burst,
+        duration: None,
+        count: Some(args.count),
+    });
+
+    match gen.run_udp(&args.target) {
+        Ok(stats) => {
+            println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("Traffic generation failed: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_receive_cli(args: ReceiveArgs) -> ExitCode {
+    let socket = match UdpSocket::bind(&args.bind) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("Failed to bind to '{}': {}", args.bind, err);
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut receiver = TrafficReceiver::new(args.count, None);
+    let timeout = Duration::from_secs_f64(args.timeout);
+    match receiver.listen_udp(&socket, timeout) {
+        Ok(report) => {
+            println!("{}", report.to_json());
+            if report.pass {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            eprintln!("Traffic receiver failed: {}", err);
             ExitCode::from(1)
         }
     }
