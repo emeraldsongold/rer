@@ -104,15 +104,41 @@ Logical interfaces associate related directional streams, such as command TX and
 
 Enforces memory and queue bounds (SPEC §17):
 
-| Field | Type | Description |
-|---|---|---|
-| `max_queue_size` | integer | Maximum queue size in packets (must be > 0). |
-| `max_packet_size` | integer | Maximum packet size in bytes (must be > 0). |
-| `drop_policy` | string | Overflow drop behavior: `"drop_oldest"`, `"drop_newest"`, or `"reject"`. |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_queue_size` | integer | `1024` | Maximum queue size in packets (must be > 0). |
+| `max_packet_size` | integer | `65535` | Maximum packet size in bytes (must be > 0). |
+| `drop_policy` | string | `"drop_oldest"` | Overflow drop behavior: `"drop_oldest"`, `"drop_newest"`, or `"reject"`. |
 
-## 8. Validation and CLI Usage
+### Overload Drop Policy and Queue Bounding
 
-Validate configurations using the `rer validate` CLI command:
+All relay queues are strictly bounded. Unbounded queues and silent data loss are prohibited by architectural invariant (SPEC §5, §17).
+
+- **Queue Bounding**: Buffers are bounded by `max_queue_size` (packets) and `max_packet_size` (bytes). When configured at both instance and stream levels, the stream-level setting takes precedence. If omitted, defaults of 1024 packets and 65535 bytes apply.
+- **Overload Policies**:
+  - `drop_oldest` (default): Evicts and drops the oldest queued packet to accommodate newly arriving packets. Suitable for real-time telemetry where the freshest reading is most valuable.
+  - `drop_newest`: Drops the newly arrived packet when the queue is full, preserving earlier received packets.
+  - `reject`: Rejects and drops incoming packets immediately upon queue exhaustion.
+- **Oversized Datagrams**: Datagrams exceeding `max_packet_size` are dropped at ingress before entering the queue and tracked under `drops_oversized`.
+- **Accounting and Visibility (Never Silent)**: Every dropped packet increments `dropped_packets` and specific reason counters (`drops_queue_full`, `drops_oversized`) and is logged to diagnostics with the stream ID and queue capacity. Packet loss is never silent.
+
+## 8. Relay Execution and Validation CLI Usage
+
+### Running the Relay (`rer run`)
+
+The relay starts only from a configuration that passes full structural and semantic validation (SPEC §7):
+
+```bash
+# Run the relay with a validated configuration
+rer run config.yaml
+rer run --config config.yaml
+```
+
+During execution, `rer run` captures `SIGINT` (Ctrl-C) and `SIGTERM` signals, performs a graceful shutdown draining queued packets, and prints stream statistics before exiting with status 0.
+
+### Configuration Validation (`rer validate`)
+
+Validate configurations without starting the relay:
 
 ```bash
 # Validate human-readable text output (exits 0 on success, non-zero on error)

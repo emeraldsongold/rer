@@ -25,8 +25,8 @@ pub enum Commands {
     /// Print version information
     Version,
 
-    /// Run the relay (planned)
-    Run(PlaceholderArgs),
+    /// Run the relay
+    Run(RunArgs),
 
     /// Show status of relay instances (planned)
     Status(PlaceholderArgs),
@@ -88,6 +88,17 @@ pub struct InspectArgs {
     pub format: InspectFormat,
 }
 
+#[derive(Args, Debug)]
+pub struct RunArgs {
+    /// Path to YAML configuration file
+    #[arg(value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
+    /// Path to YAML configuration file (alternative flag)
+    #[arg(short, long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Text,
@@ -121,10 +132,7 @@ pub fn execute(cli: Cli) -> ExitCode {
             println!("rer {}", crate::version());
             ExitCode::SUCCESS
         }
-        Commands::Run(_) => {
-            eprintln!("rer run is not yet implemented (scheduled in roadmap milestone RER-F-003). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Run(args) => execute_run(args),
         Commands::Status(_) => {
             eprintln!("rer status is not yet implemented (scheduled in roadmap milestone RER-F-007). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
@@ -306,4 +314,98 @@ fn execute_inspect(args: InspectArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn execute_run(args: RunArgs) -> ExitCode {
+    let target_path = match args.file.or(args.config) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "Error: missing configuration file argument; provide a path or use --config <FILE>"
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    let content = match fs::read_to_string(&target_path) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("Error reading '{}': {}", target_path.display(), err);
+            return ExitCode::from(1);
+        }
+    };
+
+    let config = match Config::from_yaml_str(&content) {
+        Ok(cfg) => cfg,
+        Err(errs) => {
+            eprintln!("Cannot run invalid configuration (parse failed):");
+            for err in errs {
+                eprintln!("  - {}", err);
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let errors = config.validate();
+    if !errors.is_empty() {
+        eprintln!("Cannot run invalid configuration (validation failed):");
+        for err in errors {
+            eprintln!("  - {}", err);
+        }
+        return ExitCode::from(1);
+    }
+
+    // Verify all configured streams use supported UDP transport
+    for inst in config.all_instances() {
+        for stream in &inst.streams {
+            if stream.source.transport != crate::config::TransportType::Udp {
+                eprintln!(
+                    "Cannot run configuration: stream '{}' uses TCP source transport which is not yet implemented (scheduled in milestone RER-F-005)",
+                    stream.id
+                );
+                return ExitCode::from(1);
+            }
+            if let Some(dest) = &stream.destination {
+                if dest.transport != crate::config::TransportType::Udp {
+                    eprintln!(
+                        "Cannot run configuration: stream '{}' uses TCP destination transport which is not yet implemented (scheduled in milestone RER-F-005)",
+                        stream.id
+                    );
+                    return ExitCode::from(1);
+                }
+            }
+            if let Some(dests) = &stream.destinations {
+                for dest in dests {
+                    if dest.transport != crate::config::TransportType::Udp {
+                        eprintln!(
+                            "Cannot run configuration: stream '{}' uses TCP destination transport which is not yet implemented (scheduled in milestone RER-F-005)",
+                            stream.id
+                        );
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Err(err) = crate::signals::register_signal_handlers() {
+        eprintln!("Warning: failed to register signal handlers: {}", err);
+    }
+
+    match crate::relay::Relay::start(&config) {
+        Ok(relay) => {
+            println!("RER relay running. Press Ctrl-C or send SIGTERM to stop.");
+            while !crate::signals::is_shutdown_requested() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            println!("Shutdown signal received. Stopping relay gracefully...");
+            relay.stop();
+            println!("RER relay stopped gracefully.");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("Failed to start relay: {}", err);
+            ExitCode::from(1)
+        }
+    }
 }
