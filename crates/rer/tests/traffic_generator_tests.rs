@@ -265,6 +265,7 @@ fn test_simulation_harness_runs_unprivileged_in_ci() {
         use_relay: true,
         relay_queue_capacity: None,
         relay_drop_policy: None,
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("harness execution");
@@ -306,6 +307,7 @@ fn test_simulation_harness_with_deterministic_impairments() {
         use_relay: true,
         relay_queue_capacity: None,
         relay_drop_policy: None,
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("harness run");
@@ -369,6 +371,7 @@ fn test_simulation_harness_with_relay_queue_drop_policy() {
         use_relay: true,
         relay_queue_capacity: Some(50),
         relay_drop_policy: Some(DropPolicy::DropOldest),
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("harness run");

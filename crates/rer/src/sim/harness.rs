@@ -1,5 +1,5 @@
 use std::io;
-use std::net::UdpSocket;
+use std::net::{TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, DropPolicy};
+use crate::config::{Config, DropPolicy, TransportType};
 use crate::relay::Relay;
 
 use super::channel::{ImpairmentConfig, SimulatedChannel};
@@ -34,6 +34,16 @@ pub struct HarnessConfig {
     /// Relay overload drop policy (if using relay)
     #[serde(default)]
     pub relay_drop_policy: Option<DropPolicy>,
+    /// Forwarding source transport protocol (default: UDP)
+    #[serde(default = "default_transport_udp")]
+    pub source_transport: TransportType,
+    /// Forwarding destination transport protocol (default: UDP)
+    #[serde(default = "default_transport_udp")]
+    pub destination_transport: TransportType,
+}
+
+fn default_transport_udp() -> TransportType {
+    TransportType::Udp
 }
 
 fn default_true() -> bool {
@@ -49,21 +59,20 @@ impl Default for HarnessConfig {
             use_relay: true,
             relay_queue_capacity: None,
             relay_drop_policy: None,
+            source_transport: TransportType::Udp,
+            destination_transport: TransportType::Udp,
         }
     }
 }
 
 /// Unprivileged simulation harness that orchestrates generator, relay,
-/// impairments, and receiver in ordinary CI.
+/// impairments, and receiver in ordinary CI across all four transport combinations.
 pub struct SimulationHarness;
 
 impl SimulationHarness {
     /// Executes the simulation harness end-to-end unprivileged on localhost,
     /// returning the receiver's JSON-serializable report.
     pub fn run(config: HarnessConfig) -> io::Result<ReceiverReport> {
-        let receiver_socket = UdpSocket::bind("127.0.0.1:0")?;
-        let receiver_port = receiver_socket.local_addr()?.port();
-
         let expected_count = config.generator.count;
         let expected_stream_hash = expected_count
             .map(|cnt| TrafficGenerator::new(config.generator.clone()).expected_stream_hash(cnt));
@@ -73,11 +82,30 @@ impl SimulationHarness {
             receiver.set_test_id(tid.clone());
         }
 
+        let receiver_port: u16;
+        let receiver_udp_socket: Option<UdpSocket>;
+        let receiver_tcp_listener: Option<TcpListener>;
+
+        match config.destination_transport {
+            TransportType::Udp => {
+                let socket = UdpSocket::bind("127.0.0.1:0")?;
+                receiver_port = socket.local_addr()?.port();
+                receiver_udp_socket = Some(socket);
+                receiver_tcp_listener = None;
+            }
+            TransportType::Tcp => {
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                receiver_port = listener.local_addr()?.port();
+                receiver_tcp_listener = Some(listener);
+                receiver_udp_socket = None;
+            }
+        }
+
         let stop_proxy = Arc::new(AtomicBool::new(false));
         let proxy_handle;
         let final_receiver_dest;
 
-        // Setup optional impairment proxy
+        // Setup optional impairment proxy (for UDP)
         if let Some(impairments) = config.impairments.clone() {
             let proxy_socket = UdpSocket::bind("127.0.0.1:0")?;
             let proxy_port = proxy_socket.local_addr()?.port();
@@ -99,9 +127,30 @@ impl SimulationHarness {
         let relay_instance: Option<Relay>;
 
         if config.use_relay {
-            let listen_socket = UdpSocket::bind("127.0.0.1:0")?;
-            let relay_listen_port = listen_socket.local_addr()?.port();
-            drop(listen_socket); // Free port for relay bind
+            let relay_listen_port = match config.source_transport {
+                TransportType::Udp => {
+                    let s = UdpSocket::bind("127.0.0.1:0")?;
+                    let port = s.local_addr()?.port();
+                    drop(s);
+                    port
+                }
+                TransportType::Tcp => {
+                    let l = TcpListener::bind("127.0.0.1:0")?;
+                    let port = l.local_addr()?.port();
+                    drop(l);
+                    port
+                }
+            };
+
+            let src_transport_name = match config.source_transport {
+                TransportType::Udp => "udp",
+                TransportType::Tcp => "tcp",
+            };
+
+            let dest_transport_name = match config.destination_transport {
+                TransportType::Udp => "udp",
+                TransportType::Tcp => "tcp",
+            };
 
             let max_queue_str = config
                 .relay_queue_capacity
@@ -140,10 +189,10 @@ instances:
     streams:
       - id: "sim-stream"
         source:
-          transport: "udp"
+          transport: "{src_transport_name}"
           address: "127.0.0.1:{relay_listen_port}"
         destination:
-          transport: "udp"
+          transport: "{dest_transport_name}"
           address: "{final_receiver_dest}"
 {buffer_yaml}
 "#
@@ -164,14 +213,36 @@ instances:
         }
 
         // Spawn receiver thread
+        let receiver_dest_transport = config.destination_transport;
         let receiver_handle = thread::spawn(move || {
-            let timeout = Duration::from_millis(1500);
-            receiver.listen_udp(&receiver_socket, timeout)
+            let timeout = Duration::from_millis(2500);
+            match receiver_dest_transport {
+                TransportType::Udp => {
+                    let socket = receiver_udp_socket.unwrap();
+                    receiver.listen_udp(&socket, timeout)
+                }
+                TransportType::Tcp => {
+                    let listener = receiver_tcp_listener.unwrap();
+                    receiver.listen_tcp(&listener, timeout)
+                }
+            }
         });
+
+        // Small delay if TCP source so relay's accept loop is ready
+        if config.source_transport == TransportType::Tcp {
+            thread::sleep(Duration::from_millis(30));
+        }
 
         // Run traffic generator
         let mut generator = TrafficGenerator::new(config.generator);
-        generator.run_udp(&generator_target)?;
+        match config.source_transport {
+            TransportType::Udp => {
+                generator.run_udp(&generator_target)?;
+            }
+            TransportType::Tcp => {
+                generator.run_tcp(&generator_target)?;
+            }
+        }
 
         // Collect receiver report
         let report = receiver_handle
