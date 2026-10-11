@@ -6,9 +6,9 @@ This document details the architecture of RER (RER Engineering Relay), distingui
 
 RER is designed to connect, observe, test, and diagnose telemetry and command traffic across heterogeneous Linux networks, containers, and multi-hop relay topologies. Rather than acting solely as a passive forwarder, RER provides deep diagnostic visibility into packet paths, sequence continuity, transport boundaries, and relay decisions.
 
-## 2. Implemented Architecture (Milestones RER-F-001 & RER-F-002)
+## 2. Implemented Architecture (Milestones RER-F-001, RER-F-002, RER-F-003)
 
-At the current stage, the implemented architecture consists of the workspace scaffold, CI quality gates, and the configuration and validation subsystem:
+At the current stage, the implemented architecture consists of the workspace scaffold, CI quality gates, configuration/validation, and the basic UDP relay subsystem:
 
 ```
 rer/
@@ -19,14 +19,17 @@ rer/
 │   └── rer/               # Core executable and library entry point
 │       ├── Cargo.toml     # Member manifest inheriting workspace metadata
 │       ├── src/
-│       │   ├── lib.rs     # Library interface (exposes version, config, CLI, and secret models)
+│       │   ├── lib.rs     # Library interface (exposes version, config, relay, and secret models)
 │       │   ├── main.rs    # Executable entry point
-│       │   ├── cli.rs     # CLI command parsing and handlers (validate, inspect, version)
+│       │   ├── cli.rs     # CLI command parsing and handlers (run, validate, inspect, version)
 │       │   ├── config.rs  # Strict YAML models, semantic validation, and schema generation
-│       │   └── secret.rs  # SecretString wrapper protecting sensitive parameters
+│       │   ├── relay.rs   # UDP relay engine, bounded queues, drop policies, and counters
+│       │   ├── secret.rs  # SecretString wrapper protecting sensitive parameters
+│       │   └── signals.rs # POSIX SIGINT and SIGTERM graceful shutdown handlers
 │       └── tests/
 │           ├── cli_tests.rs          # CLI blackbox tests (rer validate, inspect, version)
-│           └── config_validation.rs  # Schema, example validation, and rejection tests
+│           ├── config_validation.rs  # Schema, example validation, and rejection tests
+│           └── udp_relay_tests.rs    # Loopback UDP forwarding, queues, error resilience, and signals
 ├── docs/
 │   ├── SPEC.md            # Master project specification
 │   └── CONFIGURATION.md   # YAML configuration format reference
@@ -53,7 +56,14 @@ rer/
 - **Machine-Readable Automation**: Emits structured JSON validation reports (`--json` / `--format json`).
 - **Schema Enforcement**: Maintains `schema/rer-config.schema.json` and automatically validates all project examples against the schema in CI tests.
 
-### 2.3 CI and Quality Pipeline
+### 2.3 UDP Relay Engine Subsystem (`RER-F-003`)
+
+- **Datagram Preservation**: Preserves UDP datagram boundaries and payload bytes without framing corruption, verified via loopback tests.
+- **Bounded Queues & Drop Policies**: Protects memory with thread-safe bounded FIFO queues (`BoundedQueue`). Enforces explicit drop policies (`drop_oldest`, `drop_newest`, `reject`) and bounds max packet size. Drops are strictly accounted for and logged—never silent.
+- **Destination Resilience & Fan-out**: Forwards to single destinations or fan-out lists. Unreachable destinations or socket errors are logged and increment per-stream error counters without halting or panicking the relay.
+- **Graceful Lifecycle Management**: `rer run` requires valid configuration before launch, installs signal handlers for `SIGINT` and `SIGTERM`, drains active queues on shutdown, and reports stream statistics upon exit with status 0.
+
+### 2.4 CI and Quality Pipeline
 
 - **Hosted Execution**: Builds entirely on standard GitHub Actions Linux runners without requiring local compilation or paid infrastructure.
 - **Enforced Quality Gates**:
@@ -67,8 +77,8 @@ rer/
 
 Future milestones (as detailed in [`docs/SPEC.md`](docs/SPEC.md) and [`ROADMAP.md`](ROADMAP.md)) will introduce the following subsystems:
 
-1. **Core Relay and Transport Engine (`RER-F-003`, `RER-F-005`)**:
-   Asynchronous I/O handling UDP datagram boundaries, TCP stream lifecycle/reconnection, backpressure, bounded buffer queues, and conversion combinations (UDP↔UDP, UDP↔TCP, TCP↔UDP, TCP↔TCP).
+1. **TCP Relay & Conversion Engine (`RER-F-005`)**:
+   Asynchronous I/O handling TCP stream lifecycle/reconnection, backpressure, bounded buffer queues, and conversion combinations (UDP↔TCP, TCP↔UDP, TCP↔TCP).
 2. **Logical Interfaces and Directional Streams (`RER-F-006`)**:
    Paired directional streams modeling command TX/response RX and uplink/downlink relationships with independent counters, backpressure, and routing policies.
 3. **Management API and Diagnostics (`RER-F-007`, `RER-F-008`, `RER-F-009`)**:

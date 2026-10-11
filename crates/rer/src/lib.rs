@@ -5,9 +5,14 @@
 
 pub mod cli;
 pub mod config;
+pub mod relay;
 pub mod secret;
+pub mod signals;
 
-pub use config::{Config, InstanceConfig, StreamConfig, ValidationError, ValidationReport};
+pub use config::{
+    Config, DropPolicy, InstanceConfig, StreamConfig, ValidationError, ValidationReport,
+};
+pub use relay::{BoundedQueue, Datagram, Relay, StreamStats, StreamStatsSnapshot};
 pub use secret::SecretString;
 
 /// Returns the current version of RER.
