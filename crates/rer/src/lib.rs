@@ -3,6 +3,13 @@
 //! An open-source network relay, telemetry/command routing, and distributed
 //! network diagnostics tool.
 
+pub mod cli;
+pub mod config;
+pub mod secret;
+
+pub use config::{Config, InstanceConfig, StreamConfig, ValidationError, ValidationReport};
+pub use secret::SecretString;
+
 /// Returns the current version of RER.
 #[must_use]
 pub fn version() -> &'static str {

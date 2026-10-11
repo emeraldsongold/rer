@@ -1,0 +1,45 @@
+# Paired directional streams example
+# Demonstrates modeling command uplink (TX) and telemetry downlink (RX)
+# as a single logical interface with independent stream configurations (SPEC §6).
+
+version: "1"
+instances:
+  - id: "relay-paired"
+    name: "Ground-to-Space Relay Link"
+    mode: "debug"
+    streams:
+      - id: "cmd-uplink"
+        description: "Command transmission uplink (TCP to UDP)"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:6001"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:6002"
+          mode: "connect"
+        buffer:
+          max_queue_size: 1024
+          max_packet_size: 4096
+          drop_policy: "reject"
+
+      - id: "telem-downlink"
+        description: "Telemetry reception downlink (UDP to TCP)"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:7001"
+          mode: "listen"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:7002"
+          mode: "connect"
+        buffer:
+          max_queue_size: 4096
+          max_packet_size: 65535
+          drop_policy: "drop_oldest"
+
+    logical_interfaces:
+      - id: "spacecraft-link-0"
+        name: "Primary Spacecraft Comm Link"
+        tx_stream: "cmd-uplink"
+        rx_stream: "telem-downlink"

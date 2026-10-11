@@ -2,16 +2,14 @@
 
 This document tracks known limitations, pending features, and current operational constraints for RER (RER Engineering Relay).
 
-## 1. Project Phase: Foundation (Milestone RER-F-001)
+## 1. Project Phase: Foundation (Milestone RER-F-002)
 
-RER is currently at Milestone RER-F-001. The workspace scaffolding, build pipeline, repository governance, and CI quality gates are operational. Networking, configuration, and diagnostics features are planned in subsequent milestones per [`ROADMAP.md`](ROADMAP.md).
+RER has completed Milestone RER-F-001 (repository foundation and CI) and Milestone RER-F-002 (configuration model, validation CLI, and schema). Network socket forwarding, traffic generation, and telemetry features are planned in subsequent milestones per [`ROADMAP.md`](ROADMAP.md).
 
 ## 2. Unimplemented Features (By Design for Current Milestone)
 
-- **Configuration Validation (`RER-F-002`)**:
-  `rer validate` and YAML configuration file loading are not yet implemented. Executable currently reports package version only.
 - **UDP and TCP Forwarding (`RER-F-003`, `RER-F-005`)**:
-  Network socket handling, datagram forwarding, TCP stream proxying, backpressure handling, and conversion modes are not yet implemented.
+  Network socket handling, datagram forwarding, TCP stream proxying, backpressure handling, and conversion modes are not yet implemented. Executable currently supports configuration validation (`rer validate`) and effective inspection (`rer inspect`).
 - **Traffic Generator & Simulation Harness (`RER-F-004`, `RER-F-010`)**:
   Synthetic network simulation harness and end-to-end multi-hop topology testing are not yet implemented.
 - **Management API & Telemetry (`RER-F-007`, `RER-F-012`)**:
@@ -23,5 +21,5 @@ RER is currently at Milestone RER-F-001. The workspace scaffolding, build pipeli
 
 ## 3. Tooling and CI Tracking
 
-- **Dependency Advisory and License Checks**:
-  Automated CI steps for dependency vulnerability scanning and license compliance (such as `cargo-deny` or `cargo-audit`) are not yet active in `.github/workflows/ci.yml`. Because agents cannot edit `.github/` files directly (ADR-0003), this workflow step is pending owner integration.
+- **Configuration Schema CI Step**:
+  JSON schema validation for all example configurations is enforced via automated integration tests (`crates/rer/tests/config_validation.rs`). Direct workflow integration in `.github/workflows/` remains pending owner integration due to agent boundaries.

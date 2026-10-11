@@ -1,0 +1,19 @@
+# Minimal RER configuration
+# Defines a single relay instance forwarding UDP datagrams from port 5000 to port 5001.
+
+version: "1"
+instances:
+  - id: "relay-minimal"
+    name: "Minimal UDP Relay"
+    mode: "production"
+    streams:
+      - id: "udp-forwarder"
+        description: "Unidirectional UDP datagram forwarder"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+          mode: "connect"

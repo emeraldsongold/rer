@@ -1,0 +1,368 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RER Configuration Schema",
+  "description": "Configuration schema for RER (RER Engineering Relay)",
+  "type": "object",
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "instance": {
+      "description": "Single instance configuration (alternative to `instances`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/InstanceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "instances": {
+      "description": "List of RER relay instances.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/InstanceConfig"
+      }
+    },
+    "version": {
+      "description": "Configuration format version (e.g. \"1\" or \"1.0\").",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "BufferConfig": {
+      "description": "Buffer and queue bounding configuration (SPEC §17).",
+      "type": "object",
+      "properties": {
+        "drop_policy": {
+          "description": "Drop policy under queue exhaustion.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DropPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_packet_size": {
+          "description": "Maximum packet size in bytes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "max_queue_size": {
+          "description": "Maximum queue size in packets.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionMode": {
+      "description": "Connection modes for endpoints.",
+      "type": "string",
+      "enum": [
+        "listen",
+        "connect"
+      ]
+    },
+    "DropPolicy": {
+      "description": "Drop policies under queue exhaustion.",
+      "type": "string",
+      "enum": [
+        "drop_oldest",
+        "drop_newest",
+        "reject"
+      ]
+    },
+    "EndpointConfig": {
+      "description": "Network endpoint configuration.",
+      "type": "object",
+      "required": [
+        "address",
+        "transport"
+      ],
+      "properties": {
+        "address": {
+          "description": "Network endpoint address in \"host:port\" format (e.g. \"127.0.0.1:5000\").",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Connection mode (\"listen\" or \"connect\").",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConnectionMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transport": {
+          "description": "Transport protocol (\"udp\" or \"tcp\").",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TransportType"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "InstanceConfig": {
+      "description": "Configuration for an individual RER relay instance.",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "buffer": {
+          "description": "Instance-level bounded buffer and queue limits.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BufferConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Unique identity of the instance.",
+          "type": "string"
+        },
+        "logical_interfaces": {
+          "description": "Logical interfaces pairing directional streams.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LogicalInterfaceConfig"
+          }
+        },
+        "management": {
+          "description": "Management and diagnostics interface configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ManagementConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "description": "Diagnostic and operational profile (\"production\", \"debug\", or \"test\").",
+          "default": "production",
+          "allOf": [
+            {
+              "$ref": "#/definitions/OperationalMode"
+            }
+          ]
+        },
+        "name": {
+          "description": "Human-readable name or label for the instance.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "streams": {
+          "description": "Forwarding streams configured on this instance.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StreamConfig"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LogicalInterfaceConfig": {
+      "description": "Logical interface pairing directional streams (SPEC §6).",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "description": "Unique identity of the logical interface.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable label or description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rx_stream": {
+          "description": "Receive / downlink stream identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tx_stream": {
+          "description": "Transmit / uplink stream identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManagementConfig": {
+      "description": "Management plane configuration (SPEC §9).",
+      "type": "object",
+      "required": [
+        "endpoint"
+      ],
+      "properties": {
+        "auth_token": {
+          "description": "Optional authentication token for remote management.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "description": "Whether the management plane is enabled.",
+          "default": true,
+          "type": "boolean"
+        },
+        "endpoint": {
+          "description": "Bind address or socket path (e.g. \"127.0.0.1:9090\" or \"/run/rer/mgmt.sock\").",
+          "type": "string"
+        },
+        "tls": {
+          "description": "Optional TLS configuration for remote management.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TlsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "OperationalMode": {
+      "description": "Operational diagnostic modes (SPEC §10).",
+      "type": "string",
+      "enum": [
+        "production",
+        "debug",
+        "test"
+      ]
+    },
+    "SecretString": {
+      "description": "A sensitive string value (e.g. token or secret) redacted in effective configurations",
+      "writeOnly": true,
+      "type": "string"
+    },
+    "StreamConfig": {
+      "description": "Configuration for a forwarding stream (SPEC §5).",
+      "type": "object",
+      "required": [
+        "id",
+        "source"
+      ],
+      "properties": {
+        "buffer": {
+          "description": "Optional stream-level buffer and queue limits.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BufferConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "description": "Optional description of the stream.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination": {
+          "description": "Stream destination endpoint (conflicts with `destinations`).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EndpointConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destinations": {
+          "description": "Multiple destination endpoints for fan-out (conflicts with `destination`).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/EndpointConfig"
+          }
+        },
+        "id": {
+          "description": "Unique identity of the stream.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Stream forwarding source.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EndpointConfig"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TlsConfig": {
+      "description": "TLS configuration for management traffic encryption.",
+      "type": "object",
+      "required": [
+        "cert_file",
+        "key_file"
+      ],
+      "properties": {
+        "cert_file": {
+          "description": "Path to TLS certificate file.",
+          "type": "string"
+        },
+        "key_file": {
+          "description": "Path to TLS private key file.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TransportType": {
+      "description": "Supported transport protocols (SPEC §5).",
+      "type": "string",
+      "enum": [
+        "udp",
+        "tcp"
+      ]
+    }
+  }
+}
