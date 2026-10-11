@@ -1,0 +1,25 @@
+# Management authentication and TLS configuration example
+# Demonstrates securing the management plane with token auth and TLS (SPEC §9, §17).
+
+version: "1"
+instances:
+  - id: "relay-secure-mgmt"
+    name: "Secure Management Node"
+    mode: "production"
+    management:
+      enabled: true
+      endpoint: "127.0.0.1:9443"
+      auth_token: "example-token-for-testing"
+      tls:
+        cert_file: "/etc/rer/certs/server.crt"
+        key_file: "/etc/rer/certs/server.key"
+    streams:
+      - id: "secure-stream"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:4000"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:4001"
+          mode: "connect"

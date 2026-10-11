@@ -1,0 +1,40 @@
+# Multi-instance RER topology configuration
+# Demonstrates multiple distinct relay instances running with dedicated IDs and streams (SPEC §5).
+
+version: "1"
+instances:
+  - id: "relay-gateway-edge"
+    name: "Edge Network Relay Gateway"
+    mode: "production"
+    management:
+      enabled: true
+      endpoint: "127.0.0.1:9091"
+    streams:
+      - id: "edge-ingress"
+        description: "Edge ingress UDP relay"
+        source:
+          transport: "udp"
+          address: "0.0.0.0:8001"
+          mode: "listen"
+        destination:
+          transport: "tcp"
+          address: "10.0.1.5:8002"
+          mode: "connect"
+
+  - id: "relay-core-hub"
+    name: "Core Hub Relay"
+    mode: "production"
+    management:
+      enabled: true
+      endpoint: "127.0.0.1:9092"
+    streams:
+      - id: "hub-distribution"
+        description: "Hub TCP-to-UDP distribution stream"
+        source:
+          transport: "tcp"
+          address: "0.0.0.0:8002"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "10.0.2.10:8003"
+          mode: "connect"

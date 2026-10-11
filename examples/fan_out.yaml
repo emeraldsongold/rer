@@ -1,0 +1,25 @@
+# Fan-out stream configuration
+# Forwards datagrams from a single source to multiple independent destinations (SPEC §5).
+
+version: "1"
+instances:
+  - id: "relay-fanout"
+    name: "Telemetry Fan-Out Broadcaster"
+    mode: "production"
+    streams:
+      - id: "telem-fanout"
+        description: "Distribute incoming telemetry to recorder, real-time display, and test observer"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:9000"
+          mode: "listen"
+        destinations:
+          - transport: "udp"
+            address: "127.0.0.1:9001"
+            mode: "connect"
+          - transport: "udp"
+            address: "127.0.0.1:9002"
+            mode: "connect"
+          - transport: "tcp"
+            address: "127.0.0.1:9003"
+            mode: "connect"

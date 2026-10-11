@@ -9,3 +9,9 @@ repository.workspace = true
 description = "RER Engineering Relay"
 
 [dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+schemars = { workspace = true }
