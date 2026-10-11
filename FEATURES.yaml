@@ -49,6 +49,7 @@ items:
       - Validation output is available as JSON for automation.
       - Effective-configuration output never prints secret values.
       - A configuration schema is maintained and checked in CI.
+    notes: "A file whose path contains 'secret' or 'credential' is accepted only as .rs or .md. CI workflow files are owner-controlled: cover the schema with a cargo test that validates every example against it, and list the CI wiring itself under unmet_criteria."
 
   - id: RER-F-003
     order: 3
