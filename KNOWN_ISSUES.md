@@ -16,10 +16,12 @@ RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone 
   Local management HTTP/JSON endpoints, runtime counters, health checks, and Prometheus metrics endpoints are not yet implemented.
 - **Diagnostic Logging & Inspection (`RER-F-008`, `RER-F-009`)**:
   Structured packet diagnostics, sequence gap detection, and hex preview facilities are not yet implemented.
-- **Packaging and Deployment Artifacts (`RER-F-013`–`RER-F-015`)**:
-  Container images (`deploy/docker`), Helm charts (`deploy/helm`), Docker Compose setups (`deploy/compose`), and OS packages (`.deb`, `.rpm`) are not yet created.
+- **Packaging and Deployment Artifacts (`RER-F-014`–`RER-F-015`)**:
+  Helm charts (`deploy/helm`, milestone RER-F-014) and OS packages (`.deb`, `.rpm`, milestone RER-F-015) are scheduled in subsequent milestones. Container images (`deploy/docker`) and Docker Compose deployments (`deploy/compose`) are implemented in Milestone RER-F-013.
 
 ## 3. Tooling and CI Tracking
 
 - **Configuration Schema CI Step**:
   JSON schema validation for all example configurations is enforced via automated integration tests (`crates/rer/tests/config_validation.rs`). Direct workflow integration in `.github/workflows/` remains pending owner integration due to agent boundaries.
+- **Docker Multi-Arch & SBOM CI Step**:
+  Docker multi-arch image builds, healthchecks, Compose configurations, and security scanning tooling are verified via automated integration tests (`crates/rer/tests/docker_compose_tests.rs`). Direct workflow integration in `.github/workflows/` remains pending owner integration due to agent boundaries.

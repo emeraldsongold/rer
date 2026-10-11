@@ -5,6 +5,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod health;
 pub mod relay;
 pub mod secret;
 pub mod signals;
@@ -13,7 +14,13 @@ pub mod sim;
 pub use config::{
     Config, DropPolicy, InstanceConfig, StreamConfig, ValidationError, ValidationReport,
 };
-pub use relay::{BoundedQueue, Datagram, Relay, StreamStats, StreamStatsSnapshot};
+pub use health::{
+    generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
+};
+pub use relay::{
+    BoundedQueue, Datagram, Relay, RelayHealthHandle, StreamHealthSnapshot, StreamStats,
+    StreamStatsSnapshot,
+};
 pub use secret::SecretString;
 pub use sim::{
     GeneratorConfig, GeneratorStats, HarnessConfig, ImpairmentConfig, Packet, ReceiverReport,

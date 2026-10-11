@@ -1,0 +1,83 @@
+# deploy/compose/docker-compose.relay-chain.yml
+# Multi-instance RER relay chain deployment (ingress -> egress -> destination)
+# Conforms to SPEC §16.C and §17: multi-instance, inter-container network, security context.
+
+services:
+  relay-ingress:
+    image: ghcr.io/emeraldsongold/rer:0.1.0
+    container_name: rer-chain-ingress
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["run", "--config", "/etc/rer/rer.yaml"]
+    volumes:
+      - ./config/chain-relay1.yaml:/etc/rer/rer.yaml:ro
+      - ingress-state:/var/lib/rer
+      - /tmp
+    ports:
+      - "5000:5000/udp"
+    networks:
+      - rer-chain-net
+    depends_on:
+      relay-egress:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rer", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+        reservations:
+          cpus: "0.10"
+          memory: 32M
+
+  relay-egress:
+    image: ghcr.io/emeraldsongold/rer:0.1.0
+    container_name: rer-chain-egress
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["run", "--config", "/etc/rer/rer.yaml"]
+    volumes:
+      - ./config/chain-relay2.yaml:/etc/rer/rer.yaml:ro
+      - egress-state:/var/lib/rer
+      - /tmp
+    ports:
+      - "5001:5001/udp"
+    networks:
+      - rer-chain-net
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rer", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+        reservations:
+          cpus: "0.10"
+          memory: 32M
+
+networks:
+  rer-chain-net:
+    driver: bridge
+
+volumes:
+  ingress-state:
+  egress-state:

@@ -161,6 +161,7 @@ pub struct StreamStatsSnapshot {
 pub struct StreamRunner {
     pub stream_id: String,
     pub stats: Arc<StreamStats>,
+    is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -311,6 +312,8 @@ impl StreamRunner {
         let fwd_queue = Arc::clone(&queue);
         let fwd_condvar = Arc::clone(&condvar);
         let fwd_done_flag = Arc::clone(&receiver_done);
+        let is_active = Arc::new(AtomicBool::new(true));
+        let fwd_is_active = Arc::clone(&is_active);
 
         let fwd_handle = thread::spawn(move || {
             // Bind outbound sockets
@@ -425,14 +428,24 @@ impl StreamRunner {
                     }
                 }
             }
+            fwd_is_active.store(false, Ordering::Relaxed);
         });
 
         Ok(Self {
             stream_id,
             stats,
+            is_active,
             shutdown_flag,
             threads: vec![recv_handle, fwd_handle],
         })
+    }
+
+    /// Returns true if this runner's threads are active and not in shutdown.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        !self.shutdown_flag.load(Ordering::Relaxed)
+            && self.is_active.load(Ordering::Relaxed)
+            && self.threads.iter().all(|t| !t.is_finished())
     }
 
     /// Stops forwarding and joins runner threads.
@@ -444,10 +457,75 @@ impl StreamRunner {
     }
 }
 
+/// Snapshot of a stream's health and packet counters.
+#[derive(Debug, Clone)]
+pub struct StreamHealthSnapshot {
+    pub stream_id: String,
+    pub is_healthy: bool,
+    pub stats: StreamStatsSnapshot,
+}
+
+/// Handle for querying relay health without transferring ownership of `Relay`.
+#[derive(Clone)]
+pub struct RelayHealthHandle {
+    stream_runners: Arc<Vec<StreamRunnerHandle>>,
+    shutdown_flag: Arc<AtomicBool>,
+    start_time: std::time::Instant,
+}
+
+#[derive(Clone)]
+struct StreamRunnerHandle {
+    stream_id: String,
+    stats: Arc<StreamStats>,
+    is_active: Arc<AtomicBool>,
+    shutdown_flag: Arc<AtomicBool>,
+}
+
+impl RelayHealthHandle {
+    /// Returns true if the relay is running and all stream runners are healthy.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        if self.shutdown_flag.load(Ordering::Relaxed) || crate::signals::is_shutdown_requested() {
+            return false;
+        }
+        if self.stream_runners.is_empty() {
+            return true;
+        }
+        self.stream_runners.iter().all(|r| {
+            r.is_active.load(Ordering::Relaxed) && !r.shutdown_flag.load(Ordering::Relaxed)
+        })
+    }
+
+    /// Returns daemon uptime in seconds.
+    #[must_use]
+    pub fn uptime_seconds(&self) -> u64 {
+        self.start_time.elapsed().as_secs()
+    }
+
+    /// Returns health snapshots for all configured streams.
+    #[must_use]
+    pub fn stream_health_snapshots(&self) -> Vec<StreamHealthSnapshot> {
+        let shutting_down =
+            self.shutdown_flag.load(Ordering::Relaxed) || crate::signals::is_shutdown_requested();
+        self.stream_runners
+            .iter()
+            .map(|r| {
+                let healthy = !shutting_down && r.is_active.load(Ordering::Relaxed);
+                StreamHealthSnapshot {
+                    stream_id: r.stream_id.clone(),
+                    is_healthy: healthy,
+                    stats: r.stats.snapshot(),
+                }
+            })
+            .collect()
+    }
+}
+
 /// A running multi-instance RER relay.
 pub struct Relay {
     stream_runners: Vec<StreamRunner>,
     shutdown_flag: Arc<AtomicBool>,
+    start_time: std::time::Instant,
 }
 
 impl Relay {
@@ -471,7 +549,28 @@ impl Relay {
         Ok(Self {
             stream_runners,
             shutdown_flag,
+            start_time: std::time::Instant::now(),
         })
+    }
+
+    /// Creates a lightweight health query handle.
+    #[must_use]
+    pub fn health_handle(&self) -> RelayHealthHandle {
+        let handles = self
+            .stream_runners
+            .iter()
+            .map(|r| StreamRunnerHandle {
+                stream_id: r.stream_id.clone(),
+                stats: Arc::clone(&r.stats),
+                is_active: Arc::clone(&r.is_active),
+                shutdown_flag: Arc::clone(&r.shutdown_flag),
+            })
+            .collect();
+        RelayHealthHandle {
+            stream_runners: Arc::new(handles),
+            shutdown_flag: Arc::clone(&self.shutdown_flag),
+            start_time: self.start_time,
+        }
     }
 
     /// Returns a list of all active stream identities.

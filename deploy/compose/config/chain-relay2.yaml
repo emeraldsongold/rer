@@ -1,0 +1,16 @@
+# RER Relay Chain: Egress Node
+# Receives telemetry from the ingress relay node and forwards it to the mission destination.
+version: "1"
+instances:
+  - id: "chain-egress"
+    streams:
+      - id: "chain-hop2"
+        source:
+          transport: "udp"
+          address: "0.0.0.0:5001"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5002"
+        buffer:
+          max_queue_size: 1024
+          drop_policy: "drop_oldest"

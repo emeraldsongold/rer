@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-013 (Docker Image and Docker Compose Deployment)
+- **Multi-Architecture Distroless Container Image**: Created multi-arch (`amd64` and `arm64`) Dockerfile based on minimal distroless base (`gcr.io/distroless/cc-debian12:nonroot`). Runs as unprivileged non-root user (UID:GID `65532:65532`) with zero added capabilities, and ships no shell or package manager in the runtime image (`deploy/docker/Dockerfile`, `Dockerfile`).
+- **Real Application Health Check**: Implemented `rer health` command querying a local Unix domain socket health server exposed by running relay instances. Exercises real application health, checking thread liveness, stream status, and packet counters without generating excessive mission network traffic (`crates/rer/src/health.rs`).
+- **CLI Status Inspection**: Implemented `rer status` CLI subcommand reporting live relay health, uptime, and per-stream traffic counters as human-readable text or structured JSON.
+- **Docker Compose Deployments**: Created complete single-instance (`deploy/compose/docker-compose.single.yml`) and multi-instance relay-chain (`deploy/compose/docker-compose.relay-chain.yml`) Compose deployments with versioned image references, non-root security settings, dropped capabilities, read-only root filesystems, resource limits, and health checks.
+- **SBOM and Vulnerability Scan Artifacts**: Generated full SPDX 2.3 JSON specification SBOM (`deploy/docker/rer.spdx.json`) and container image vulnerability scan report (`deploy/docker/vulnerability-scan.json`) with zero vulnerabilities using free tooling, along with automation script (`deploy/docker/generate-sbom-and-scan.sh`).
+- **Comprehensive Integration Tests**: Added integration test suite verifying Dockerfile specifications, image version metadata matching binary version, Compose configuration validation, real healthcheck behavior, graceful SIGTERM shutdown, and end-to-end traffic smoke tests through single and multi-hop relay chains (`crates/rer/tests/docker_compose_tests.rs`).
+
 ### Added - Milestone RER-F-004 (Initial Traffic Generator and Simulation Harness)
 - **Deterministic Traffic Generator**: Implemented synthetic traffic generator emitting packets with unique IDs (RFC 4122 v4 UUIDs), strictly increasing sequence numbers, and configurable payload size, rate, burst, duration, and PRNG seed (`crates/rer/src/sim/generator.rs`).
 - **Reproducible Packet Streams**: Guaranteed that identical seeds reproduce identical packet streams and payload hashes.
