@@ -165,3 +165,29 @@ fn test_cli_effective_config_redacts_secrets() {
     assert!(!inspect_stdout.contains("example-token-for-testing"));
     assert!(inspect_stdout.contains("[REDACTED]"));
 }
+
+#[test]
+fn test_cli_test_harness_json() {
+    let output = Command::new(rer_bin())
+        .arg("test")
+        .arg("--count")
+        .arg("20")
+        .arg("--size")
+        .arg("128")
+        .arg("--seed")
+        .arg("12345")
+        .arg("--json")
+        .output()
+        .expect("failed to execute rer test");
+
+    assert!(output.status.success(), "rer test must exit 0 on success");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON expected");
+    assert_eq!(val["pass"], true);
+    assert_eq!(val["expected_count"], 20);
+    assert_eq!(val["received_count"], 20);
+    assert_eq!(val["lost_count"], 0);
+    assert_eq!(val["duplicate_count"], 0);
+    assert_eq!(val["reordered_count"], 0);
+    assert_eq!(val["payload_hashes_verified"], true);
+}

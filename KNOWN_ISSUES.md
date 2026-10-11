@@ -2,16 +2,16 @@
 
 This document tracks known limitations, pending features, and current operational constraints for RER (RER Engineering Relay).
 
-## 1. Project Phase: Core Relay (Milestone RER-F-003)
+## 1. Project Phase: Core Relay (Milestone RER-F-004)
 
-RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone RER-F-002 (configuration model, validation CLI, and schema), and Milestone RER-F-003 (basic UDP relay engine, bounded queues, drop policies, graceful shutdown, and tests). TCP stream forwarding, traffic generation, and telemetry features are planned in subsequent milestones per [`ROADMAP.md`](ROADMAP.md).
+RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone RER-F-002 (configuration model, validation CLI, and schema), Milestone RER-F-003 (basic UDP relay engine, bounded queues, drop policies, graceful shutdown, and tests), and Milestone RER-F-004 (deterministic traffic generator, verification test receiver, loss/duplication/reorder reporting as JSON, and unprivileged simulation harness). TCP stream forwarding and management telemetry features are planned in subsequent milestones per [`ROADMAP.md`](ROADMAP.md).
 
 ## 2. Unimplemented Features (By Design for Current Milestone)
 
 - **TCP Forwarding & Protocol Conversion (`RER-F-005`)**:
   TCP stream forwarding, reconnection logic, TCP/UDP framing conversions, and slow-reader backpressure are scheduled in milestone RER-F-005. The UDP relay engine (`RER-F-003`) is functional (`rer run`).
-- **Traffic Generator & Simulation Harness (`RER-F-004`, `RER-F-010`)**:
-  Synthetic network simulation harness and end-to-end multi-hop topology testing are not yet implemented.
+- **Distributed Multi-Hop Simulation & Correlation (`RER-F-010`)**:
+  End-to-end multi-hop topology testing and distributed evidence correlation across multiple relay instances are scheduled in milestone RER-F-010. The initial traffic generator and single-relay simulation harness (`RER-F-004`) are functional (`rer test`).
 - **Management API & Telemetry (`RER-F-007`, `RER-F-012`)**:
   Local management HTTP/JSON endpoints, runtime counters, health checks, and Prometheus metrics endpoints are not yet implemented.
 - **Diagnostic Logging & Inspection (`RER-F-008`, `RER-F-009`)**:
