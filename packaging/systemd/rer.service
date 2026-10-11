@@ -1,0 +1,26 @@
+[Unit]
+Description=RER Engineering Relay
+Documentation=https://github.com/emeraldsongold/rer
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rer
+Group=rer
+ExecStart=/usr/bin/rer run --config /etc/rer/rer.yaml
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+# Sandboxing and security hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ConfigurationDirectory=rer
+StateDirectory=rer
+RuntimeDirectory=rer
+
+[Install]
+WantedBy=multi-user.target

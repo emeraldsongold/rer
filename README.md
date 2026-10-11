@@ -4,9 +4,9 @@ RER (RER Engineering Relay) is an open-source, Rust-based network relay, telemet
 
 ## Current Status
 
-RER has completed **Milestone RER-F-001** (repository foundation and CI), **Milestone RER-F-002** (configuration model, validation CLI, and schema), **Milestone RER-F-003** (basic UDP relay engine, bounded queues, drop policies, and graceful shutdown), and **Milestone RER-F-004** (deterministic traffic generator, verification test receiver, and unprivileged simulation harness). The CLI provides configuration validation (`rer validate`), machine-readable JSON reports, secret-safe inspection (`rer inspect`), UDP stream forwarding (`rer run`), and network simulation testing (`rer test`).
+RER has completed **Milestone RER-F-001** (repository foundation and CI), **Milestone RER-F-002** (configuration model, validation CLI, and schema), **Milestone RER-F-003** (basic UDP relay engine, bounded queues, drop policies, and graceful shutdown), **Milestone RER-F-004** (deterministic traffic generator, verification test receiver, and unprivileged simulation harness), and **Milestone RER-F-015** (.deb, .rpm, and standalone binary packaging). The CLI provides configuration validation (`rer validate`), machine-readable JSON reports, secret-safe inspection (`rer inspect`), UDP stream forwarding (`rer run`), and network simulation testing (`rer test`). Packaged artifacts (`.deb`, `.rpm`, `.tar.gz`) install safe defaults, example configuration, and systemd service units.
 
-Advanced transport features (TCP relays, paired streams, packet inspection, management API, and simulation harness) are defined in [`docs/SPEC.md`](docs/SPEC.md) and tracked in [`ROADMAP.md`](ROADMAP.md). They are scheduled for implementation in upcoming milestones.
+Advanced transport features (TCP relays, paired streams, packet inspection, management API, and container orchestration) are defined in [`docs/SPEC.md`](docs/SPEC.md) and tracked in [`ROADMAP.md`](ROADMAP.md). They are scheduled for implementation in upcoming milestones.
 
 ## Documentation Index
 
@@ -41,6 +41,9 @@ cargo test --all-features --locked
 
 # Build workspace
 cargo build --locked
+
+# Build deployment packages (.deb, .rpm, standalone tarballs)
+./packaging/package.sh --build
 ```
 
 No local compilation is required for issue tracking or reviews; all builds and checks run on GitHub Actions hosted Linux runners.
