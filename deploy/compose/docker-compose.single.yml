@@ -1,0 +1,39 @@
+# deploy/compose/docker-compose.single.yml
+# Single-instance RER (RER Engineering Relay) deployment
+# Conforms to SPEC §16.C and §17: non-root, minimal privileges, healthcheck, resource limits.
+
+services:
+  rer:
+    image: ghcr.io/emeraldsongold/rer:0.1.0
+    container_name: rer-single
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["run", "--config", "/etc/rer/rer.yaml"]
+    volumes:
+      - ./config/single.yaml:/etc/rer/rer.yaml:ro
+      - rer-state:/var/lib/rer
+      - /tmp
+    ports:
+      - "5000:5000/udp"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rer", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+        reservations:
+          cpus: "0.10"
+          memory: 32M
+
+volumes:
+  rer-state:
