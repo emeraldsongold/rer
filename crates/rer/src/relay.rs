@@ -925,6 +925,36 @@ impl StreamRunner {
     }
 }
 
+/// Information about a configured logical interface on an instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalInterfaceInfo {
+    pub instance_id: String,
+    pub id: String,
+    pub name: Option<String>,
+    pub tx_stream: Option<String>,
+    pub rx_stream: Option<String>,
+}
+
+/// Point-in-time statistics for a logical interface, containing directional counters.
+///
+/// In accordance with SPEC §6, pairing is a configuration context relationship:
+/// transmit (TX) and receive (RX) directions maintain completely independent counters,
+/// socket endpoints, routing, queue buffers, and error states without automatic packet correlation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalInterfaceStats {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_stream: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_stream: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_stats: Option<StreamStatsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_stats: Option<StreamStatsSnapshot>,
+}
+
 /// Snapshot of a stream's health and packet counters.
 #[derive(Debug, Clone)]
 pub struct StreamHealthSnapshot {
@@ -992,6 +1022,7 @@ impl RelayHealthHandle {
 /// A running multi-instance RER relay.
 pub struct Relay {
     stream_runners: Vec<StreamRunner>,
+    logical_interfaces: Vec<LogicalInterfaceInfo>,
     shutdown_flag: Arc<AtomicBool>,
     start_time: std::time::Instant,
 }
@@ -1004,16 +1035,27 @@ impl Relay {
     pub fn start(config: &Config) -> io::Result<Self> {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let mut stream_runners = Vec::new();
+        let mut logical_interfaces = Vec::new();
 
         for inst in config.all_instances() {
             for stream in &inst.streams {
                 let runner = StreamRunner::start(stream, &inst, Arc::clone(&shutdown_flag))?;
                 stream_runners.push(runner);
             }
+            for iface in &inst.logical_interfaces {
+                logical_interfaces.push(LogicalInterfaceInfo {
+                    instance_id: inst.id.clone(),
+                    id: iface.id.clone(),
+                    name: iface.name.clone(),
+                    tx_stream: iface.tx_stream.clone(),
+                    rx_stream: iface.rx_stream.clone(),
+                });
+            }
         }
 
         Ok(Self {
             stream_runners,
+            logical_interfaces,
             shutdown_flag,
             start_time: std::time::Instant::now(),
         })
@@ -1048,6 +1090,12 @@ impl Relay {
             .collect()
     }
 
+    /// Returns all configured logical interfaces.
+    #[must_use]
+    pub fn logical_interfaces(&self) -> &[LogicalInterfaceInfo] {
+        &self.logical_interfaces
+    }
+
     /// Retrieves statistics for a specific stream.
     #[must_use]
     pub fn stream_stats(&self, stream_id: &str) -> Option<StreamStatsSnapshot> {
@@ -1055,6 +1103,31 @@ impl Relay {
             .iter()
             .find(|r| r.stream_id == stream_id)
             .map(|r| r.stats.snapshot())
+    }
+
+    /// Retrieves statistics for a specific logical interface by ID.
+    #[must_use]
+    pub fn logical_interface_stats(&self, interface_id: &str) -> Option<LogicalInterfaceStats> {
+        let iface = self
+            .logical_interfaces
+            .iter()
+            .find(|i| i.id == interface_id)?;
+        let tx_stats = iface
+            .tx_stream
+            .as_ref()
+            .and_then(|id| self.stream_stats(id));
+        let rx_stats = iface
+            .rx_stream
+            .as_ref()
+            .and_then(|id| self.stream_stats(id));
+        Some(LogicalInterfaceStats {
+            id: iface.id.clone(),
+            name: iface.name.clone(),
+            tx_stream: iface.tx_stream.clone(),
+            rx_stream: iface.rx_stream.clone(),
+            tx_stats,
+            rx_stats,
+        })
     }
 
     /// Gracefully stops the relay, joins all worker threads, and prints statistics.
@@ -1078,6 +1151,25 @@ impl Relay {
                 snap.destination_errors,
                 snap.socket_errors,
                 snap.backpressure_events
+            );
+        }
+        for iface in &self.logical_interfaces {
+            let tx_desc = iface
+                .tx_stream
+                .as_ref()
+                .map(|s| format!("tx='{}'", s))
+                .unwrap_or_else(|| "tx=none".to_string());
+            let rx_desc = iface
+                .rx_stream
+                .as_ref()
+                .map(|s| format!("rx='{}'", s))
+                .unwrap_or_else(|| "rx=none".to_string());
+            eprintln!(
+                "[relay] Logical interface '{}' ({}): {}, {} (paired directional streams: configuration context)",
+                iface.id,
+                iface.name.as_deref().unwrap_or("unnamed"),
+                tx_desc,
+                rx_desc
             );
         }
     }

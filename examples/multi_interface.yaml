@@ -1,0 +1,91 @@
+# Multiple simultaneous logical interfaces and fan-out example (SPEC §5, §6)
+# Demonstrates:
+# 1. Multiple simultaneous logical interfaces running on a single relay instance.
+# 2. Paired directional streams (TX + RX) modeling command uplink and telemetry downlink.
+# 3. Single-direction logical interfaces (TX-only command path, RX-only science payload).
+# 4. Fan-out stream distributing ingress traffic to multiple independent destinations.
+#
+# IMPORTANT:
+# Directional pairing represents administrative and operator configuration context,
+# NOT in-band packet correlation. Transmit and receive paths operate with independent
+# endpoints, transport protocols, queues, error accounting, and routing policies.
+
+version: "1"
+instances:
+  - id: "relay-multi-iface"
+    name: "Multi-Interface Spacecraft Ground Station"
+    mode: "debug"
+    streams:
+      # Primary uplink stream (TCP to UDP)
+      - id: "primary-cmd-uplink"
+        description: "Primary spacecraft command uplink"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:8101"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:8102"
+          mode: "connect"
+        buffer:
+          max_queue_size: 1024
+          drop_policy: "reject"
+
+      # Primary downlink stream (UDP to TCP)
+      - id: "primary-telem-downlink"
+        description: "Primary spacecraft telemetry downlink"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:8201"
+          mode: "listen"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:8202"
+          mode: "connect"
+        buffer:
+          max_queue_size: 2048
+          drop_policy: "drop_oldest"
+
+      # Backup emergency command uplink (UDP to UDP, single-direction interface)
+      - id: "backup-cmd-uplink"
+        description: "Emergency backup command uplink"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:8301"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:8302"
+          mode: "connect"
+
+      # Science instrument downlink with fan-out (single-direction interface)
+      - id: "science-payload-fanout"
+        description: "Science payload data fan-out to archive recorder and real-time processing"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:8401"
+          mode: "listen"
+        destinations:
+          - transport: "udp"
+            address: "127.0.0.1:8402"
+            mode: "connect"
+          - transport: "udp"
+            address: "127.0.0.1:8403"
+            mode: "connect"
+
+    logical_interfaces:
+      # Paired directional interface (two streams: TX and RX)
+      - id: "primary-comm-link"
+        name: "Primary S-Band Bidirectional Comm Link"
+        tx_stream: "primary-cmd-uplink"
+        rx_stream: "primary-telem-downlink"
+
+      # Single-direction interface (TX only)
+      - id: "emergency-cmd-link"
+        name: "Emergency UHF Command Uplink (TX only)"
+        tx_stream: "backup-cmd-uplink"
+
+      # Single-direction interface (RX only with fan-out)
+      - id: "payload-downlink"
+        name: "Payload Instrument Downlink (RX only with fan-out)"
+        rx_stream: "science-payload-fanout"

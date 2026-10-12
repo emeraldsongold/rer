@@ -117,7 +117,20 @@ Logical interfaces associate related directional streams, such as command TX and
 | `tx_stream` | string | No* | Stream ID for the transmit/uplink direction. |
 | `rx_stream` | string | No* | Stream ID for the receive/downlink direction. |
 
-*Note: At least one of `tx_stream` or `rx_stream` must be specified, and they cannot reference the same stream ID.*
+*Note: A logical interface may contain one direction (`tx_stream` only or `rx_stream` only) or two (`tx_stream` and `rx_stream`). They cannot reference the same stream ID.*
+
+### Pairing as Configuration Context (Not Packet Correlation)
+
+Directional pairing represents an administrative and operator-context relationship, **not** in-band packet correlation (SPEC §6).
+
+- **No Implicit Association**: RER does not assume that received datagrams on an RX stream correlate with a particular command, request, or packet previously sent on a TX stream. In UDP and generic transport forwarding, pairing provides operational context for monitoring and managing related communication paths together.
+- **Directional Independence**: Each direction maintains completely independent:
+  - **Endpoints and Transports**: TX and RX can use different transports (e.g. TX over TCP, RX over UDP), addresses, and connection modes (`listen` vs. `connect`).
+  - **Counters**: Separate `received_packets`, `forwarded_packets`, `dropped_packets`, and byte counters.
+  - **Error Accounting**: Destination unreachable errors or socket faults in one direction do not impact or increment error counters in the other direction.
+  - **Routing and Queue Bounds**: Each direction has its own bounded queue, capacity, and overload drop policy.
+- **Multiple Simultaneous Interfaces**: A single relay instance can host multiple concurrent logical interfaces (paired and single-direction), processing bidirectional traffic simultaneously without cross-talk.
+- **Fan-Out Support**: Any stream within an interface or standalone can configure multiple destinations (`destinations`), forwarding datagrams to all endpoints concurrently while isolating destination errors so that a failure at one destination does not halt delivery to the others.
 
 ## 7. Buffer and Queue Limits (`BufferConfig`)
 
@@ -170,6 +183,20 @@ rer validate --json config.yaml
 rer validate --effective config.yaml
 rer inspect config.yaml
 ```
+
+### Stream and Logical Interface Inspection (`rer streams`)
+
+Inspect configured streams, directional logical interfaces, and fan-out topologies:
+
+```bash
+# Human-readable stream and interface inspection
+rer streams config.yaml
+
+# Machine-readable JSON output for automation
+rer streams --json config.yaml
+```
+
+The output highlights directional pairings, stream endpoints, transports, and configuration context notes (SPEC §6).
 
 ### Safety and Secret Handling
 

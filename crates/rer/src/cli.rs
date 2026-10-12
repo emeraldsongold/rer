@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, ValidationError, ValidationReport};
+use crate::config::{Config, ConnectionMode, ValidationError, ValidationReport};
 use crate::sim::{
     GeneratorConfig, HarnessConfig, ImpairmentConfig, SimulationHarness, TrafficGenerator,
     TrafficReceiver,
@@ -43,8 +44,8 @@ pub enum Commands {
     /// Diagnose network issues (planned)
     Diagnose(PlaceholderArgs),
 
-    /// Inspect stream configurations and state (planned)
-    Streams(PlaceholderArgs),
+    /// Inspect stream configurations and logical interfaces
+    Streams(StreamsArgs),
 
     /// View Prometheus / OpenMetrics metrics (planned)
     Metrics(PlaceholderArgs),
@@ -140,6 +141,77 @@ pub struct StatusArgs {
     /// Output report as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct StreamsArgs {
+    /// Path to YAML configuration file
+    #[arg(value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
+    /// Path to YAML configuration file (alternative flag)
+    #[arg(short, long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
+    /// Output format: text or json
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// Machine-readable JSON output (convenience alias for --format json)
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Inspection report for streams and logical interfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StreamsReport {
+    pub instances: Vec<InstanceStreamsReport>,
+}
+
+/// Streams and logical interfaces report for an instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstanceStreamsReport {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub logical_interfaces: Vec<LogicalInterfaceReport>,
+    pub standalone_streams: Vec<StreamReport>,
+}
+
+/// Representation of a logical interface pairing directional streams.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogicalInterfaceReport {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_stream: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_stream: Option<String>,
+    pub pairing_type: String,
+    pub pairing_context: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<StreamReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx: Option<StreamReport>,
+}
+
+/// Representation of an individual stream for inspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StreamReport {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub source: EndpointReport,
+    pub destinations: Vec<EndpointReport>,
+}
+
+/// Representation of an endpoint for inspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EndpointReport {
+    pub transport: String,
+    pub address: String,
+    pub mode: String,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,10 +395,7 @@ pub fn execute(cli: Cli) -> ExitCode {
             eprintln!("rer diagnose is not yet implemented (scheduled in roadmap milestone RER-F-008). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
         }
-        Commands::Streams(_) => {
-            eprintln!("rer streams is not yet implemented (scheduled in roadmap milestone RER-F-006). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Streams(args) => execute_streams(args),
         Commands::Metrics(_) => {
             eprintln!("rer metrics is not yet implemented (scheduled in roadmap milestone RER-F-012). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
@@ -417,7 +486,30 @@ fn execute_validate(args: ValidateArgs) -> ExitCode {
         };
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
     } else if is_valid {
-        println!("Configuration '{}' is valid.", target_path.display());
+        let total_streams: usize = config
+            .as_ref()
+            .map(|c| c.all_instances().iter().map(|i| i.streams.len()).sum())
+            .unwrap_or(0);
+        let total_ifaces: usize = config
+            .as_ref()
+            .map(|c| {
+                c.all_instances()
+                    .iter()
+                    .map(|i| i.logical_interfaces.len())
+                    .sum()
+            })
+            .unwrap_or(0);
+        let inst_count = config
+            .as_ref()
+            .map(|c| c.all_instances().len())
+            .unwrap_or(0);
+        println!(
+            "Configuration '{}' is valid ({} instance(s), {} stream(s), {} logical interface(s)).",
+            target_path.display(),
+            inst_count,
+            total_streams,
+            total_ifaces
+        );
         if let Some(eff) = effective_config {
             println!("--- Effective Configuration (secrets redacted) ---");
             println!("{}", eff.to_effective_yaml().unwrap());
@@ -534,39 +626,6 @@ fn execute_run(args: RunArgs) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // Verify all configured streams use supported UDP transport
-    for inst in config.all_instances() {
-        for stream in &inst.streams {
-            if stream.source.transport != crate::config::TransportType::Udp {
-                eprintln!(
-                    "Cannot run configuration: stream '{}' uses TCP source transport which is not yet implemented (scheduled in milestone RER-F-005)",
-                    stream.id
-                );
-                return ExitCode::from(1);
-            }
-            if let Some(dest) = &stream.destination {
-                if dest.transport != crate::config::TransportType::Udp {
-                    eprintln!(
-                        "Cannot run configuration: stream '{}' uses TCP destination transport which is not yet implemented (scheduled in milestone RER-F-005)",
-                        stream.id
-                    );
-                    return ExitCode::from(1);
-                }
-            }
-            if let Some(dests) = &stream.destinations {
-                for dest in dests {
-                    if dest.transport != crate::config::TransportType::Udp {
-                        eprintln!(
-                            "Cannot run configuration: stream '{}' uses TCP destination transport which is not yet implemented (scheduled in milestone RER-F-005)",
-                            stream.id
-                        );
-                        return ExitCode::from(1);
-                    }
-                }
-            }
-        }
-    }
-
     if let Err(err) = crate::signals::register_signal_handlers() {
         eprintln!("Warning: failed to register signal handlers: {}", err);
     }
@@ -591,6 +650,23 @@ fn execute_run(args: RunArgs) -> ExitCode {
                 };
 
             println!("RER relay running. Press Ctrl-C or send SIGTERM to stop.");
+            for inst in config.all_instances() {
+                if !inst.logical_interfaces.is_empty() {
+                    println!(
+                        "[relay] Active logical interfaces on instance '{}':",
+                        inst.id
+                    );
+                    for iface in &inst.logical_interfaces {
+                        let tx_name = iface.tx_stream.as_deref().unwrap_or("none");
+                        let rx_name = iface.rx_stream.as_deref().unwrap_or("none");
+                        let iface_label = iface.name.as_deref().unwrap_or(&iface.id);
+                        println!(
+                            "[relay]   - Interface '{}' ({}): tx='{}', rx='{}' (paired directional streams: configuration context)",
+                            iface.id, iface_label, tx_name, rx_name
+                        );
+                    }
+                }
+            }
             while !crate::signals::is_shutdown_requested() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -869,5 +945,264 @@ fn run_receive_cli(args: ReceiveArgs) -> ExitCode {
             eprintln!("Traffic receiver failed: {}", err);
             ExitCode::from(1)
         }
+    }
+}
+
+fn execute_streams(args: StreamsArgs) -> ExitCode {
+    let is_json = args.json || args.format == OutputFormat::Json;
+
+    let target_path = match args.file.or(args.config) {
+        Some(p) => p,
+        None => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": "missing configuration file argument; provide a path or use --config <FILE>"
+                    })
+                );
+            } else {
+                eprintln!(
+                    "Error: missing configuration file argument; provide a path or use --config <FILE>"
+                );
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let content = match fs::read_to_string(&target_path) {
+        Ok(c) => c,
+        Err(err) => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": format!("failed to read '{}': {}", target_path.display(), err)
+                    })
+                );
+            } else {
+                eprintln!("Error reading '{}': {}", target_path.display(), err);
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let config = match Config::from_yaml_str(&content) {
+        Ok(cfg) => cfg,
+        Err(errs) => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": "parse failed",
+                        "details": errs.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+                    })
+                );
+            } else {
+                eprintln!("Cannot inspect streams from invalid configuration (parse failed):");
+                for err in errs {
+                    eprintln!("  - {}", err);
+                }
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let semantic_errors = config.validate();
+    if !semantic_errors.is_empty() {
+        if is_json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "error": "validation failed",
+                    "details": semantic_errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+                })
+            );
+        } else {
+            eprintln!("Cannot inspect streams from invalid configuration (validation failed):");
+            for err in semantic_errors {
+                eprintln!("  - {}", err);
+            }
+        }
+        return ExitCode::from(1);
+    }
+
+    let report = build_streams_report(&config);
+
+    if is_json {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        print_streams_report_text(&report);
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn build_streams_report(config: &Config) -> StreamsReport {
+    let mut instances = Vec::new();
+
+    for inst in config.all_instances() {
+        let mut paired_stream_ids = std::collections::HashSet::new();
+        let mut logical_interfaces = Vec::new();
+
+        for iface in &inst.logical_interfaces {
+            let tx_report = iface.tx_stream.as_ref().and_then(|tx_id| {
+                paired_stream_ids.insert(tx_id.clone());
+                inst.streams
+                    .iter()
+                    .find(|s| &s.id == tx_id)
+                    .map(stream_to_report)
+            });
+
+            let rx_report = iface.rx_stream.as_ref().and_then(|rx_id| {
+                paired_stream_ids.insert(rx_id.clone());
+                inst.streams
+                    .iter()
+                    .find(|s| &s.id == rx_id)
+                    .map(stream_to_report)
+            });
+
+            let pairing_type = match (iface.tx_stream.is_some(), iface.rx_stream.is_some()) {
+                (true, true) => "paired".to_string(),
+                (true, false) => "tx_only".to_string(),
+                (false, true) => "rx_only".to_string(),
+                (false, false) => "none".to_string(),
+            };
+
+            let pairing_context = "Directional pairing is an operator configuration relationship; directions have independent counters, endpoints, routing, and errors without automatic packet correlation.".to_string();
+
+            logical_interfaces.push(LogicalInterfaceReport {
+                id: iface.id.clone(),
+                name: iface.name.clone(),
+                tx_stream: iface.tx_stream.clone(),
+                rx_stream: iface.rx_stream.clone(),
+                pairing_type,
+                pairing_context,
+                tx: tx_report,
+                rx: rx_report,
+            });
+        }
+
+        let standalone_streams = inst
+            .streams
+            .iter()
+            .filter(|s| !paired_stream_ids.contains(&s.id))
+            .map(stream_to_report)
+            .collect();
+
+        instances.push(InstanceStreamsReport {
+            id: inst.id.clone(),
+            name: inst.name.clone(),
+            logical_interfaces,
+            standalone_streams,
+        });
+    }
+
+    StreamsReport { instances }
+}
+
+fn stream_to_report(stream: &crate::config::StreamConfig) -> StreamReport {
+    let source_mode = stream.source.mode.unwrap_or(ConnectionMode::Listen);
+    let source = EndpointReport {
+        transport: format!("{:?}", stream.source.transport).to_lowercase(),
+        address: stream.source.address.clone(),
+        mode: format!("{:?}", source_mode).to_lowercase(),
+    };
+
+    let mut destinations = Vec::new();
+    if let Some(dest) = &stream.destination {
+        let dest_mode = dest.mode.unwrap_or(ConnectionMode::Connect);
+        destinations.push(EndpointReport {
+            transport: format!("{:?}", dest.transport).to_lowercase(),
+            address: dest.address.clone(),
+            mode: format!("{:?}", dest_mode).to_lowercase(),
+        });
+    }
+    if let Some(dests) = &stream.destinations {
+        for dest in dests {
+            let dest_mode = dest.mode.unwrap_or(ConnectionMode::Connect);
+            destinations.push(EndpointReport {
+                transport: format!("{:?}", dest.transport).to_lowercase(),
+                address: dest.address.clone(),
+                mode: format!("{:?}", dest_mode).to_lowercase(),
+            });
+        }
+    }
+
+    StreamReport {
+        id: stream.id.clone(),
+        description: stream.description.clone(),
+        source,
+        destinations,
+    }
+}
+
+fn print_streams_report_text(report: &StreamsReport) {
+    println!("Streams and Logical Interfaces:");
+    println!("===============================");
+    for inst in &report.instances {
+        let inst_label = match &inst.name {
+            Some(name) => format!("Instance '{}' ({}):", inst.id, name),
+            None => format!("Instance '{}':", inst.id),
+        };
+        println!("{}", inst_label);
+
+        println!("  Logical Interfaces ({}):", inst.logical_interfaces.len());
+        if inst.logical_interfaces.is_empty() {
+            println!("    (none configured)");
+        } else {
+            for iface in &inst.logical_interfaces {
+                let iface_label = match &iface.name {
+                    Some(name) => format!("'{}' ({})", iface.id, name),
+                    None => format!("'{}'", iface.id),
+                };
+                println!("    - Interface {}:", iface_label);
+                let pairing_desc = match iface.pairing_type.as_str() {
+                    "paired" => "Paired directional streams (TX + RX)",
+                    "tx_only" => "Single directional stream (TX only)",
+                    "rx_only" => "Single directional stream (RX only)",
+                    _ => "Unspecified",
+                };
+                println!("      Type: {}", pairing_desc);
+                println!(
+                    "      Context: Configuration and operator context (independent counters, endpoints, routing; no automatic packet correlation)"
+                );
+
+                if let Some(tx) = &iface.tx {
+                    print_stream_details("TX Direction", tx, "      ");
+                }
+                if let Some(rx) = &iface.rx {
+                    print_stream_details("RX Direction", rx, "      ");
+                }
+            }
+        }
+
+        println!("  Standalone Streams ({}):", inst.standalone_streams.len());
+        if inst.standalone_streams.is_empty() {
+            println!("    (none configured)");
+        } else {
+            for stream in &inst.standalone_streams {
+                print_stream_details(&format!("Stream '{}'", stream.id), stream, "    ");
+            }
+        }
+    }
+}
+
+fn print_stream_details(label: &str, stream: &StreamReport, indent: &str) {
+    println!("{}{}:", indent, label);
+    println!("{}  Stream ID: {}", indent, stream.id);
+    if let Some(desc) = &stream.description {
+        println!("{}  Description: {}", indent, desc);
+    }
+    println!(
+        "{}  Source: {} {} ({})",
+        indent, stream.source.transport, stream.source.address, stream.source.mode
+    );
+    println!("{}  Destination(s):", indent);
+    for dest in &stream.destinations {
+        println!(
+            "{}    * {} {} ({})",
+            indent, dest.transport, dest.address, dest.mode
+        );
     }
 }

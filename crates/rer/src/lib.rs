@@ -13,16 +13,18 @@ pub mod signals;
 pub mod sim;
 
 pub use config::{
-    Config, DropPolicy, InstanceConfig, StreamConfig, ValidationError, ValidationReport,
+    Config, DropPolicy, InstanceConfig, LogicalInterfaceConfig, StreamConfig, ValidationError,
+    ValidationReport,
 };
 pub use framing::{encode_frame, read_frame, write_frame};
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
 };
 pub use relay::{
-    BoundedQueue, Datagram, Relay, RelayHealthHandle, StreamHealthSnapshot, StreamStats,
-    StreamStatsSnapshot,
+    BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,
+    StreamHealthSnapshot, StreamStats, StreamStatsSnapshot,
 };
+
 pub use secret::SecretString;
 pub use sim::{
     GeneratorConfig, GeneratorStats, HarnessConfig, ImpairmentConfig, Packet, ReceiverReport,

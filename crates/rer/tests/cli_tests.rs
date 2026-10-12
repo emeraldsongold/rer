@@ -191,3 +191,106 @@ fn test_cli_test_harness_json() {
     assert_eq!(val["reordered_count"], 0);
     assert_eq!(val["payload_hashes_verified"], true);
 }
+
+#[test]
+fn test_cli_streams_paired_text() {
+    let example = repo_root().join("examples").join("paired_streams.yaml");
+    let output = Command::new(rer_bin())
+        .arg("streams")
+        .arg(&example)
+        .output()
+        .expect("failed to execute rer streams");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Streams and Logical Interfaces:"));
+    assert!(stdout.contains("spacecraft-link-0"));
+    assert!(stdout.contains("Primary Spacecraft Comm Link"));
+    assert!(stdout.contains("Paired directional streams (TX + RX)"));
+    assert!(stdout.contains("cmd-uplink"));
+    assert!(stdout.contains("telem-downlink"));
+    assert!(stdout.contains("Configuration and operator context"));
+    assert!(stdout.contains("no automatic packet correlation"));
+}
+
+#[test]
+fn test_cli_streams_paired_json() {
+    let example = repo_root().join("examples").join("paired_streams.yaml");
+    let output = Command::new(rer_bin())
+        .arg("streams")
+        .arg("--json")
+        .arg(&example)
+        .output()
+        .expect("failed to execute rer streams --json");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON expected");
+    let instances = val["instances"].as_array().expect("instances array");
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0]["id"], "relay-paired");
+
+    let ifaces = instances[0]["logical_interfaces"]
+        .as_array()
+        .expect("logical_interfaces array");
+    assert_eq!(ifaces.len(), 1);
+    assert_eq!(ifaces[0]["id"], "spacecraft-link-0");
+    assert_eq!(ifaces[0]["pairing_type"], "paired");
+    assert_eq!(ifaces[0]["tx_stream"], "cmd-uplink");
+    assert_eq!(ifaces[0]["rx_stream"], "telem-downlink");
+    assert!(ifaces[0]["pairing_context"]
+        .as_str()
+        .unwrap()
+        .contains("without automatic packet correlation"));
+    assert_eq!(ifaces[0]["tx"]["id"], "cmd-uplink");
+    assert_eq!(ifaces[0]["rx"]["id"], "telem-downlink");
+}
+
+#[test]
+fn test_cli_streams_multi_interface_json() {
+    let example = repo_root().join("examples").join("multi_interface.yaml");
+    let output = Command::new(rer_bin())
+        .arg("streams")
+        .arg("--json")
+        .arg(&example)
+        .output()
+        .expect("failed to execute rer streams --json on multi_interface.yaml");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON expected");
+    let instances = val["instances"].as_array().expect("instances array");
+    let ifaces = instances[0]["logical_interfaces"]
+        .as_array()
+        .expect("logical_interfaces array");
+    assert_eq!(ifaces.len(), 3);
+
+    // Primary paired link
+    assert_eq!(ifaces[0]["id"], "primary-comm-link");
+    assert_eq!(ifaces[0]["pairing_type"], "paired");
+
+    // Emergency single-direction (TX only)
+    assert_eq!(ifaces[1]["id"], "emergency-cmd-link");
+    assert_eq!(ifaces[1]["pairing_type"], "tx_only");
+    assert_eq!(ifaces[1]["tx_stream"], "backup-cmd-uplink");
+    assert!(ifaces[1]["rx_stream"].is_null());
+
+    // Payload single-direction (RX only with fanout)
+    assert_eq!(ifaces[2]["id"], "payload-downlink");
+    assert_eq!(ifaces[2]["pairing_type"], "rx_only");
+    assert!(ifaces[2]["tx_stream"].is_null());
+    assert_eq!(ifaces[2]["rx_stream"], "science-payload-fanout");
+    assert_eq!(ifaces[2]["rx"]["destinations"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_cli_streams_missing_file_error() {
+    let output = Command::new(rer_bin())
+        .arg("streams")
+        .output()
+        .expect("failed to execute rer streams without file");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing configuration file argument"));
+}
