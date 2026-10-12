@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Truth in Documentation Enforcement**: Formally reinforced SPEC §4 requirement that a successful compile alone is never claimed as support, designating legacy Linux systems as unsupported for standard dynamic packages while verifying static musl standalone binary functionality where feasible.
 - **Automated Integration Tests**: Added integration test suite (`crates/rer/tests/legacy_compat_tests.rs`) validating script execution, glibc dependency analysis, systemd compatibility constraints, and documentation integrity.
 
+### Added - Milestone RER-F-007 (Management API and CLI status, health, and counters)
+- **Approved Management Architecture**: Documented architectural approval in ADR-0004 for the versioned JSON management API, its transports, roles, and authentication scheme (`DECISIONS.md`).
+- **Versioned JSON Management API**: Implemented versioned JSON wire envelope protocol (`v1`) with structured request/response framing, version validation, and action dispatch (`crates/rer/src/management.rs`).
+- **Default Local Management & Secure Remote Endpoints**: Local Unix-domain socket management enabled by default; remote management disabled by default and strictly requiring authentication (`auth_token`) and encryption (`tls` with cert and key) when enabled across network interfaces (`crates/rer/src/config.rs`).
+- **Data Plane Fault Containment**: Isolated management server execution onto background threads with per-connection panic containment (`panic::catch_unwind`), guaranteeing that control-plane socket errors, malformed payloads, or client timeouts cannot halt or disrupt packet forwarding.
+- **CLI Telemetry Subcommands**:
+  - `rer status`: Reports live relay health, application version, uptime, and detailed packet/byte counters as human-readable text or machine-readable JSON.
+  - `rer streams`: Supports static YAML file inspection and live runtime query of active streams, states, and directional logical interfaces with counters.
+  - `rer metrics`: Implemented metrics reporting providing aggregate and per-stream packet, byte, drop, queue depth, error, and uptime counters in JSON, tabular text, and OpenMetrics/Prometheus exposition format.
+- **Operation Separation & Security**: Segregated read-only diagnostics (`status`, `health`, `streams`, `metrics`, `version`, `inspect_config`) from behavior-changing operations (`set_log_level`, `trigger_test`), and strictly prohibited shell command injection and arbitrary code execution (`exec`, `shell`, `sh`, `bash`, `system`).
+- **Integration Test Suite**: Added comprehensive tests verifying management failure isolation, CLI commands, remote authentication/TLS enforcement, and operation role restrictions (`crates/rer/tests/management_tests.rs`).
+
 ### Added - Milestone RER-F-014 (Helm Chart and Kubernetes Deployment Tests)
 - **Helm Chart Packaging**: Created complete Helm chart (`deploy/helm/rer`) matching application version (`0.1.0`), providing Deployment, Service, ServiceAccount, ConfigMap, PodDisruptionBudget, ServiceMonitor, and PVC templates conforming to SPEC §16.D.
 - **Values Schema Validation**: Implemented JSON Schema Draft 7 specification (`deploy/helm/rer/values.schema.json`) validating chart values, types, required properties, and port definitions across default values, simple deployment (`values-simple.yaml`), and multi-instance topology (`values-multi-instance.yaml`).

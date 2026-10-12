@@ -65,3 +65,36 @@ SPEC §1, §18, and §19 require reproducible GitHub Actions CI on public hosted
 ### Consequences
 - Pipeline stability and security are maintained under owner control.
 - Changes cannot silently bypass quality gates.
+
+---
+
+## ADR-0004: Versioned JSON Management API, Transports, and Authentication Design
+
+- **Status**: Accepted (Approved by Project Owner)
+- **Date**: 2026-10-12
+- **Deciders**: Ronald Edward Reeves Jr (Project Owner), Implementation Agent
+
+### Context
+SPEC §7, §9, §17 require a versioned JSON management API separate from the data forwarding plane. Management plane failures must never disrupt or stop the data plane. Local management via Unix-domain sockets (UDS) must be active by default. Remote management must be off by default and strictly authenticated and encrypted when enabled. Read-only diagnostics must be separated from behavior-changing operations, and no command may execute shell commands or arbitrary code.
+
+### Decision
+The project owner approved the design for the versioned JSON management API, its transports, operational roles, and authentication scheme:
+1. **Transports**:
+   - **Local Management (Default)**: Enabled by default using local Unix-domain sockets (UDS, default `/tmp/relay_health.sock` or instance-configured endpoint). Protected by host filesystem permissions.
+   - **Remote Management**: Off by default. When enabled across non-loopback network interfaces, it strictly requires both authentication (`auth_token`) and encryption (`tls` with certificate and private key). Configurations with unauthenticated or plaintext remote management endpoints are rejected during configuration validation.
+2. **Versioned JSON Protocol**:
+   - Explicit version envelope (`"version": "v1"`) on all requests and responses. Mismatched or unsupported API versions return a structured `unsupported_version` error without affecting relay state.
+   - Request structure: `{"version": "v1", "action": "<action>", "auth_token": "...", "role": "...", "params": { ... }}`.
+   - Response structure: `{"version": "v1", "status": "ok"|"error", "action": "...", "data": { ... }, "error": { ... }}`.
+   - Backward compatibility: Preserves compatibility with existing health monitoring probes by providing top-level status, version, uptime, and stream lists.
+3. **Operational Separation and Security**:
+   - Operations are partitioned into `ReadOnly` (`status`, `health`, `streams`, `metrics`, `version`, `inspect_config`) and `BehaviorChanging` (`set_log_level`, `trigger_test`).
+   - Read-only clients (`role: "readonly"`) are prohibited from executing behavior-changing actions.
+   - Strict prohibition against arbitrary shell commands and code execution: actions such as `exec`, `shell`, `sh`, `bash`, `system` are explicitly denied with `forbidden`.
+4. **Data-Plane Isolation and Fault Containment**:
+   - The management plane executes in background threads isolated from the packet forwarding loops.
+   - Connection handling wraps request execution in panic catches (`std::panic::catch_unwind`). Client disconnects, malformed JSON, slowloris timeouts, and management thread panics cannot disrupt packet forwarding or corrupt relay counters.
+
+### Consequences
+- Operators and automated systems have unified, secure JSON and CLI access to instance health, stream state, and counters.
+- Forwarding availability remains 100% isolated from control-plane socket faults or attacks.

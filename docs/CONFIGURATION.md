@@ -186,18 +186,49 @@ rer inspect config.yaml
 
 ### Stream and Logical Interface Inspection (`rer streams`)
 
-Inspect configured streams, directional logical interfaces, and fan-out topologies:
+Inspect configured streams, directional logical interfaces, and fan-out topologies statically from configuration files or dynamically from running instances:
 
 ```bash
-# Human-readable stream and interface inspection
+# Human-readable static configuration inspection
 rer streams config.yaml
 
 # Machine-readable JSON output for automation
 rer streams --json config.yaml
+
+# Query active streams and runtime counters from a running instance
+rer streams --socket /tmp/relay_health.sock
+rer streams --socket /tmp/relay_health.sock --json
 ```
 
 The output highlights directional pairings, stream endpoints, transports, and configuration context notes (SPEC §6).
 
+### Instance Status and Health (`rer status`)
+
+Query instance status, version, uptime, health state, and stream counters from a running instance:
+
+```bash
+# Human-readable status output
+rer status --socket /tmp/relay_health.sock
+
+# Machine-readable JSON output for automation
+rer status --socket /tmp/relay_health.sock --json
+```
+
+### Metrics and Counters (`rer metrics`)
+
+Inspect point-in-time packet, byte, drop, queue depth, error, and uptime counters:
+
+```bash
+# Tabular counters summary
+rer metrics --socket /tmp/relay_health.sock
+
+# JSON metrics output
+rer metrics --socket /tmp/relay_health.sock --json
+
+# OpenMetrics / Prometheus exposition format
+rer metrics --socket /tmp/relay_health.sock --format prometheus
+```
+
 ### Safety and Secret Handling
 
-Sensitive fields (such as `auth_token`) are typed as `SecretString` and are masked as `[REDACTED]` when printing effective configuration via `rer validate --effective` or `rer inspect`.
+Sensitive fields (such as `auth_token`) are typed as `SecretString` and are masked as `[REDACTED]` when printing effective configuration via `rer validate --effective` or `rer inspect`. Remote management across network interfaces requires authentication and TLS encryption (SPEC §9, §17).

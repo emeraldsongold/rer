@@ -1,14 +1,11 @@
-use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::management::ManagementServer;
 use crate::relay::RelayHealthHandle;
 
 /// Status string values for health reporting.
@@ -44,98 +41,47 @@ pub struct StreamHealthReport {
     pub dropped_packets: u64,
     /// Total destination and socket errors.
     pub errors: u64,
+    /// Total received bytes.
+    #[serde(default)]
+    pub received_bytes: u64,
+    /// Total forwarded bytes.
+    #[serde(default)]
+    pub forwarded_bytes: u64,
+    /// Drops caused by queue full.
+    #[serde(default)]
+    pub drops_queue_full: u64,
+    /// Drops caused by oversized packets.
+    #[serde(default)]
+    pub drops_oversized: u64,
+    /// Destination errors.
+    #[serde(default)]
+    pub destination_errors: u64,
+    /// Socket errors.
+    #[serde(default)]
+    pub socket_errors: u64,
+    /// Backpressure events.
+    #[serde(default)]
+    pub backpressure_events: u64,
 }
 
 /// A background Unix-domain socket server providing health status and metrics.
 pub struct HealthServer {
-    socket_path: PathBuf,
-    shutdown_flag: Arc<AtomicBool>,
-    thread_handle: Option<JoinHandle<()>>,
+    server: ManagementServer,
 }
 
 impl HealthServer {
     /// Starts the health server listening on the specified Unix domain socket.
     ///
-    /// Cleans up any stale socket file before binding.
-    ///
     /// # Errors
     /// Returns an `io::Error` if binding the UnixListener fails.
     pub fn start(socket_path: &Path, health_handle: RelayHealthHandle) -> io::Result<Self> {
-        // If socket file already exists, check if another process is active; if not, remove it.
-        if socket_path.exists() {
-            if UnixStream::connect(socket_path).is_err() {
-                let _ = fs::remove_file(socket_path);
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    format!(
-                        "health socket '{}' is already in use by another instance",
-                        socket_path.display()
-                    ),
-                ));
-            }
-        }
-
-        // Ensure parent directory exists
-        if let Some(parent) = socket_path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = fs::create_dir_all(parent);
-            }
-        }
-
-        let listener = UnixListener::bind(socket_path)?;
-        listener.set_nonblocking(true)?;
-
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = Arc::clone(&shutdown_flag);
-        let path_clone = socket_path.to_path_buf();
-
-        let thread_handle = thread::spawn(move || {
-            while !worker_shutdown.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let report = generate_health_report(&health_handle);
-                        if let Ok(json) = serde_json::to_string(&report) {
-                            let _ = writeln!(stream, "{json}");
-                            let _ = stream.flush();
-                        }
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(_) => {
-                        thread::sleep(Duration::from_millis(50));
-                    }
-                }
-            }
-            // Clean up socket file on shutdown
-            let _ = fs::remove_file(&path_clone);
-        });
-
-        Ok(Self {
-            socket_path: socket_path.to_path_buf(),
-            shutdown_flag,
-            thread_handle: Some(thread_handle),
-        })
+        let server = ManagementServer::start_local(socket_path, health_handle, None)?;
+        Ok(Self { server })
     }
 
     /// Stops the health server, waits for the background thread, and unlinks the socket.
-    pub fn stop(mut self) {
-        self.shutdown_flag.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
-        }
-        let _ = fs::remove_file(&self.socket_path);
-    }
-}
-
-impl Drop for HealthServer {
-    fn drop(&mut self) {
-        self.shutdown_flag.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
-        }
-        let _ = fs::remove_file(&self.socket_path);
+    pub fn stop(self) {
+        self.server.stop();
     }
 }
 
@@ -162,6 +108,13 @@ pub fn generate_health_report(handle: &RelayHealthHandle) -> HealthReport {
             forwarded_packets: s.stats.forwarded_packets,
             dropped_packets: s.stats.dropped_packets,
             errors: s.stats.destination_errors + s.stats.socket_errors,
+            received_bytes: s.stats.received_bytes,
+            forwarded_bytes: s.stats.forwarded_bytes,
+            drops_queue_full: s.stats.drops_queue_full,
+            drops_oversized: s.stats.drops_oversized,
+            destination_errors: s.stats.destination_errors,
+            socket_errors: s.stats.socket_errors,
+            backpressure_events: s.stats.backpressure_events,
         })
         .collect();
 
@@ -178,12 +131,28 @@ pub fn generate_health_report(handle: &RelayHealthHandle) -> HealthReport {
 /// # Errors
 /// Returns an `io::Error` if connection fails, times out, or returns invalid data.
 pub fn query_health(socket_path: &Path, timeout: Duration) -> io::Result<HealthReport> {
-    let stream = UnixStream::connect(socket_path)?;
+    let mut stream = UnixStream::connect(socket_path)?;
     stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
+    let req = serde_json::json!({
+        "version": "v1",
+        "action": "health"
+    });
+    let _ = writeln!(stream, "{req}");
+    let _ = stream.flush();
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
     reader.read_line(&mut response_line)?;
+
+    if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&response_line) {
+        if let Some(data) = envelope.get("data") {
+            if let Ok(rep) = serde_json::from_value::<HealthReport>(data.clone()) {
+                return Ok(rep);
+            }
+        }
+    }
 
     serde_json::from_str::<HealthReport>(&response_line).map_err(|err| {
         io::Error::new(
