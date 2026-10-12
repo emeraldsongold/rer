@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod framing;
 pub mod health;
+pub mod management;
 pub mod relay;
 pub mod secret;
 pub mod signals;
@@ -19,6 +20,12 @@ pub use config::{
 pub use framing::{encode_frame, read_frame, write_frame};
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
+};
+pub use management::{
+    query_metrics, query_status, query_streams, query_version, AggregateCounters, ManagementError,
+    ManagementRequest, ManagementResponse, ManagementServer, MetricsReport, OperationType,
+    StatusReport, StreamStatusReport, StreamsManagementReport, VersionReport,
+    DEFAULT_MANAGEMENT_SOCKET, MGMT_API_VERSION,
 };
 pub use relay::{
     BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,

@@ -47,8 +47,8 @@ pub enum Commands {
     /// Inspect stream configurations and logical interfaces
     Streams(StreamsArgs),
 
-    /// View Prometheus / OpenMetrics metrics (planned)
-    Metrics(PlaceholderArgs),
+    /// View Prometheus / OpenMetrics metrics and relay counters
+    Metrics(MetricsArgs),
 
     /// Capture network traffic (planned)
     Capture(PlaceholderArgs),
@@ -134,6 +134,14 @@ pub struct StatusArgs {
     #[arg(long, default_value = "/tmp/relay_health.sock")]
     pub socket: PathBuf,
 
+    /// Remote management endpoint for status probe (e.g. 127.0.0.1:9443)
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// Authentication token for management probe
+    #[arg(long)]
+    pub auth_token: Option<String>,
+
     /// Timeout in seconds to wait for status response
     #[arg(short, long, default_value = "2.0")]
     pub timeout: f64,
@@ -141,6 +149,40 @@ pub struct StatusArgs {
     /// Output report as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MetricsArgs {
+    /// Path to Unix domain socket for metrics probe
+    #[arg(long, default_value = "/tmp/relay_health.sock")]
+    pub socket: PathBuf,
+
+    /// Remote management endpoint for metrics probe (e.g. 127.0.0.1:9443)
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// Authentication token for management probe
+    #[arg(long)]
+    pub auth_token: Option<String>,
+
+    /// Timeout in seconds to wait for metrics response
+    #[arg(short, long, default_value = "2.0")]
+    pub timeout: f64,
+
+    /// Output format: text, json, or prometheus
+    #[arg(short, long, value_enum, default_value_t = MetricsFormat::Text)]
+    pub format: MetricsFormat,
+
+    /// Machine-readable JSON output (convenience alias for --format json)
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetricsFormat {
+    Text,
+    Json,
+    Prometheus,
 }
 
 #[derive(Args, Debug)]
@@ -152,6 +194,22 @@ pub struct StreamsArgs {
     /// Path to YAML configuration file (alternative flag)
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Path to Unix domain socket for querying running instance
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+
+    /// Remote management endpoint for querying running instance
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// Authentication token for management probe
+    #[arg(long)]
+    pub auth_token: Option<String>,
+
+    /// Timeout in seconds to wait for response
+    #[arg(long, default_value = "2.0")]
+    pub timeout: f64,
 
     /// Output format: text or json
     #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
@@ -396,10 +454,7 @@ pub fn execute(cli: Cli) -> ExitCode {
             ExitCode::from(1)
         }
         Commands::Streams(args) => execute_streams(args),
-        Commands::Metrics(_) => {
-            eprintln!("rer metrics is not yet implemented (scheduled in roadmap milestone RER-F-012). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Metrics(args) => execute_metrics(args),
         Commands::Capture(_) => {
             eprintln!("rer capture is not yet implemented (scheduled in roadmap milestone RER-F-011). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
@@ -630,24 +685,28 @@ fn execute_run(args: RunArgs) -> ExitCode {
         eprintln!("Warning: failed to register signal handlers: {}", err);
     }
 
-    let socket_path = std::env::var("RER_HEALTH_SOCKET")
+    let socket_path = std::env::var("RER_MGMT_SOCKET")
+        .or_else(|_| std::env::var("RER_HEALTH_SOCKET"))
         .map(PathBuf::from)
         .unwrap_or(args.health_socket);
 
     match crate::relay::Relay::start(&config) {
         Ok(relay) => {
-            let health_server =
-                match crate::health::HealthServer::start(&socket_path, relay.health_handle()) {
-                    Ok(srv) => Some(srv),
-                    Err(err) => {
-                        eprintln!(
-                            "Warning: health socket unavailable at '{}': {}",
-                            socket_path.display(),
-                            err
-                        );
-                        None
-                    }
-                };
+            let mgmt_server = match crate::management::ManagementServer::start_from_config(
+                &config,
+                relay.health_handle(),
+                &socket_path,
+            ) {
+                Ok(srv) => Some(srv),
+                Err(err) => {
+                    eprintln!(
+                        "Warning: management server unavailable at '{}': {}",
+                        socket_path.display(),
+                        err
+                    );
+                    None
+                }
+            };
 
             println!("RER relay running. Press Ctrl-C or send SIGTERM to stop.");
             for inst in config.all_instances() {
@@ -671,7 +730,7 @@ fn execute_run(args: RunArgs) -> ExitCode {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             println!("Shutdown signal received. Stopping relay gracefully...");
-            if let Some(srv) = health_server {
+            if let Some(srv) = mgmt_server {
                 srv.stop();
             }
             relay.stop();
@@ -735,12 +794,14 @@ fn execute_health(args: HealthArgs) -> ExitCode {
 }
 
 fn execute_status(args: StatusArgs) -> ExitCode {
-    let socket_path = std::env::var("RER_HEALTH_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or(args.socket);
-
     let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
-    match crate::health::query_health(&socket_path, timeout) {
+    let target = args.endpoint.unwrap_or_else(|| {
+        std::env::var("RER_MGMT_SOCKET")
+            .or_else(|_| std::env::var("RER_HEALTH_SOCKET"))
+            .unwrap_or_else(|_| args.socket.to_string_lossy().to_string())
+    });
+
+    match crate::management::query_status(&target, timeout, args.auth_token.as_deref()) {
         Ok(report) => {
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report).unwrap());
@@ -748,20 +809,32 @@ fn execute_status(args: StatusArgs) -> ExitCode {
                 println!("RER Relay Status: {}", report.status);
                 println!("Version: {}", report.version);
                 println!("Uptime: {}s", report.uptime_seconds);
+                println!(
+                    "Overall Counters: rx: {} pkts ({} B), tx: {} pkts ({} B), drops: {}, errors: {}",
+                    report.aggregate_counters.received_packets,
+                    report.aggregate_counters.received_bytes,
+                    report.aggregate_counters.forwarded_packets,
+                    report.aggregate_counters.forwarded_bytes,
+                    report.aggregate_counters.dropped_packets,
+                    report.aggregate_counters.destination_errors
+                        + report.aggregate_counters.socket_errors
+                );
                 println!("Streams ({}):", report.streams.len());
                 for s in &report.streams {
                     println!(
-                        "  - {}: {} (rx: {}, tx: {}, drops: {}, errors: {})",
+                        "  - {}: {} (rx: {} pkts / {} B, tx: {} pkts / {} B, drops: {}, errors: {})",
                         s.stream_id,
-                        if s.healthy { "healthy" } else { "degraded" },
+                        s.state,
                         s.received_packets,
+                        s.received_bytes,
                         s.forwarded_packets,
+                        s.forwarded_bytes,
                         s.dropped_packets,
-                        s.errors
+                        s.destination_errors + s.socket_errors
                     );
                 }
             }
-            if report.status == crate::health::STATUS_HEALTHY {
+            if report.healthy {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -771,14 +844,94 @@ fn execute_status(args: StatusArgs) -> ExitCode {
             if args.json {
                 let err_obj = serde_json::json!({
                     "status": "unknown",
-                    "error": format!("cannot connect to relay at '{}': {}", socket_path.display(), err)
+                    "error": format!("cannot connect to relay at '{}': {}", target, err)
                 });
                 println!("{}", serde_json::to_string_pretty(&err_obj).unwrap());
             } else {
                 eprintln!(
                     "Error: cannot connect to RER relay at '{}': {}",
-                    socket_path.display(),
-                    err
+                    target, err
+                );
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn execute_metrics(args: MetricsArgs) -> ExitCode {
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+    let target = args.endpoint.unwrap_or_else(|| {
+        std::env::var("RER_MGMT_SOCKET")
+            .or_else(|_| std::env::var("RER_HEALTH_SOCKET"))
+            .unwrap_or_else(|_| args.socket.to_string_lossy().to_string())
+    });
+
+    let is_json = args.json || args.format == MetricsFormat::Json;
+
+    match crate::management::query_metrics(&target, timeout, args.auth_token.as_deref()) {
+        Ok(report) => {
+            if is_json {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            } else if args.format == MetricsFormat::Prometheus {
+                print!("{}", report.prometheus_text);
+            } else {
+                println!("RER Relay Metrics:");
+                println!("==================");
+                println!(
+                    "Status: {} (Uptime: {}s, Healthy: {})",
+                    report.status, report.uptime_seconds, report.healthy
+                );
+                println!("Aggregate Counters:");
+                println!(
+                    "  - Received: {} packets ({} bytes)",
+                    report.counters.received_packets, report.counters.received_bytes
+                );
+                println!(
+                    "  - Forwarded: {} packets ({} bytes)",
+                    report.counters.forwarded_packets, report.counters.forwarded_bytes
+                );
+                println!(
+                    "  - Dropped: {} packets (queue full: {}, oversized: {})",
+                    report.counters.dropped_packets,
+                    report.counters.drops_queue_full,
+                    report.counters.drops_oversized
+                );
+                println!(
+                    "  - Errors: {} destination, {} socket, {} backpressure",
+                    report.counters.destination_errors,
+                    report.counters.socket_errors,
+                    report.counters.backpressure_events
+                );
+                if !report.streams.is_empty() {
+                    println!("Per-Stream Counters ({}):", report.streams.len());
+                    for (id, s) in &report.streams {
+                        println!(
+                            "  - Stream '{}': rx: {} pkts / {} B, tx: {} pkts / {} B, drops: {}, errors: {}",
+                            id,
+                            s.received_packets,
+                            s.received_bytes,
+                            s.forwarded_packets,
+                            s.forwarded_bytes,
+                            s.dropped_packets,
+                            s.destination_errors + s.socket_errors
+                        );
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": format!("cannot connect to management endpoint at '{}': {}", target, err)
+                    })
+                );
+            } else {
+                eprintln!(
+                    "Error: cannot connect to RER metrics at '{}': {}",
+                    target, err
                 );
             }
             ExitCode::from(1)
@@ -949,6 +1102,109 @@ fn run_receive_cli(args: ReceiveArgs) -> ExitCode {
 }
 
 fn execute_streams(args: StreamsArgs) -> ExitCode {
+    let is_json = args.json || args.format == OutputFormat::Json;
+
+    if args.file.is_some() || args.config.is_some() {
+        return execute_streams_file(args);
+    }
+
+    if args.socket.is_some() || args.endpoint.is_some() || std::env::var("RER_MGMT_SOCKET").is_ok()
+    {
+        let target = args.endpoint.unwrap_or_else(|| {
+            args.socket
+                .map(|p| p.to_string_lossy().to_string())
+                .or_else(|| std::env::var("RER_MGMT_SOCKET").ok())
+                .unwrap_or_else(|| "/tmp/relay_health.sock".to_string())
+        });
+        let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+
+        match crate::management::query_streams(&target, timeout, args.auth_token.as_deref()) {
+            Ok(report) => {
+                if is_json {
+                    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                } else {
+                    println!("Streams and Logical Interfaces (Runtime Status):");
+                    println!("===============================================");
+                    println!(
+                        "Status: {} (Uptime: {}s)",
+                        report.status, report.uptime_seconds
+                    );
+                    println!("Streams ({}):", report.streams.len());
+                    for s in &report.streams {
+                        println!(
+                            "  - Stream '{}': {} (rx: {} pkts / {} B, tx: {} pkts / {} B, drops: {}, errors: {})",
+                            s.stream_id,
+                            s.state,
+                            s.received_packets,
+                            s.received_bytes,
+                            s.forwarded_packets,
+                            s.forwarded_bytes,
+                            s.dropped_packets,
+                            s.destination_errors + s.socket_errors
+                        );
+                    }
+                    if !report.logical_interfaces.is_empty() {
+                        println!("Logical Interfaces ({}):", report.logical_interfaces.len());
+                        for iface in &report.logical_interfaces {
+                            let tx_name = iface.tx_stream.as_deref().unwrap_or("none");
+                            let rx_name = iface.rx_stream.as_deref().unwrap_or("none");
+                            let iface_label = iface.name.as_deref().unwrap_or(&iface.id);
+                            println!(
+                                "  - Interface '{}' ({}): tx='{}', rx='{}'",
+                                iface.id, iface_label, tx_name, rx_name
+                            );
+                            if let Some(ref tx) = iface.tx_stats {
+                                println!(
+                                    "      TX: rx: {} pkts ({} B), tx: {} pkts ({} B), drops: {}, errors: {}",
+                                    tx.received_packets, tx.received_bytes, tx.forwarded_packets, tx.forwarded_bytes, tx.dropped_packets, tx.destination_errors + tx.socket_errors
+                                );
+                            }
+                            if let Some(ref rx) = iface.rx_stats {
+                                println!(
+                                    "      RX: rx: {} pkts ({} B), tx: {} pkts ({} B), drops: {}, errors: {}",
+                                    rx.received_packets, rx.received_bytes, rx.forwarded_packets, rx.forwarded_bytes, rx.dropped_packets, rx.destination_errors + rx.socket_errors
+                                );
+                            }
+                        }
+                    }
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                if is_json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "error": format!("cannot connect to management endpoint at '{}': {}", target, err)
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "Error: cannot connect to management endpoint at '{}': {}",
+                        target, err
+                    );
+                }
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    if is_json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "error": "missing configuration file argument; provide a path or use --config <FILE>"
+            })
+        );
+    } else {
+        eprintln!(
+            "Error: missing configuration file argument; provide a path or use --config <FILE>"
+        );
+    }
+    ExitCode::from(1)
+}
+
+fn execute_streams_file(args: StreamsArgs) -> ExitCode {
     let is_json = args.json || args.format == OutputFormat::Json;
 
     let target_path = match args.file.or(args.config) {
