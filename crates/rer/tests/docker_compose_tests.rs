@@ -165,10 +165,10 @@ fn test_docker_compose_files_syntax_and_settings() {
 
     for path in [&single_compose, &chain_compose] {
         let content = fs::read_to_string(path).expect("read compose file");
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&content).expect("compose file must be valid YAML");
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&content).expect("compose file must be valid YAML");
 
-        let services = parsed["services"].as_mapping().expect("services mapping");
+        let services = parsed["services"].as_object().expect("services mapping");
         for (_svc_name, svc_val) in services {
             // Versioned image reference matching binary version
             let image = svc_val["image"].as_str().expect("service image");
@@ -193,7 +193,7 @@ fn test_docker_compose_files_syntax_and_settings() {
             );
 
             // Capabilities dropped
-            let cap_drop = svc_val["cap_drop"].as_sequence().expect("cap_drop");
+            let cap_drop = svc_val["cap_drop"].as_array().expect("cap_drop");
             assert!(
                 cap_drop.iter().any(|c| c.as_str() == Some("ALL")),
                 "Service must drop ALL capabilities"
@@ -201,7 +201,7 @@ fn test_docker_compose_files_syntax_and_settings() {
 
             // Healthcheck
             let healthcheck = &svc_val["healthcheck"];
-            let test_cmd = healthcheck["test"].as_sequence().expect("healthcheck test");
+            let test_cmd = healthcheck["test"].as_array().expect("healthcheck test");
             assert!(
                 test_cmd
                     .iter()
@@ -211,7 +211,7 @@ fn test_docker_compose_files_syntax_and_settings() {
 
             // Resource limits
             assert!(
-                svc_val["deploy"]["resources"]["limits"].is_mapping(),
+                svc_val["deploy"]["resources"]["limits"].is_object(),
                 "Resource limits must be specified"
             );
         }

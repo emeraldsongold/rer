@@ -159,6 +159,17 @@
             }
           ]
         },
+        "metrics": {
+          "description": "Prometheus/OpenMetrics metrics endpoint configuration (SPEC §15).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MetricsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "mode": {
           "description": "Diagnostic and operational profile (\"production\", \"debug\", or \"test\").",
           "default": "production",
@@ -257,6 +268,28 @@
               "type": "null"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricsConfig": {
+      "description": "Prometheus and OpenMetrics metrics endpoint configuration (SPEC §15).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the metrics HTTP/TCP endpoint is enabled.",
+          "default": true,
+          "type": "boolean"
+        },
+        "endpoint": {
+          "description": "Bind address for the metrics endpoint (e.g. \"127.0.0.1:9100\"). Bound to loopback by default.",
+          "default": "127.0.0.1:9100",
+          "type": "string"
+        },
+        "path": {
+          "description": "HTTP request path for metrics scraping (e.g. \"/metrics\"). Defaults to \"/metrics\".",
+          "default": "/metrics",
+          "type": "string"
         }
       },
       "additionalProperties": false

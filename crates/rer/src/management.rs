@@ -135,6 +135,8 @@ pub struct StreamStatusReport {
     pub dropped_packets: u64,
     pub drops_queue_full: u64,
     pub drops_oversized: u64,
+    #[serde(default)]
+    pub queue_depth: u64,
     pub destination_errors: u64,
     pub socket_errors: u64,
     pub backpressure_events: u64,
@@ -225,6 +227,7 @@ pub fn convert_stream_reports(
             dropped_packets: s.stats.dropped_packets,
             drops_queue_full: s.stats.drops_queue_full,
             drops_oversized: s.stats.drops_oversized,
+            queue_depth: s.stats.queue_depth,
             destination_errors: s.stats.destination_errors,
             socket_errors: s.stats.socket_errors,
             backpressure_events: s.stats.backpressure_events,
@@ -307,44 +310,125 @@ pub fn generate_prometheus_text(
         agg.backpressure_events
     ));
 
-    // Per-stream metrics
+    // Per-stream metrics grouped by metric family
+    out.push_str("# HELP rer_stream_received_packets_total Total packets received on stream\n");
+    out.push_str("# TYPE rer_stream_received_packets_total counter\n");
     for s in snapshots {
-        let id = &s.stream_id;
         out.push_str(&format!(
             "rer_stream_received_packets_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.received_packets
+            s.stream_id, s.stats.received_packets
         ));
+    }
+
+    out.push_str("# HELP rer_stream_received_bytes_total Total bytes received on stream\n");
+    out.push_str("# TYPE rer_stream_received_bytes_total counter\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_received_bytes_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.received_bytes
+            s.stream_id, s.stats.received_bytes
         ));
+    }
+
+    out.push_str("# HELP rer_stream_forwarded_packets_total Total packets forwarded on stream\n");
+    out.push_str("# TYPE rer_stream_forwarded_packets_total counter\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_forwarded_packets_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.forwarded_packets
+            s.stream_id, s.stats.forwarded_packets
         ));
+    }
+
+    out.push_str("# HELP rer_stream_forwarded_bytes_total Total bytes forwarded on stream\n");
+    out.push_str("# TYPE rer_stream_forwarded_bytes_total counter\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_forwarded_bytes_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.forwarded_bytes
+            s.stream_id, s.stats.forwarded_bytes
         ));
+    }
+
+    out.push_str("# HELP rer_stream_dropped_packets_total Total packets dropped on stream\n");
+    out.push_str("# TYPE rer_stream_dropped_packets_total counter\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_dropped_packets_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.dropped_packets
+            s.stream_id, s.stats.dropped_packets
         ));
+    }
+
+    out.push_str(
+        "# HELP rer_stream_drops_queue_full_total Total packets dropped due to queue full\n",
+    );
+    out.push_str("# TYPE rer_stream_drops_queue_full_total counter\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_drops_queue_full_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.drops_queue_full
+            s.stream_id, s.stats.drops_queue_full
         ));
+    }
+
+    out.push_str(
+        "# HELP rer_stream_drops_oversized_total Total packets dropped due to oversized datagram\n",
+    );
+    out.push_str("# TYPE rer_stream_drops_oversized_total counter\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_drops_oversized_total{{stream=\"{}\"}} {}\n",
-            id, s.stats.drops_oversized
+            s.stream_id, s.stats.drops_oversized
         ));
+    }
+
+    out.push_str(
+        "# HELP rer_stream_queue_depth Current number of datagrams queued in stream buffer\n",
+    );
+    out.push_str("# TYPE rer_stream_queue_depth gauge\n");
+    for s in snapshots {
+        out.push_str(&format!(
+            "rer_stream_queue_depth{{stream=\"{}\"}} {}\n",
+            s.stream_id, s.stats.queue_depth
+        ));
+    }
+
+    out.push_str("# HELP rer_stream_destination_errors_total Total destination errors encountered for stream\n");
+    out.push_str("# TYPE rer_stream_destination_errors_total counter\n");
+    for s in snapshots {
+        out.push_str(&format!(
+            "rer_stream_destination_errors_total{{stream=\"{}\"}} {}\n",
+            s.stream_id, s.stats.destination_errors
+        ));
+    }
+
+    out.push_str(
+        "# HELP rer_stream_socket_errors_total Total socket errors encountered for stream\n",
+    );
+    out.push_str("# TYPE rer_stream_socket_errors_total counter\n");
+    for s in snapshots {
+        out.push_str(&format!(
+            "rer_stream_socket_errors_total{{stream=\"{}\"}} {}\n",
+            s.stream_id, s.stats.socket_errors
+        ));
+    }
+
+    out.push_str("# HELP rer_stream_backpressure_events_total Total backpressure events recorded for stream\n");
+    out.push_str("# TYPE rer_stream_backpressure_events_total counter\n");
+    for s in snapshots {
+        out.push_str(&format!(
+            "rer_stream_backpressure_events_total{{stream=\"{}\"}} {}\n",
+            s.stream_id, s.stats.backpressure_events
+        ));
+    }
+
+    out.push_str("# HELP rer_stream_healthy Whether the stream is healthy (1) or degraded (0)\n");
+    out.push_str("# TYPE rer_stream_healthy gauge\n");
+    for s in snapshots {
         out.push_str(&format!(
             "rer_stream_healthy{{stream=\"{}\"}} {}\n",
-            id,
+            s.stream_id,
             if s.is_healthy { 1 } else { 0 }
         ));
     }
 
+    out.push_str("# EOF\n");
     out
 }
 
@@ -996,7 +1080,7 @@ impl ManagementServer {
         if !local_socket_started {
             let mut srv = Self::start_local_internal(
                 fallback_socket_path,
-                health_handle,
+                health_handle.clone(),
                 None,
                 Arc::clone(&shutdown_flag),
             )?;
@@ -1004,6 +1088,30 @@ impl ManagementServer {
                 socket_path = srv.socket_path.take();
             }
             threads.append(&mut srv.threads);
+        }
+
+        // Optional metrics servers
+        for inst in config.all_instances() {
+            if let Some(metrics) = &inst.metrics {
+                if metrics.enabled {
+                    match MetricsServer::start_listener(
+                        &metrics.endpoint,
+                        &metrics.path,
+                        health_handle.clone(),
+                        Arc::clone(&shutdown_flag),
+                    ) {
+                        Ok((t, _addr)) => {
+                            threads.push(t);
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "Warning: metrics server failed to bind to '{}': {} (forwarding continues)",
+                                metrics.endpoint, err
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         Ok(Self {
@@ -1021,6 +1129,130 @@ impl ManagementServer {
         }
         if let Some(ref path) = self.socket_path {
             let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Standalone metrics server exposing OpenMetrics exposition text over HTTP/TCP (SPEC §15).
+pub struct MetricsServer {
+    endpoint: String,
+    shutdown_flag: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl MetricsServer {
+    /// Starts the metrics server on the given endpoint (e.g. "127.0.0.1:9100").
+    ///
+    /// # Errors
+    /// Returns `io::Error` if binding fails.
+    pub fn start(endpoint: &str, path: &str, health_handle: RelayHealthHandle) -> io::Result<Self> {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let (thread, bound_endpoint) =
+            Self::start_listener(endpoint, path, health_handle, Arc::clone(&shutdown_flag))?;
+
+        Ok(Self {
+            endpoint: bound_endpoint,
+            shutdown_flag,
+            thread: Some(thread),
+        })
+    }
+
+    fn start_listener(
+        endpoint: &str,
+        path: &str,
+        health_handle: RelayHealthHandle,
+        shutdown_flag: Arc<AtomicBool>,
+    ) -> io::Result<(JoinHandle<()>, String)> {
+        let listener = TcpListener::bind(endpoint)?;
+        listener.set_nonblocking(true)?;
+        let bound_addr = listener.local_addr()?.to_string();
+
+        let req_path = if path.trim().is_empty() {
+            "/metrics".to_string()
+        } else {
+            path.trim().to_string()
+        };
+
+        let flag_clone = Arc::clone(&shutdown_flag);
+        let thread_handle = thread::spawn(move || {
+            while !flag_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let h = health_handle.clone();
+                        let p = req_path.clone();
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+                            let mut reader = BufReader::new(&stream);
+                            let mut req_line = String::new();
+                            let is_http = if let Ok(n) = reader.read_line(&mut req_line) {
+                                n > 0 && req_line.starts_with("GET ")
+                            } else {
+                                false
+                            };
+
+                            let snapshots = h.stream_health_snapshots();
+                            let agg = compute_aggregate_counters(&snapshots);
+                            let body = generate_prometheus_text(&h, &snapshots, &agg);
+
+                            if is_http {
+                                let parts: Vec<&str> = req_line.split_whitespace().collect();
+                                let target_path = parts.get(1).unwrap_or(&"/");
+                                if *target_path == p
+                                    || *target_path == "/metrics"
+                                    || *target_path == "/"
+                                {
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/openmetrics-text; version=1.0.0; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                        body.len(),
+                                        body
+                                    );
+                                    let _ = stream.write_all(resp.as_bytes());
+                                } else {
+                                    let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                    let _ = stream.write_all(not_found.as_bytes());
+                                }
+                            } else {
+                                let _ = stream.write_all(body.as_bytes());
+                            }
+                            let _ = stream.flush();
+                        }));
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(_) => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            }
+        });
+
+        Ok((thread_handle, bound_addr))
+    }
+
+    /// Stops the metrics server and joins background worker thread.
+    pub fn stop(mut self) {
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+
+    /// Returns the bound endpoint address.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
+
+impl Drop for MetricsServer {
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            self.shutdown_flag.store(true, Ordering::SeqCst);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
         }
     }
 }

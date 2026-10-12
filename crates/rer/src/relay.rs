@@ -124,6 +124,7 @@ pub struct StreamStats {
     pub dropped_packets: AtomicU64,
     pub drops_queue_full: AtomicU64,
     pub drops_oversized: AtomicU64,
+    pub queue_depth: AtomicU64,
     pub destination_errors: AtomicU64,
     pub socket_errors: AtomicU64,
     pub backpressure_events: AtomicU64,
@@ -141,6 +142,7 @@ impl StreamStats {
             dropped_packets: self.dropped_packets.load(Ordering::Relaxed),
             drops_queue_full: self.drops_queue_full.load(Ordering::Relaxed),
             drops_oversized: self.drops_oversized.load(Ordering::Relaxed),
+            queue_depth: self.queue_depth.load(Ordering::Relaxed),
             destination_errors: self.destination_errors.load(Ordering::Relaxed),
             socket_errors: self.socket_errors.load(Ordering::Relaxed),
             backpressure_events: self.backpressure_events.load(Ordering::Relaxed),
@@ -158,6 +160,8 @@ pub struct StreamStatsSnapshot {
     pub dropped_packets: u64,
     pub drops_queue_full: u64,
     pub drops_oversized: u64,
+    #[serde(default)]
+    pub queue_depth: u64,
     pub destination_errors: u64,
     pub socket_errors: u64,
     #[serde(default)]
@@ -408,6 +412,9 @@ impl StreamRunner {
                                 let push_result = {
                                     let mut q = recv_queue.lock().unwrap();
                                     let res = q.push(datagram);
+                                    recv_stats
+                                        .queue_depth
+                                        .store(q.len() as u64, Ordering::Relaxed);
                                     recv_condvar.notify_one();
                                     res
                                 };
@@ -511,6 +518,10 @@ impl StreamRunner {
                                                         let push_res = {
                                                             let mut q = cl_queue.lock().unwrap();
                                                             let res = q.push(datagram);
+                                                            cl_stats.queue_depth.store(
+                                                                q.len() as u64,
+                                                                Ordering::Relaxed,
+                                                            );
                                                             cl_condvar.notify_one();
                                                             res
                                                         };
@@ -640,6 +651,10 @@ impl StreamRunner {
                                                     let push_res = {
                                                         let mut q = recv_queue.lock().unwrap();
                                                         let res = q.push(datagram);
+                                                        recv_stats.queue_depth.store(
+                                                            q.len() as u64,
+                                                            Ordering::Relaxed,
+                                                        );
                                                         recv_condvar.notify_one();
                                                         res
                                                     };
@@ -779,6 +794,9 @@ impl StreamRunner {
                         }
                     }
                     held_datagram = q.pop();
+                    fwd_stats
+                        .queue_depth
+                        .store(q.len() as u64, Ordering::Relaxed);
                 }
 
                 match held_datagram.take() {

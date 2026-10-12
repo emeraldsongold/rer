@@ -111,6 +111,10 @@ pub struct RunArgs {
     /// Path to Unix domain socket for health and status checks
     #[arg(long, default_value = "/tmp/relay_health.sock")]
     pub health_socket: PathBuf,
+
+    /// Optional metrics endpoint address (e.g. "127.0.0.1:9100")
+    #[arg(long)]
+    pub metrics_endpoint: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -706,6 +710,19 @@ fn execute_run(args: RunArgs) -> ExitCode {
                     );
                     None
                 }
+            };
+
+            let _cli_metrics = if let Some(ref ep) = args.metrics_endpoint {
+                match crate::management::MetricsServer::start(ep, "/metrics", relay.health_handle())
+                {
+                    Ok(srv) => Some(srv),
+                    Err(err) => {
+                        eprintln!("Warning: metrics server unavailable at '{}': {}", ep, err);
+                        None
+                    }
+                }
+            } else {
+                None
             };
 
             println!("RER relay running. Press Ctrl-C or send SIGTERM to stop.");

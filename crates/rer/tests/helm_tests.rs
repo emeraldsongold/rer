@@ -23,7 +23,7 @@ fn test_helm_chart_metadata_and_version() {
     assert!(chart_yaml_path.exists(), "Chart.yaml must exist");
 
     let content = fs::read_to_string(&chart_yaml_path).expect("read Chart.yaml");
-    let chart: serde_yaml::Value = serde_yaml::from_str(&content).expect("parse Chart.yaml");
+    let chart: serde_json::Value = serde_saphyr::from_str(&content).expect("parse Chart.yaml");
 
     assert_eq!(
         chart["apiVersion"].as_str(),
@@ -92,18 +92,18 @@ fn test_helm_chart_values_schema_and_types() {
     // Verify values files parse validly
     let values_path = repo_root().join("deploy/helm/rer/values.yaml");
     let values_content = fs::read_to_string(&values_path).expect("read values.yaml");
-    let values: serde_yaml::Value =
-        serde_yaml::from_str(&values_content).expect("parse values.yaml");
+    let values: serde_json::Value =
+        serde_saphyr::from_str(&values_content).expect("parse values.yaml");
 
     let simple_path = repo_root().join("deploy/helm/rer/values-simple.yaml");
     let simple_content = fs::read_to_string(&simple_path).expect("read values-simple.yaml");
-    let simple: serde_yaml::Value =
-        serde_yaml::from_str(&simple_content).expect("parse values-simple.yaml");
+    let simple: serde_json::Value =
+        serde_saphyr::from_str(&simple_content).expect("parse values-simple.yaml");
 
     let multi_path = repo_root().join("deploy/helm/rer/values-multi-instance.yaml");
     let multi_content = fs::read_to_string(&multi_path).expect("read values-multi-instance.yaml");
-    let multi: serde_yaml::Value =
-        serde_yaml::from_str(&multi_content).expect("parse values-multi-instance.yaml");
+    let multi: serde_json::Value =
+        serde_saphyr::from_str(&multi_content).expect("parse values-multi-instance.yaml");
 
     // All must have replicaCount >= 1
     assert!(values["replicaCount"].as_i64().unwrap_or(0) >= 1);
@@ -119,7 +119,7 @@ fn test_helm_chart_values_schema_and_types() {
 fn test_helm_chart_security_context_and_non_root() {
     let values_path = repo_root().join("deploy/helm/rer/values.yaml");
     let content = fs::read_to_string(&values_path).expect("read values.yaml");
-    let values: serde_yaml::Value = serde_yaml::from_str(&content).expect("parse values.yaml");
+    let values: serde_json::Value = serde_saphyr::from_str(&content).expect("parse values.yaml");
 
     // Pod security context
     let pod_sec = &values["podSecurityContext"];
@@ -157,7 +157,7 @@ fn test_helm_chart_security_context_and_non_root() {
         "readOnlyRootFilesystem must be true"
     );
     let caps_drop = cont_sec["capabilities"]["drop"]
-        .as_sequence()
+        .as_array()
         .expect("dropped capabilities");
     assert!(
         caps_drop.iter().any(|c| c.as_str() == Some("ALL")),
@@ -189,7 +189,7 @@ fn test_helm_chart_security_context_and_non_root() {
 fn test_helm_chart_probes_and_resources() {
     let values_path = repo_root().join("deploy/helm/rer/values.yaml");
     let content = fs::read_to_string(&values_path).expect("read values.yaml");
-    let values: serde_yaml::Value = serde_yaml::from_str(&content).expect("parse values.yaml");
+    let values: serde_json::Value = serde_saphyr::from_str(&content).expect("parse values.yaml");
 
     // Probes
     let probes = &values["probes"];
@@ -256,11 +256,11 @@ fn test_helm_chart_configurable_services_and_ports() {
     ] {
         let path = repo_root().join("deploy/helm/rer").join(filename);
         let val_content = fs::read_to_string(&path).expect("read values file");
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&val_content).expect("parse values file");
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&val_content).expect("parse values file");
 
         let ports = parsed["service"]["ports"]
-            .as_sequence()
+            .as_array()
             .expect("service.ports array");
         assert!(!ports.is_empty(), "Must configure at least one port");
 
@@ -317,7 +317,8 @@ fn test_helm_embedded_configurations_validate() {
     ] {
         let path = repo_root().join("deploy/helm/rer").join(filename);
         let content = fs::read_to_string(&path).expect("read values file");
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).expect("parse values file");
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&content).expect("parse values file");
 
         let config_str = parsed["config"]
             .as_str()
