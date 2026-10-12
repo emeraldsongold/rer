@@ -1,0 +1,18 @@
+apiVersion: v2
+name: rer
+description: A Helm chart for RER (RER Engineering Relay) - high-performance telemetry and packet relay daemon
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - rer
+  - relay
+  - telemetry
+  - udp
+  - tcp
+  - networking
+home: https://github.com/emeraldsongold/rer
+sources:
+  - https://github.com/emeraldsongold/rer
+maintainers:
+  - name: emeraldsongold

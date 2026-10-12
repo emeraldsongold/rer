@@ -1,0 +1,49 @@
+# Multi-instance / topology deployment example for RER Helm chart
+# Demonstrates running multi-instance relays with explicit port ownership.
+# Scaling replicas does not preserve UDP/TCP routing semantics automatically.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/emeraldsongold/rer
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+
+service:
+  type: ClusterIP
+  ports:
+    - name: ingress-udp
+      port: 5000
+      targetPort: 5000
+      protocol: UDP
+    - name: intermediate-tcp
+      port: 6000
+      targetPort: 6000
+      protocol: TCP
+
+config: |
+  version: "1"
+  instances:
+    - id: "rer-ingress-relay"
+      streams:
+        - id: "ingress-stream"
+          source:
+            transport: "udp"
+            address: "0.0.0.0:5000"
+          destination:
+            transport: "tcp"
+            address: "127.0.0.1:6000"
+          buffer:
+            max_queue_size: 2048
+            drop_policy: "drop_oldest"
+    - id: "rer-egress-relay"
+      streams:
+        - id: "egress-stream"
+          source:
+            transport: "tcp"
+            address: "0.0.0.0:6000"
+          destination:
+            transport: "udp"
+            address: "127.0.0.1:7000"
+          buffer:
+            max_queue_size: 2048
+            drop_policy: "drop_oldest"
