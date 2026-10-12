@@ -2,9 +2,9 @@
 
 This document tracks known limitations, pending features, and current operational constraints for RER (RER Engineering Relay).
 
-## 1. Project Phase: Core Relay (Milestone RER-F-005)
+## 1. Project Phase: Core Relay (Milestone RER-F-006)
 
-RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone RER-F-002 (configuration model, validation CLI, and schema), Milestone RER-F-003 (basic UDP relay engine, bounded queues, drop policies, graceful shutdown, and tests), Milestone RER-F-004 (deterministic traffic generator, verification test receiver, loss/duplication/reorder reporting as JSON, and unprivileged simulation harness), and Milestone RER-F-005 (TCP stream forwarding, four UDP/TCP transport combinations, explicit framing, reconnect with backoff, destination outage resilience, and slow-reader backpressure).
+RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone RER-F-002 (configuration model, validation CLI, and schema), Milestone RER-F-003 (basic UDP relay engine, bounded queues, drop policies, graceful shutdown, and tests), Milestone RER-F-004 (deterministic traffic generator, verification test receiver, loss/duplication/reorder reporting as JSON, and unprivileged simulation harness), Milestone RER-F-005 (TCP stream forwarding, four UDP/TCP transport combinations, explicit framing, reconnect with backoff, destination outage resilience, and slow-reader backpressure), and Milestone RER-F-006 (logical interfaces with one or two directional streams in YAML and CLI `rer streams` output, independent directional counters, endpoints, errors and routing, tested fan-out resilience with destination error isolation, pairing documented as configuration context, and multiple simultaneous interfaces running in a single instance).
 
 ## 2. Unimplemented Features (By Design for Current Milestone)
 - **Distributed Multi-Hop Simulation & Correlation (`RER-F-010`)**:

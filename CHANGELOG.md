@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-006 (Logical Interfaces, Paired Directional Streams, Multiple Streams, and Fan-Out)
+- **Logical Interfaces**: Expressed logical interfaces with one or two directional streams (`tx_stream`, `rx_stream`) in YAML configuration and exposed their topology via CLI output (`crates/rer/src/config.rs`, `crates/rer/src/cli.rs`).
+- **Directional Independence**: Guaranteed that transmit (TX) and receive (RX) directions operate with independent counters (`StreamStats`), socket endpoints, transport protocols, bounded queues, error tracking, and routing policies (`crates/rer/src/relay.rs`).
+- **Stream and Interface CLI Inspection**: Implemented `rer streams` command supporting human-readable text output and machine-readable JSON reports (`rer streams --json`), detailing stream endpoints, directional pairings, and configuration context.
+- **Pairing as Configuration Context**: Explicitly documented that directional pairing represents administrative and operator configuration context, not in-band packet correlation (SPEC §6).
+- **Fan-Out Resilience**: Verified that multi-destination streams isolate destination failures, allowing healthy destinations to continue receiving traffic uninterrupted while errors on unavailable destinations are accounted for independently.
+- **Multiple Simultaneous Interfaces**: Enabled and verified running multiple simultaneous logical interfaces (paired and single-direction) concurrently on a single relay instance under test (`crates/rer/tests/logical_interface_tests.rs`).
+- **Example Configurations**: Added `examples/multi_interface.yaml` and documented configuration context semantics in `examples/paired_streams.yaml`.
+
 ### Added - Milestone RER-F-005 (TCP Relay, Four Transport Conversions, Framing, Reconnection, and Backpressure)
 - **Four Transport Conversion Combinations**: Implemented forwarding across all four transport combinations: UDP-to-UDP, UDP-to-TCP, TCP-to-UDP, and TCP-to-TCP (`crates/rer/src/relay.rs`).
 - **Explicit Framing Protocol**: Added explicit length-prefixed framing between TCP byte streams and discrete datagrams using a 4-byte big-endian unsigned 32-bit length header, preserving datagram boundaries and payload bytes with defragmentation support (`crates/rer/src/framing.rs`).

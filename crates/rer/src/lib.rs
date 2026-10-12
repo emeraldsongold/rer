@@ -12,10 +12,14 @@ pub mod signals;
 pub mod sim;
 
 pub use config::{
-    Config, DropPolicy, InstanceConfig, StreamConfig, ValidationError, ValidationReport,
+    Config, DropPolicy, InstanceConfig, LogicalInterfaceConfig, StreamConfig, ValidationError,
+    ValidationReport,
 };
 pub use framing::{encode_frame, read_frame, write_frame};
-pub use relay::{BoundedQueue, Datagram, Relay, StreamStats, StreamStatsSnapshot};
+pub use relay::{
+    BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, StreamStats,
+    StreamStatsSnapshot,
+};
 pub use secret::SecretString;
 pub use sim::{
     GeneratorConfig, GeneratorStats, HarnessConfig, ImpairmentConfig, Packet, ReceiverReport,

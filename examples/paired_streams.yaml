@@ -1,6 +1,11 @@
 # Paired directional streams example
 # Demonstrates modeling command uplink (TX) and telemetry downlink (RX)
 # as a single logical interface with independent stream configurations (SPEC §6).
+#
+# IMPORTANT:
+# Directional pairing represents configuration and operator context, NOT in-band
+# packet correlation. Transmit and receive paths operate with independent endpoints,
+# transports, queue bounds, error counters, and routing policies.
 
 version: "1"
 instances:

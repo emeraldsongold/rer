@@ -86,7 +86,16 @@ rer/
 - Deterministic traffic generator (`TrafficGenerator`) and test receiver (`TrafficReceiver`) verifying expected counts and SHA-256 payload hashes.
 - Unprivileged simulation harness (`SimulationHarness`) testing all four transport combinations, impairments, and queue policies in CI.
 
-### 2.6 CI and Quality Pipeline
+### 2.6 Logical Interfaces, Paired Streams, and Fan-Out (`RER-F-006`)
+
+- **Logical Interfaces**: Model related directional communication paths as logical interfaces containing one direction (`tx_stream` or `rx_stream`) or two (`tx_stream` and `rx_stream`).
+- **Pairing as Configuration Context**: Directional pairing represents administrative and operator configuration context, **not** packet correlation. Received datagrams on an RX stream are never assumed to associate with a particular command or request sent on a TX stream.
+- **Directional Independence**: Each direction maintains independent counters (`received_packets`, `forwarded_packets`, `dropped_packets`, `destination_errors`, `socket_errors`, `backpressure_events`), endpoints, transport combinations, queue bounds, and routing behavior.
+- **Multiple Simultaneous Interfaces**: Multiple logical interfaces run concurrently on a single relay instance without interference.
+- **Resilient Fan-Out**: Streams forward datagrams across multiple destinations (`destinations`), isolating destination errors so that an outage at one destination does not block or halt delivery to functioning destinations.
+- **CLI Inspection**: `rer streams` displays streams, logical interfaces, directional configurations, and pairing context as human-readable text or machine-readable JSON.
+
+### 2.7 CI and Quality Pipeline
 
 - **Hosted Execution**: Builds entirely on standard GitHub Actions Linux runners without requiring local compilation or paid infrastructure.
 - **Enforced Quality Gates**:
@@ -100,11 +109,9 @@ rer/
 
 Future milestones (as detailed in [`docs/SPEC.md`](docs/SPEC.md) and [`ROADMAP.md`](ROADMAP.md)) will introduce the following subsystems:
 
-1. **Logical Interfaces and Directional Streams (`RER-F-006`)**:
-   Paired directional streams modeling command TX/response RX and uplink/downlink relationships with independent counters, backpressure, and routing policies.
-2. **Management API and Diagnostics (`RER-F-007`, `RER-F-008`, `RER-F-009`)**:
+1. **Management API and Diagnostics (`RER-F-007`, `RER-F-008`, `RER-F-009`)**:
    Non-shell local HTTP/JSON management endpoints, structured diagnostic event feeds, sequence tracking, and payload inspection.
-3. **Multi-Hop Topology Emulation (`RER-F-010`, `RER-F-011`)**:
+2. **Multi-Hop Topology Emulation (`RER-F-010`, `RER-F-011`)**:
    Deterministic multi-relay topology emulation and capture replay verification.
-4. **Observability and Packaging (`RER-F-012`–`RER-F-015`)**:
+3. **Observability and Packaging (`RER-F-012`–`RER-F-015`)**:
    Prometheus/OpenMetrics exporter, non-root Docker images, Helm charts, and standalone `.deb`/`.rpm` packaging.
