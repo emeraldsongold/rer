@@ -5,6 +5,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod framing;
 pub mod relay;
 pub mod secret;
 pub mod signals;
@@ -13,6 +14,7 @@ pub mod sim;
 pub use config::{
     Config, DropPolicy, InstanceConfig, StreamConfig, ValidationError, ValidationReport,
 };
+pub use framing::{encode_frame, read_frame, write_frame};
 pub use relay::{BoundedQueue, Datagram, Relay, StreamStats, StreamStatsSnapshot};
 pub use secret::SecretString;
 pub use sim::{

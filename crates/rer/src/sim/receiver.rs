@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io;
-use std::net::UdpSocket;
+use std::net::{TcpListener, UdpSocket};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -270,6 +270,74 @@ impl TrafficReceiver {
                     break;
                 }
                 Err(e) => return Err(e),
+            }
+        }
+
+        Ok(self.report())
+    }
+
+    /// Listens on `listener` for incoming TCP connection(s) and reads framed packets until
+    /// `timeout` has elapsed without receiving a packet, or until the expected number
+    /// of packets has been received.
+    pub fn listen_tcp(
+        &mut self,
+        listener: &TcpListener,
+        timeout: Duration,
+    ) -> io::Result<ReceiverReport> {
+        listener.set_nonblocking(true)?;
+        let start_listen = Instant::now();
+        let shutdown = std::sync::atomic::AtomicBool::new(false);
+        let mut active_stream = None;
+
+        // Accept loop: wait for incoming connection within timeout
+        while active_stream.is_none() {
+            match listener.accept() {
+                Ok((s, _)) => {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+                    let _ = s.set_nodelay(true);
+                    active_stream = Some(s);
+                    break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if start_listen.elapsed() >= timeout {
+                        return Ok(self.report());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let mut stream = active_stream.unwrap();
+        let mut last_packet_time = Instant::now();
+
+        loop {
+            match crate::framing::read_frame(&mut stream, 1024 * 1024, &shutdown) {
+                Ok(Some(frame_bytes)) => {
+                    let _ = self.record_bytes(&frame_bytes);
+                    last_packet_time = Instant::now();
+                    if let Some(exp) = self.expected_count {
+                        if self.total_received >= exp {
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Clean EOF from client
+                    break;
+                }
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    if last_packet_time.elapsed() >= timeout {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    // Socket disconnect or read error
+                    break;
+                }
             }
         }
 

@@ -1,14 +1,17 @@
 use std::collections::VecDeque;
-use std::io;
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::io::{self, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, DropPolicy, InstanceConfig, StreamConfig, TransportType};
+use crate::config::{
+    Config, ConnectionMode, DropPolicy, InstanceConfig, StreamConfig, TransportType,
+};
+use crate::framing;
 
 /// Default maximum queue size (packets) when not explicitly configured.
 pub const DEFAULT_MAX_QUEUE_SIZE: usize = 1024;
@@ -19,7 +22,7 @@ pub const DEFAULT_MAX_PACKET_SIZE: usize = 65535;
 /// Default overload drop policy when not explicitly configured.
 pub const DEFAULT_DROP_POLICY: DropPolicy = DropPolicy::DropOldest;
 
-/// A discrete UDP datagram payload preserving datagram boundary and source.
+/// A discrete UDP or TCP datagram payload preserving datagram boundary and source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Datagram {
     pub payload: Vec<u8>,
@@ -111,7 +114,7 @@ impl BoundedQueue {
     }
 }
 
-/// Thread-safe counters tracking stream activity, drop events, and socket errors.
+/// Thread-safe counters tracking stream activity, drop events, backpressure, and socket errors.
 #[derive(Debug, Default)]
 pub struct StreamStats {
     pub received_packets: AtomicU64,
@@ -123,6 +126,7 @@ pub struct StreamStats {
     pub drops_oversized: AtomicU64,
     pub destination_errors: AtomicU64,
     pub socket_errors: AtomicU64,
+    pub backpressure_events: AtomicU64,
 }
 
 impl StreamStats {
@@ -139,6 +143,7 @@ impl StreamStats {
             drops_oversized: self.drops_oversized.load(Ordering::Relaxed),
             destination_errors: self.destination_errors.load(Ordering::Relaxed),
             socket_errors: self.socket_errors.load(Ordering::Relaxed),
+            backpressure_events: self.backpressure_events.load(Ordering::Relaxed),
         }
     }
 }
@@ -155,9 +160,151 @@ pub struct StreamStatsSnapshot {
     pub drops_oversized: u64,
     pub destination_errors: u64,
     pub socket_errors: u64,
+    #[serde(default)]
+    pub backpressure_events: u64,
 }
 
-/// Active forwarding runner for a single stream.
+/// Connection manager for a TCP destination supporting reconnection with backoff and timeouts.
+struct TcpDestinationConnection {
+    address: String,
+    stream: Option<TcpStream>,
+    backoff: Duration,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    connect_timeout: Duration,
+    write_timeout: Duration,
+    next_connect_attempt: Option<Instant>,
+}
+
+impl TcpDestinationConnection {
+    fn new(address: String) -> Self {
+        Self {
+            address,
+            stream: None,
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_millis(1000),
+            backoff: Duration::from_millis(50),
+            connect_timeout: Duration::from_millis(500),
+            write_timeout: Duration::from_millis(500),
+            next_connect_attempt: None,
+        }
+    }
+
+    fn try_connect(&mut self, stats: &StreamStats) -> bool {
+        if self.stream.is_some() {
+            return true;
+        }
+
+        if let Some(next) = self.next_connect_attempt {
+            if Instant::now() < next {
+                return false;
+            }
+        }
+
+        let addrs = match self.address.to_socket_addrs() {
+            Ok(addrs) => addrs.collect::<Vec<_>>(),
+            Err(e) => {
+                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "[tcp destination] Address resolution error for '{}': {}",
+                    self.address, e
+                );
+                return false;
+            }
+        };
+
+        if addrs.is_empty() {
+            stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        match TcpStream::connect_timeout(&addrs[0], self.connect_timeout) {
+            Ok(s) => {
+                let _ = s.set_write_timeout(Some(self.write_timeout));
+                let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
+                let _ = s.set_nodelay(true);
+                self.stream = Some(s);
+                self.backoff = self.initial_backoff;
+                self.next_connect_attempt = None;
+                true
+            }
+            Err(e) => {
+                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                let wait = self.backoff;
+                self.backoff = (self.backoff * 2).min(self.max_backoff);
+                self.next_connect_attempt = Some(Instant::now() + wait);
+                eprintln!(
+                    "[tcp destination] Connect error to '{}' (backoff {:?}): {}",
+                    self.address, wait, e
+                );
+                false
+            }
+        }
+    }
+
+    fn send(&mut self, payload: &[u8], stats: &StreamStats) -> io::Result<()> {
+        if let Some(ref s) = self.stream {
+            let mut buf = [0u8; 1];
+            match s.peek(&mut buf) {
+                Ok(0) => {
+                    self.stream = None;
+                }
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::ConnectionReset
+                        || e.kind() == io::ErrorKind::BrokenPipe
+                        || e.kind() == io::ErrorKind::NotConnected =>
+                {
+                    self.stream = None;
+                }
+                _ => {}
+            }
+        }
+
+        if self.stream.is_none() && !self.try_connect(stats) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "tcp destination not connected",
+            ));
+        }
+
+        let frame = framing::encode_frame(payload);
+        let s = self.stream.as_mut().unwrap();
+
+        match s.write_all(&frame) {
+            Ok(()) => {
+                let _ = s.flush();
+                stats.forwarded_packets.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .forwarded_bytes
+                    .fetch_add(payload.len() as u64, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(ref e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                stats.backpressure_events.fetch_add(1, Ordering::Relaxed);
+                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::new(
+                    e.kind(),
+                    "tcp slow reader backpressure / write timeout",
+                ))
+            }
+            Err(e) => {
+                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                self.stream = None;
+                let wait = self.backoff;
+                self.backoff = (self.backoff * 2).min(self.max_backoff);
+                self.next_connect_attempt = Some(Instant::now() + wait);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Active forwarding runner for a single stream (UDP or TCP).
 pub struct StreamRunner {
     pub stream_id: String,
     pub stats: Arc<StreamStats>,
@@ -166,10 +313,10 @@ pub struct StreamRunner {
 }
 
 impl StreamRunner {
-    /// Starts forwarding for a single stream.
+    /// Starts forwarding for a single stream across configured transports.
     ///
     /// # Errors
-    /// Returns an error if the source socket cannot be bound.
+    /// Returns an error if the source socket cannot be bound or configured.
     pub fn start(
         stream: &StreamConfig,
         instance: &InstanceConfig,
@@ -200,11 +347,7 @@ impl StreamRunner {
             .or_else(|| instance.buffer.as_ref().and_then(|b| b.drop_policy))
             .unwrap_or(DEFAULT_DROP_POLICY);
 
-        // Bind source UDP socket
-        let recv_socket = UdpSocket::bind(&stream.source.address)?;
-        recv_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-
-        // Collect destination addresses
+        // Collect destination configurations
         let mut dest_specs = Vec::new();
         if let Some(dest) = &stream.destination {
             dest_specs.push(dest.clone());
@@ -213,98 +356,357 @@ impl StreamRunner {
             dest_specs.extend(dests.clone());
         }
 
-        // Shared queue state
+        // Shared bounded queue state
         let queue = Arc::new(Mutex::new(BoundedQueue::new(max_queue_size, drop_policy)));
         let condvar = Arc::new(Condvar::new());
         let receiver_done = Arc::new(AtomicBool::new(false));
 
-        // Receiver thread
-        let recv_stream_id = stream_id.clone();
-        let recv_stats = Arc::clone(&stats);
-        let recv_shutdown = Arc::clone(&shutdown_flag);
-        let recv_queue = Arc::clone(&queue);
-        let recv_condvar = Arc::clone(&condvar);
-        let recv_done_flag = Arc::clone(&receiver_done);
+        let mut runner_threads = Vec::new();
 
-        let recv_handle = thread::spawn(move || {
-            let mut buf = vec![0u8; 65536];
+        // -------------------------------------------------------------------
+        // Source Ingress Setup (UDP or TCP)
+        // -------------------------------------------------------------------
+        match stream.source.transport {
+            TransportType::Udp => {
+                let recv_socket = UdpSocket::bind(&stream.source.address)?;
+                recv_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
-            while !recv_shutdown.load(Ordering::Relaxed) {
-                match recv_socket.recv_from(&mut buf) {
-                    Ok((n, src_addr)) => {
-                        recv_stats.received_packets.fetch_add(1, Ordering::Relaxed);
-                        recv_stats
-                            .received_bytes
-                            .fetch_add(n as u64, Ordering::Relaxed);
+                let recv_stream_id = stream_id.clone();
+                let recv_stats = Arc::clone(&stats);
+                let recv_shutdown = Arc::clone(&shutdown_flag);
+                let recv_queue = Arc::clone(&queue);
+                let recv_condvar = Arc::clone(&condvar);
+                let recv_done_flag = Arc::clone(&receiver_done);
 
-                        if n > max_packet_size {
-                            recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                            recv_stats.drops_oversized.fetch_add(1, Ordering::Relaxed);
-                            eprintln!(
-                                "[stream {}] Dropped oversized datagram ({} bytes > max {})",
-                                recv_stream_id, n, max_packet_size
-                            );
-                            continue;
-                        }
+                let recv_handle = thread::spawn(move || {
+                    let mut buf = vec![0u8; 65536];
 
-                        let datagram = Datagram {
-                            payload: buf[..n].to_vec(),
-                            source_addr: src_addr,
-                        };
+                    while !recv_shutdown.load(Ordering::Relaxed) {
+                        match recv_socket.recv_from(&mut buf) {
+                            Ok((n, src_addr)) => {
+                                recv_stats.received_packets.fetch_add(1, Ordering::Relaxed);
+                                recv_stats
+                                    .received_bytes
+                                    .fetch_add(n as u64, Ordering::Relaxed);
 
-                        let push_result = {
-                            let mut q = recv_queue.lock().unwrap();
-                            let res = q.push(datagram);
-                            recv_condvar.notify_one();
-                            res
-                        };
+                                if n > max_packet_size {
+                                    recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                                    recv_stats.drops_oversized.fetch_add(1, Ordering::Relaxed);
+                                    eprintln!(
+                                        "[stream {}] Dropped oversized datagram ({} bytes > max {})",
+                                        recv_stream_id, n, max_packet_size
+                                    );
+                                    continue;
+                                }
 
-                        match push_result {
-                            PushResult::Enqueued => {}
-                            PushResult::DroppedOldest => {
-                                recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                                recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
-                                eprintln!(
-                                    "[stream {}] Queue overload ({}/{}): dropped oldest packet (policy: drop_oldest)",
-                                    recv_stream_id, max_queue_size, max_queue_size
-                                );
+                                let datagram = Datagram {
+                                    payload: buf[..n].to_vec(),
+                                    source_addr: src_addr,
+                                };
+
+                                let push_result = {
+                                    let mut q = recv_queue.lock().unwrap();
+                                    let res = q.push(datagram);
+                                    recv_condvar.notify_one();
+                                    res
+                                };
+
+                                match push_result {
+                                    PushResult::Enqueued => {}
+                                    PushResult::DroppedOldest => {
+                                        recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                                        recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
+                                        recv_stats
+                                            .backpressure_events
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PushResult::DroppedNewest => {
+                                        recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                                        recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
+                                        recv_stats
+                                            .backpressure_events
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PushResult::Rejected => {
+                                        recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                                        recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
+                                        recv_stats
+                                            .backpressure_events
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
                             }
-                            PushResult::DroppedNewest => {
-                                recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                                recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
-                                eprintln!(
-                                    "[stream {}] Queue overload ({}/{}): dropped newest packet (policy: drop_newest)",
-                                    recv_stream_id, max_queue_size, max_queue_size
-                                );
+                            Err(ref e)
+                                if e.kind() == io::ErrorKind::WouldBlock
+                                    || e.kind() == io::ErrorKind::TimedOut =>
+                            {
+                                // Timeout, check shutdown flag
                             }
-                            PushResult::Rejected => {
-                                recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                                recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
+                            Err(e) => {
+                                recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
                                 eprintln!(
-                                    "[stream {}] Queue overload ({}/{}): rejected packet (policy: reject)",
-                                    recv_stream_id, max_queue_size, max_queue_size
+                                    "[stream {}] Socket receive error: {}",
+                                    recv_stream_id, e
                                 );
                             }
                         }
                     }
-                    Err(ref e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::TimedOut =>
-                    {
-                        // Check shutdown flag
+
+                    recv_done_flag.store(true, Ordering::SeqCst);
+                    recv_condvar.notify_all();
+                });
+                runner_threads.push(recv_handle);
+            }
+            TransportType::Tcp => {
+                let mode = stream.source.mode.unwrap_or(ConnectionMode::Listen);
+                let recv_stream_id = stream_id.clone();
+                let recv_stats = Arc::clone(&stats);
+                let recv_shutdown = Arc::clone(&shutdown_flag);
+                let recv_queue = Arc::clone(&queue);
+                let recv_condvar = Arc::clone(&condvar);
+                let recv_done_flag = Arc::clone(&receiver_done);
+
+                match mode {
+                    ConnectionMode::Listen => {
+                        let listener = TcpListener::bind(&stream.source.address)?;
+                        listener.set_nonblocking(true)?;
+
+                        let recv_handle = thread::spawn(move || {
+                            let mut client_threads = Vec::new();
+
+                            while !recv_shutdown.load(Ordering::Relaxed) {
+                                match listener.accept() {
+                                    Ok((mut client_stream, client_addr)) => {
+                                        let _ = client_stream
+                                            .set_read_timeout(Some(Duration::from_millis(100)));
+                                        let _ = client_stream.set_nodelay(true);
+
+                                        let cl_stats = Arc::clone(&recv_stats);
+                                        let cl_shutdown = Arc::clone(&recv_shutdown);
+                                        let cl_queue = Arc::clone(&recv_queue);
+                                        let cl_condvar = Arc::clone(&recv_condvar);
+
+                                        let client_h = thread::spawn(move || {
+                                            while !cl_shutdown.load(Ordering::Relaxed) {
+                                                match framing::read_frame(
+                                                    &mut client_stream,
+                                                    max_packet_size,
+                                                    &cl_shutdown,
+                                                ) {
+                                                    Ok(Some(payload)) => {
+                                                        let n = payload.len();
+                                                        cl_stats
+                                                            .received_packets
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        cl_stats
+                                                            .received_bytes
+                                                            .fetch_add(n as u64, Ordering::Relaxed);
+
+                                                        let datagram = Datagram {
+                                                            payload,
+                                                            source_addr: client_addr,
+                                                        };
+
+                                                        let push_res = {
+                                                            let mut q = cl_queue.lock().unwrap();
+                                                            let res = q.push(datagram);
+                                                            cl_condvar.notify_one();
+                                                            res
+                                                        };
+
+                                                        match push_res {
+                                                            PushResult::Enqueued => {}
+                                                            PushResult::DroppedOldest
+                                                            | PushResult::DroppedNewest
+                                                            | PushResult::Rejected => {
+                                                                cl_stats.dropped_packets.fetch_add(
+                                                                    1,
+                                                                    Ordering::Relaxed,
+                                                                );
+                                                                cl_stats
+                                                                    .drops_queue_full
+                                                                    .fetch_add(
+                                                                        1,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                cl_stats
+                                                                    .backpressure_events
+                                                                    .fetch_add(
+                                                                        1,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                            }
+                                                        }
+                                                    }
+                                                    Ok(None) => break, // EOF
+                                                    Err(ref e)
+                                                        if e.kind()
+                                                            == io::ErrorKind::InvalidData =>
+                                                    {
+                                                        cl_stats
+                                                            .dropped_packets
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        cl_stats
+                                                            .drops_oversized
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        break;
+                                                    }
+                                                    Err(_) => {
+                                                        cl_stats
+                                                            .socket_errors
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        client_threads.push(client_h);
+                                    }
+                                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                        thread::sleep(Duration::from_millis(10));
+                                    }
+                                    Err(e) => {
+                                        recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                                        thread::sleep(Duration::from_millis(10));
+                                        eprintln!(
+                                            "[stream {}] TCP accept error: {}",
+                                            recv_stream_id, e
+                                        );
+                                    }
+                                }
+                            }
+
+                            for h in client_threads {
+                                let _ = h.join();
+                            }
+
+                            recv_done_flag.store(true, Ordering::SeqCst);
+                            recv_condvar.notify_all();
+                        });
+                        runner_threads.push(recv_handle);
                     }
-                    Err(e) => {
-                        recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("[stream {}] Socket receive error: {}", recv_stream_id, e);
+                    ConnectionMode::Connect => {
+                        let target_addr_str = stream.source.address.clone();
+                        let recv_handle = thread::spawn(move || {
+                            let mut backoff = Duration::from_millis(50);
+                            let max_backoff = Duration::from_millis(1000);
+
+                            while !recv_shutdown.load(Ordering::Relaxed) {
+                                let addrs = match target_addr_str.to_socket_addrs() {
+                                    Ok(a) => a.collect::<Vec<_>>(),
+                                    Err(_) => {
+                                        recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                                        thread::sleep(backoff);
+                                        continue;
+                                    }
+                                };
+
+                                if addrs.is_empty() {
+                                    thread::sleep(backoff);
+                                    continue;
+                                }
+
+                                match TcpStream::connect_timeout(
+                                    &addrs[0],
+                                    Duration::from_millis(500),
+                                ) {
+                                    Ok(mut stream) => {
+                                        let _ = stream
+                                            .set_read_timeout(Some(Duration::from_millis(100)));
+                                        let _ = stream.set_nodelay(true);
+                                        backoff = Duration::from_millis(50);
+
+                                        while !recv_shutdown.load(Ordering::Relaxed) {
+                                            match framing::read_frame(
+                                                &mut stream,
+                                                max_packet_size,
+                                                &recv_shutdown,
+                                            ) {
+                                                Ok(Some(payload)) => {
+                                                    let n = payload.len();
+                                                    recv_stats
+                                                        .received_packets
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    recv_stats
+                                                        .received_bytes
+                                                        .fetch_add(n as u64, Ordering::Relaxed);
+
+                                                    let datagram = Datagram {
+                                                        payload,
+                                                        source_addr: addrs[0],
+                                                    };
+
+                                                    let push_res = {
+                                                        let mut q = recv_queue.lock().unwrap();
+                                                        let res = q.push(datagram);
+                                                        recv_condvar.notify_one();
+                                                        res
+                                                    };
+
+                                                    match push_res {
+                                                        PushResult::Enqueued => {}
+                                                        PushResult::DroppedOldest
+                                                        | PushResult::DroppedNewest
+                                                        | PushResult::Rejected => {
+                                                            recv_stats
+                                                                .dropped_packets
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_stats
+                                                                .drops_queue_full
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_stats
+                                                                .backpressure_events
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                        }
+                                                    }
+                                                }
+                                                Ok(None) => break,
+                                                Err(ref e)
+                                                    if e.kind() == io::ErrorKind::InvalidData =>
+                                                {
+                                                    recv_stats
+                                                        .dropped_packets
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    recv_stats
+                                                        .drops_oversized
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    break;
+                                                }
+                                                Err(_) => {
+                                                    recv_stats
+                                                        .socket_errors
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                                        let sleep_dur = backoff;
+                                        backoff = (backoff * 2).min(max_backoff);
+                                        let start = Instant::now();
+                                        while start.elapsed() < sleep_dur
+                                            && !recv_shutdown.load(Ordering::Relaxed)
+                                        {
+                                            thread::sleep(Duration::from_millis(5));
+                                        }
+                                    }
+                                }
+                            }
+
+                            recv_done_flag.store(true, Ordering::SeqCst);
+                            recv_condvar.notify_all();
+                        });
+                        runner_threads.push(recv_handle);
                     }
                 }
             }
+        }
 
-            recv_done_flag.store(true, Ordering::SeqCst);
-            recv_condvar.notify_all();
-        });
-
-        // Forwarder thread
+        // -------------------------------------------------------------------
+        // Egress Forwarder Setup (UDP and TCP destinations)
+        // -------------------------------------------------------------------
         let fwd_stream_id = stream_id.clone();
         let fwd_stats = Arc::clone(&stats);
         let fwd_shutdown = Arc::clone(&shutdown_flag);
@@ -313,12 +715,48 @@ impl StreamRunner {
         let fwd_done_flag = Arc::clone(&receiver_done);
 
         let fwd_handle = thread::spawn(move || {
-            // Bind outbound sockets
             let ipv4_socket = UdpSocket::bind("0.0.0.0:0").ok();
             let ipv6_socket = UdpSocket::bind("[::]:0").ok();
 
+            // Track TCP destination connections
+            let mut tcp_conns: Vec<Option<TcpDestinationConnection>> = dest_specs
+                .iter()
+                .map(|d| {
+                    if d.transport == TransportType::Tcp {
+                        Some(TcpDestinationConnection::new(d.address.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let is_single_tcp_dest =
+                dest_specs.len() == 1 && dest_specs[0].transport == TransportType::Tcp;
+
+            let mut held_datagram: Option<Datagram> = None;
+
             loop {
-                let datagram_opt = {
+                // If single TCP destination and not connected, attempt connect with backoff
+                if is_single_tcp_dest {
+                    if let Some(Some(ref mut conn)) = tcp_conns.first_mut() {
+                        while conn.stream.is_none() && !fwd_shutdown.load(Ordering::Relaxed) {
+                            if conn.try_connect(&fwd_stats) {
+                                break;
+                            }
+                            // Sleep for backoff duration, interruptible by shutdown
+                            let sleep_dur = conn.backoff;
+                            let start = Instant::now();
+                            while start.elapsed() < sleep_dur
+                                && !fwd_shutdown.load(Ordering::Relaxed)
+                            {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                    }
+                }
+
+                // Retrieve next datagram if not holding one from retry
+                if held_datagram.is_none() {
                     let mut q = fwd_queue.lock().unwrap();
                     while q.is_empty() {
                         if fwd_shutdown.load(Ordering::Relaxed)
@@ -337,83 +775,112 @@ impl StreamRunner {
                             break;
                         }
                     }
-                    q.pop()
-                };
+                    held_datagram = q.pop();
+                }
 
-                match datagram_opt {
+                match held_datagram.take() {
                     Some(datagram) => {
-                        // Forward to all destinations
-                        for dest in &dest_specs {
-                            let addrs_res = dest.address.to_socket_addrs();
-                            match addrs_res {
-                                Ok(mut addrs) => {
-                                    if let Some(target_addr) = addrs.next() {
-                                        let socket_res = match target_addr {
-                                            SocketAddr::V4(_) => ipv4_socket
-                                                .as_ref()
-                                                .ok_or_else(|| {
-                                                    io::Error::new(
-                                                        io::ErrorKind::AddrNotAvailable,
-                                                        "IPv4 socket unavailable",
-                                                    )
-                                                })
-                                                .and_then(|s| {
-                                                    s.send_to(&datagram.payload, target_addr)
-                                                }),
-                                            SocketAddr::V6(_) => ipv6_socket
-                                                .as_ref()
-                                                .ok_or_else(|| {
-                                                    io::Error::new(
-                                                        io::ErrorKind::AddrNotAvailable,
-                                                        "IPv6 socket unavailable",
-                                                    )
-                                                })
-                                                .and_then(|s| {
-                                                    s.send_to(&datagram.payload, target_addr)
-                                                }),
-                                        };
+                        let mut all_succeeded = true;
 
-                                        match socket_res {
-                                            Ok(sent) => {
-                                                fwd_stats
-                                                    .forwarded_packets
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                                fwd_stats
-                                                    .forwarded_bytes
-                                                    .fetch_add(sent as u64, Ordering::Relaxed);
-                                            }
-                                            Err(err) => {
+                        for (idx, dest) in dest_specs.iter().enumerate() {
+                            match dest.transport {
+                                TransportType::Udp => {
+                                    let addrs_res = dest.address.to_socket_addrs();
+                                    match addrs_res {
+                                        Ok(mut addrs) => {
+                                            if let Some(target_addr) = addrs.next() {
+                                                let socket_res = match target_addr {
+                                                    SocketAddr::V4(_) => ipv4_socket
+                                                        .as_ref()
+                                                        .ok_or_else(|| {
+                                                            io::Error::new(
+                                                                io::ErrorKind::AddrNotAvailable,
+                                                                "IPv4 socket unavailable",
+                                                            )
+                                                        })
+                                                        .and_then(|s| {
+                                                            s.send_to(
+                                                                &datagram.payload,
+                                                                target_addr,
+                                                            )
+                                                        }),
+                                                    SocketAddr::V6(_) => ipv6_socket
+                                                        .as_ref()
+                                                        .ok_or_else(|| {
+                                                            io::Error::new(
+                                                                io::ErrorKind::AddrNotAvailable,
+                                                                "IPv6 socket unavailable",
+                                                            )
+                                                        })
+                                                        .and_then(|s| {
+                                                            s.send_to(
+                                                                &datagram.payload,
+                                                                target_addr,
+                                                            )
+                                                        }),
+                                                };
+
+                                                match socket_res {
+                                                    Ok(sent) => {
+                                                        fwd_stats
+                                                            .forwarded_packets
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        fwd_stats.forwarded_bytes.fetch_add(
+                                                            sent as u64,
+                                                            Ordering::Relaxed,
+                                                        );
+                                                    }
+                                                    Err(err) => {
+                                                        fwd_stats
+                                                            .destination_errors
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        fwd_stats
+                                                            .socket_errors
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        eprintln!(
+                                                            "[stream {}] UDP destination error sending to {}: {}",
+                                                            fwd_stream_id, target_addr, err
+                                                        );
+                                                    }
+                                                }
+                                            } else {
                                                 fwd_stats
                                                     .destination_errors
                                                     .fetch_add(1, Ordering::Relaxed);
-                                                fwd_stats
-                                                    .socket_errors
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                                eprintln!(
-                                                    "[stream {}] Destination error sending to {}: {}",
-                                                    fwd_stream_id, target_addr, err
-                                                );
                                             }
                                         }
-                                    } else {
-                                        fwd_stats
-                                            .destination_errors
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        eprintln!(
-                                            "[stream {}] No socket address resolved for '{}'",
-                                            fwd_stream_id, dest.address
-                                        );
+                                        Err(err) => {
+                                            fwd_stats
+                                                .destination_errors
+                                                .fetch_add(1, Ordering::Relaxed);
+                                            fwd_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                                            eprintln!(
+                                                "[stream {}] Destination resolution error for '{}': {}",
+                                                fwd_stream_id, dest.address, err
+                                            );
+                                        }
                                     }
                                 }
-                                Err(err) => {
-                                    fwd_stats.destination_errors.fetch_add(1, Ordering::Relaxed);
-                                    fwd_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
-                                    eprintln!(
-                                        "[stream {}] Destination resolution error for '{}': {}",
-                                        fwd_stream_id, dest.address, err
-                                    );
+                                TransportType::Tcp => {
+                                    if let Some(Some(ref mut conn)) = tcp_conns.get_mut(idx) {
+                                        if let Err(e) = conn.send(&datagram.payload, &fwd_stats) {
+                                            all_succeeded = false;
+                                            eprintln!(
+                                                "[stream {}] TCP destination error sending to {}: {}",
+                                                fwd_stream_id, dest.address, e
+                                            );
+                                        }
+                                    }
                                 }
                             }
+                        }
+
+                        // If single TCP destination and send failed due to disconnection/outage, retain datagram for retry
+                        if is_single_tcp_dest
+                            && !all_succeeded
+                            && !fwd_shutdown.load(Ordering::Relaxed)
+                        {
+                            held_datagram = Some(datagram);
                         }
                     }
                     None => {
@@ -426,12 +893,13 @@ impl StreamRunner {
                 }
             }
         });
+        runner_threads.push(fwd_handle);
 
         Ok(Self {
             stream_id,
             stats,
             shutdown_flag,
-            threads: vec![recv_handle, fwd_handle],
+            threads: runner_threads,
         })
     }
 
@@ -451,7 +919,7 @@ pub struct Relay {
 }
 
 impl Relay {
-    /// Starts all UDP relay streams defined across all instances in the configuration.
+    /// Starts all forwarding streams defined across all instances in the configuration.
     ///
     /// # Errors
     /// Returns an error if any stream fails to bind its listening socket.
@@ -461,10 +929,8 @@ impl Relay {
 
         for inst in config.all_instances() {
             for stream in &inst.streams {
-                if stream.source.transport == TransportType::Udp {
-                    let runner = StreamRunner::start(stream, &inst, Arc::clone(&shutdown_flag))?;
-                    stream_runners.push(runner);
-                }
+                let runner = StreamRunner::start(stream, &inst, Arc::clone(&shutdown_flag))?;
+                stream_runners.push(runner);
             }
         }
 
@@ -500,7 +966,7 @@ impl Relay {
             let snap = runner.stats.snapshot();
             runner.stop();
             eprintln!(
-                "[relay] Stream '{}' final stats: rx={}/{}B, tx={}/{}B, drops={} (queue={}, oversized={}), errors={} (dest={}, socket={})",
+                "[relay] Stream '{}' final stats: rx={}/{}B, tx={}/{}B, drops={} (queue={}, oversized={}), errors={} (dest={}, socket={}), backpressure={}",
                 id,
                 snap.received_packets,
                 snap.received_bytes,
@@ -511,7 +977,8 @@ impl Relay {
                 snap.drops_oversized,
                 snap.destination_errors + snap.socket_errors,
                 snap.destination_errors,
-                snap.socket_errors
+                snap.socket_errors,
+                snap.backpressure_events
             );
         }
     }
