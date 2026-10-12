@@ -1,0 +1,10 @@
+Package: rer
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Ronald Edward Reeves Jr <gold.emerald@proton.me>
+Homepage: https://github.com/emeraldsongold/rer
+Description: RER Engineering Relay
+ Open-source network relay, telemetry/command routing, and distributed
+ network diagnostics tool.

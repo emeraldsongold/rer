@@ -12,18 +12,24 @@ At the current foundation milestone (RER-F-001), the following platform is verif
 
 All compilation, linter (`clippy`), formatting (`rustfmt`), and unit tests run cleanly on `x86_64-unknown-linux-gnu` under the stable Rust toolchain.
 
-## 2. Planned Target Platforms (Release Roadmap)
+## 2. Target Platforms and Packaged Formats (Milestone RER-F-015)
 
-The official targets planned for initial releases (SPEC §4) are:
+The official targets for releases (SPEC §4, §16) are:
 
 - **Linux x86-64 (`x86_64-unknown-linux-gnu`)**: Tier 1 release and CI target.
-- **Linux AArch64 / ARM64 (`aarch64-unknown-linux-gnu`)**: Tier 1 cross-compilation and container deployment target.
+- **Linux AArch64 / ARM64 (`aarch64-unknown-linux-gnu`)**: Tier 1 cross-compilation and package deployment target.
 
-### Supported Distribution Baseline
-The target baseline focuses on actively supported Linux distributions with standard `glibc` environments:
-- Ubuntu 22.04 LTS and newer
-- Debian 11 (Bullseye) and Debian 12 (Bookworm)
-- AlmaLinux / Rocky Linux / RHEL 8+
+### Distribution Packages and Artifacts
+
+| Format | Architecture | Target Distributions | Artifact Pattern | Systemd Unit | Config Path |
+|---|---|---|---|---|---|
+| `.deb` | `amd64` (x86_64) | Ubuntu 22.04+, Debian 11/12 | `rer_<version>_amd64.deb` | `/usr/lib/systemd/system/rer.service` | `/etc/rer/rer.yaml` |
+| `.deb` | `arm64` (AArch64) | Ubuntu 22.04+, Debian 11/12 | `rer_<version>_arm64.deb` | `/usr/lib/systemd/system/rer.service` | `/etc/rer/rer.yaml` |
+| `.rpm` | `x86_64` | RHEL 8/9, AlmaLinux, Rocky, Fedora | `rer-<version>-1.x86_64.rpm` | `/usr/lib/systemd/system/rer.service` | `/etc/rer/rer.yaml` |
+| `.rpm` | `aarch64` | RHEL 8/9, AlmaLinux, Rocky, Fedora | `rer-<version>-1.aarch64.rpm` | `/usr/lib/systemd/system/rer.service` | `/etc/rer/rer.yaml` |
+| `.tar.gz` | `x86_64`, `aarch64` | Portable Linux | `rer-<version>-linux-<arch>.tar.gz` | Included in archive | Included in archive |
+
+Packages enforce safe defaults: service units are not automatically started or enabled upon installation, upgrades preserve operator configuration under `/etc/rer/`, and package removal retains state and configuration to prevent silent data loss.
 
 ## 3. Best-Effort Compatibility Targets (Milestone RER-F-018)
 
