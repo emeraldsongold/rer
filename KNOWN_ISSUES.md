@@ -13,10 +13,8 @@ RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone 
   Local management HTTP/JSON endpoints, runtime counters, health checks, and Prometheus metrics endpoints are not yet implemented.
 - **Diagnostic Logging & Inspection (`RER-F-008`, `RER-F-009`)**:
   Structured packet diagnostics, sequence gap detection, and hex preview facilities are not yet implemented.
-- **Packaging and Deployment Artifacts (`RER-F-014`–`RER-F-015`)**:
-  Helm charts (`deploy/helm`, milestone RER-F-014) and OS packages (`.deb`, `.rpm`, milestone RER-F-015) are scheduled in subsequent milestones. Container images (`deploy/docker`) and Docker Compose deployments (`deploy/compose`) are implemented in Milestone RER-F-013.
-- **Container and Orchestration Artifacts (`RER-F-013`, `RER-F-014`, `RER-F-016`)**:
-  Container images (`deploy/docker`), Helm charts (`deploy/helm`), and Docker Compose setups (`deploy/compose`) are scheduled in milestones RER-F-013, RER-F-014, and RER-F-016. OS packages (`.deb`, `.rpm`) and standalone binaries are complete (`packaging/`).
+- **Helm Chart and Kubernetes Deployment (`RER-F-014`)**:
+  Helm charts (`deploy/helm`) and Kubernetes deployment tests are scheduled in milestone RER-F-014. Container images (`deploy/docker`) and Docker Compose deployments (`deploy/compose`) are implemented in Milestone RER-F-013. OS packages (`.deb`, `.rpm`) and standalone binaries are implemented in Milestone RER-F-015 (`packaging/`).
 
 ## 3. Tooling and CI Tracking
 
