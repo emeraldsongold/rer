@@ -30,7 +30,10 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 18 | RER-F-018 | Legacy OS compatibility experiments and documented results | BACKLOG | test | low | ready-auto | RER-F-015 | §4 |
 | 19 | RER-F-019 | BPv7 research and integration proposal | BACKLOG | research | medium | investigate-only | RER-F-006, RER-F-008, RER-F-010 | §14 |
 | 20 | RER-F-020 | LTP research and integration proposal | BACKLOG | research | medium | investigate-only | RER-F-006, RER-F-008, RER-F-010 | §14 |
-| 21 | RER-F-021 | Release hardening, security review, documentation and reproducible release process | BACKLOG | release | high | no-auto | RER-F-012, RER-F-013, RER-F-014, RER-F-015, RER-F-016, RER-F-017, RER-F-018 | §16, §17, §19, §21 |
+| 21 | RER-F-021 | Release hardening, security review, documentation and reproducible release process | BACKLOG | release | high | no-auto | RER-F-012, RER-F-013, RER-F-014, RER-F-015, RER-F-016, RER-F-017, RER-F-018, RER-F-023, RER-F-024 | §16, §17, §19, §21 |
+| 22 | RER-F-022 | Strict validation of IP addresses, hostnames and ports in endpoint configuration | BACKLOG | feature | low | ready-auto | RER-F-002 | §5, §7, §17 |
+| 23 | RER-F-023 | IPv6 support for relay endpoints | BACKLOG | feature | medium | ready-auto | RER-F-005, RER-F-022 | §5, §13, §17 |
+| 24 | RER-F-024 | Scoped IPv6 addresses with zone identifiers | BACKLOG | feature | medium | ready-auto | RER-F-023 | §5, §17 |
 
 ## Cross-cutting tracks
 
@@ -43,7 +46,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-009 → RER-F-010 → RER-F-011 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-016 → RER-F-017 → RER-F-018 → RER-F-019 → RER-F-020 → RER-F-021
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-009 → RER-F-010 → RER-F-011 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-016 → RER-F-017 → RER-F-018 → RER-F-019 → RER-F-020 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-021
 
 ## Owner approval gates
 

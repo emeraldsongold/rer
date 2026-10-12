@@ -361,7 +361,7 @@ items:
     risk: high
     autonomy: no-auto
     approvals_required: [release]
-    depends_on: [RER-F-012, RER-F-013, RER-F-014, RER-F-015, RER-F-016, RER-F-017, RER-F-018]
+    depends_on: [RER-F-012, RER-F-013, RER-F-014, RER-F-015, RER-F-016, RER-F-017, RER-F-018, RER-F-023, RER-F-024]
     spec_refs: ["§16", "§17", "§19", "§21"]
     test_profile: full
     acceptance:
@@ -369,6 +369,69 @@ items:
       - A security review and dependency audit are completed, with findings recorded.
       - Documentation matches actual behavior.
       - Publishing a release requires the owner's approval.
+
+  - id: RER-F-022
+    order: 22
+    phase: Core relay
+    title: Strict validation of IP addresses, hostnames and ports in endpoint configuration
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: ready-auto
+    depends_on: [RER-F-002]
+    spec_refs: ["§5", "§7", "§17"]
+    test_profile: standard
+    notes: Hardens the endpoint check from RER-F-002, which today validates the port but not the host. Syntax only; IPv6 behaviour at run time belongs to RER-F-023 and zone handling to RER-F-024.
+    acceptance:
+      - An endpoint address is `host:port` where host is an IPv4 literal, a bracketed IPv6 literal such as `[::1]` or a syntactically valid hostname; anything else is rejected by `rer validate` with the field path and a reason.
+      - A bracketed IPv6 literal may carry a zone identifier such as `[fe80::1%eth0]` or `[fe80::1%2]`; an empty zone, a zone containing whitespace or control characters, or a zone longer than 15 bytes is rejected.
+      - A port must be an integer from 1 to 65535; 0, negative, above 65535, empty and non-numeric ports are each rejected with their own message.
+      - Malformed addresses are rejected before any socket call, including `999.1.1.1:80`, `1.2.3:80`, `[::1:80`, the unbracketed `::1:80`, hosts containing spaces or control characters, hostnames longer than 253 bytes, labels longer than 63 bytes and labels starting or ending with `-`.
+      - Unix-domain-socket paths keep their current handling and are not run through host validation.
+      - Validation is offline and deterministic, so it performs no name lookup and no interface lookup.
+      - Each accepted and rejected class above has a table-driven unit test, and `rer run` refuses to start on every rejected class.
+
+  - id: RER-F-023
+    order: 23
+    phase: Core relay
+    title: IPv6 support for relay endpoints
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-005, RER-F-022]
+    spec_refs: ["§5", "§13", "§17"]
+    test_profile: standard
+    notes: The UDP sender already keeps an IPv6 socket, but IPv6 listeners, TCP and tests do not exist and nothing documents it. The agent sandbox has no IPv6 loopback (`::1` cannot be bound, measured 2026-10-12), so IPv6 integration tests cannot run there and CI is the evidence; write them to skip with a visible reason when `::1` is unavailable and do not weaken them to pass. Adding the `socket2` crate is approved by the owner; deny.toml is owner controlled and must not be edited.
+    acceptance:
+      - Source and destination endpoints accept bracketed IPv6 literals (`[::1]:5000`) for UDP and TCP in all four transport combinations, and IPv4-only configurations behave exactly as before.
+      - Loopback integration tests forward IPv4 to IPv6 and IPv6 to IPv4, and fan out to destinations of mixed families, with payload bytes and datagram boundaries preserved.
+      - IPv6 listeners set IPV6_V6ONLY explicitly, so `[::]` accepts IPv6 only and `0.0.0.0` accepts IPv4 only on every platform; dual-stack is two explicit endpoints, and a test proves an IPv4 client cannot reach an `[::]` listener.
+      - Socket options are set through the `socket2` crate, added as a workspace dependency with a pinned version requirement and a committed Cargo.lock; it passes `cargo deny` without any change to deny.toml, and if that is not possible the agent stops and reports it as an unmet criterion.
+      - A hostname that resolves to both families uses a documented selection rule, and an unresolvable or unreachable destination is counted and reported without stopping the other destinations.
+      - Where IPv6 loopback is unavailable the integration tests skip with a visible reason; they never pass silently.
+      - Diagnostic output and the management API show IPv6 endpoints in bracketed form.
+      - PLATFORM_SUPPORT.md and the configuration documentation state exactly what IPv6 support is tested; nothing further is claimed.
+
+  - id: RER-F-024
+    order: 24
+    phase: Core relay
+    title: Scoped IPv6 addresses with zone identifiers
+    type: feature
+    priority: P3
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-023]
+    spec_refs: ["§5", "§17"]
+    test_profile: standard
+    notes: Split from RER-F-023 so each task stays small enough for one attempt. The `libc` crate is already a dependency, and `unsafe` is already used in signals.rs, so `libc::if_nametoindex` is acceptable. The agent sandbox has no IPv6 loopback, so the integration test is CI evidence only.
+    acceptance:
+      - Zone identifiers in `[fe80::1%eth0]:5000` and the numeric form `[fe80::1%2]:5000` work for UDP and TCP sources and destinations, with an interface name resolved to its index and applied as the scope id of the socket address.
+      - An unknown interface name is reported with the configuration path and the name, at startup for a source and as a counted destination error for a destination, and never as a silent failure.
+      - A zone on an address that does not need one is passed to the operating system and any refusal is reported, not hidden.
+      - Parsing and formatting round-trip the zone, and diagnostic output and the management API show it unchanged.
+      - Unit tests cover parsing, formatting and error cases offline, and a loopback integration test exercises a scoped address where the platform allows it and skips with a visible reason otherwise.
+      - PLATFORM_SUPPORT.md states what scoped-address behaviour is tested and that link-local addresses on real network interfaces are not covered by CI.
 
   - id: RER-T-001
     kind: track
