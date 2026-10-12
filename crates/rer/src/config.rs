@@ -333,6 +333,31 @@ impl Config {
                         reason: "management endpoint must not be empty when enabled".to_string(),
                     });
                 }
+                if mgmt.enabled && is_untrusted_remote_endpoint(&mgmt.endpoint) {
+                    if mgmt
+                        .auth_token
+                        .as_ref()
+                        .map(|t| t.expose_secret().trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        errors.push(ValidationError {
+                            path: format!("{}.auth_token", mgmt_prefix),
+                            reason: format!(
+                                "remote management endpoint '{}' requires authentication; 'auth_token' must be configured",
+                                mgmt.endpoint
+                            ),
+                        });
+                    }
+                    if mgmt.tls.is_none() {
+                        errors.push(ValidationError {
+                            path: format!("{}.tls", mgmt_prefix),
+                            reason: format!(
+                                "remote management endpoint '{}' requires encryption; 'tls' with cert_file and key_file must be configured",
+                                mgmt.endpoint
+                            ),
+                        });
+                    }
+                }
                 if let Some(tls) = &mgmt.tls {
                     if tls.cert_file.trim().is_empty() {
                         errors.push(ValidationError {
@@ -622,6 +647,37 @@ fn validate_endpoint(
             reason: "conflicting settings: UDP source cannot be in 'connect' mode".to_string(),
         });
     }
+}
+
+/// Returns true if an endpoint string is a network endpoint (TCP/IP).
+#[must_use]
+pub fn is_remote_endpoint(endpoint: &str) -> bool {
+    let ep = endpoint.trim();
+    if ep.starts_with('/') || ep.starts_with("./") || ep.ends_with(".sock") || ep.contains(".sock")
+    {
+        return false;
+    }
+    true
+}
+
+/// Returns true if an endpoint points to an untrusted remote network (i.e. not local Unix domain socket and not loopback).
+#[must_use]
+pub fn is_untrusted_remote_endpoint(endpoint: &str) -> bool {
+    if !is_remote_endpoint(endpoint) {
+        return false;
+    }
+    let host = endpoint
+        .trim()
+        .trim_start_matches("tcp://")
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let host_part = if let Some(idx) = host.rfind(':') {
+        &host[..idx]
+    } else {
+        host
+    };
+    let h = host_part.trim_matches('[').trim_matches(']');
+    h != "127.0.0.1" && h != "localhost" && h != "::1"
 }
 
 /// Generates the canonical JSON Schema for RER configuration.

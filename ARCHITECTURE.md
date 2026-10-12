@@ -95,7 +95,19 @@ rer/
 - **Resilient Fan-Out**: Streams forward datagrams across multiple destinations (`destinations`), isolating destination errors so that an outage at one destination does not block or halt delivery to functioning destinations.
 - **CLI Inspection**: `rer streams` displays streams, logical interfaces, directional configurations, and pairing context as human-readable text or machine-readable JSON.
 
-### 2.7 CI and Quality Pipeline
+### 2.7 Management Plane, Telemetry & Versioned API (`RER-F-007`)
+
+- **Dedicated Management Plane**: Runs on isolated background threads with independent socket lifecycle and panic containment (`panic::catch_unwind`), guaranteeing that control-plane socket errors, malicious inputs, or client aborts cannot halt the data forwarding plane.
+- **Default Local Management (UDS)**: Enabled by default on local Unix domain sockets (default `/tmp/relay_health.sock` or instance-configured endpoint), secured via OS filesystem permissions.
+- **Remote Management Security**: Off by default. When enabled across non-loopback network interfaces, configuration validation strictly requires authentication (`auth_token`) and encryption (`tls` with cert and key). Unauthenticated or plaintext remote endpoints are rejected.
+- **Versioned JSON Wire Protocol**: Requests and responses adhere to versioned schema envelope (`MGMT_API_VERSION = "v1"`). Mismatched versions return a structured error without touching relay state.
+- **Role and Operation Separation**: Operations are partitioned into `ReadOnly` (`status`, `health`, `streams`, `metrics`, `version`, `inspect_config`) and `BehaviorChanging` (`set_log_level`, `trigger_test`). Read-only clients are barred from behavior-changing operations. Arbitrary shell command execution and code injection are strictly prohibited.
+- **CLI Commands**:
+  - `rer status`: Reports overall instance health, binary version, daemon uptime, and aggregate/stream counters as formatted text or machine-readable JSON.
+  - `rer streams`: Displays static configuration models or active runtime stream states, endpoints, and directional interface counters.
+  - `rer metrics`: Reports point-in-time packet, byte, drop, queue depth, error, and uptime counters in JSON, tabular text, or Prometheus/OpenMetrics exposition format.
+
+### 2.8 CI and Quality Pipeline
 
 - **Hosted Execution**: Builds entirely on standard GitHub Actions Linux runners without requiring local compilation or paid infrastructure.
 - **Enforced Quality Gates**:
@@ -109,9 +121,9 @@ rer/
 
 Future milestones (as detailed in [`docs/SPEC.md`](docs/SPEC.md) and [`ROADMAP.md`](ROADMAP.md)) will introduce the following subsystems:
 
-1. **Management API and Diagnostics (`RER-F-007`, `RER-F-008`, `RER-F-009`)**:
-   Non-shell local HTTP/JSON management endpoints, structured diagnostic event feeds, sequence tracking, and payload inspection.
+1. **Diagnostic Logging & Inspection (`RER-F-008`, `RER-F-009`)**:
+   Structured diagnostic event feeds, sequence tracking, and payload inspection.
 2. **Multi-Hop Topology Emulation (`RER-F-010`, `RER-F-011`)**:
    Deterministic multi-relay topology emulation and capture replay verification.
-3. **Observability and Packaging (`RER-F-012`–`RER-F-015`)**:
-   Prometheus/OpenMetrics exporter, non-root Docker images, Helm charts, and standalone `.deb`/`.rpm` packaging.
+3. **Container and Cloud Deployment (`RER-F-014`)**:
+   Helm charts and Kubernetes multi-cluster deployment tests.

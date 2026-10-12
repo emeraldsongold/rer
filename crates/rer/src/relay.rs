@@ -967,6 +967,7 @@ pub struct StreamHealthSnapshot {
 #[derive(Clone)]
 pub struct RelayHealthHandle {
     stream_runners: Arc<Vec<StreamRunnerHandle>>,
+    logical_interfaces: Arc<Vec<LogicalInterfaceInfo>>,
     shutdown_flag: Arc<AtomicBool>,
     start_time: std::time::Instant,
 }
@@ -1013,6 +1014,47 @@ impl RelayHealthHandle {
                     stream_id: r.stream_id.clone(),
                     is_healthy: healthy,
                     stats: r.stats.snapshot(),
+                }
+            })
+            .collect()
+    }
+
+    /// Returns all configured logical interfaces.
+    #[must_use]
+    pub fn logical_interfaces(&self) -> &[LogicalInterfaceInfo] {
+        &self.logical_interfaces
+    }
+
+    /// Retrieves statistics for a specific stream.
+    #[must_use]
+    pub fn stream_stats(&self, stream_id: &str) -> Option<StreamStatsSnapshot> {
+        self.stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)
+            .map(|r| r.stats.snapshot())
+    }
+
+    /// Retrieves point-in-time statistics for all configured logical interfaces.
+    #[must_use]
+    pub fn logical_interface_stats(&self) -> Vec<LogicalInterfaceStats> {
+        self.logical_interfaces
+            .iter()
+            .map(|iface| {
+                let tx_stats = iface
+                    .tx_stream
+                    .as_ref()
+                    .and_then(|id| self.stream_stats(id));
+                let rx_stats = iface
+                    .rx_stream
+                    .as_ref()
+                    .and_then(|id| self.stream_stats(id));
+                LogicalInterfaceStats {
+                    id: iface.id.clone(),
+                    name: iface.name.clone(),
+                    tx_stream: iface.tx_stream.clone(),
+                    rx_stream: iface.rx_stream.clone(),
+                    tx_stats,
+                    rx_stats,
                 }
             })
             .collect()
@@ -1076,6 +1118,7 @@ impl Relay {
             .collect();
         RelayHealthHandle {
             stream_runners: Arc::new(handles),
+            logical_interfaces: Arc::new(self.logical_interfaces.clone()),
             shutdown_flag: Arc::clone(&self.shutdown_flag),
             start_time: self.start_time,
         }
