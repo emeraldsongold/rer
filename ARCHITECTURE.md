@@ -63,7 +63,30 @@ rer/
 - **Destination Resilience & Fan-out**: Forwards to single destinations or fan-out lists. Unreachable destinations or socket errors are logged and increment per-stream error counters without halting or panicking the relay.
 - **Graceful Lifecycle Management**: `rer run` requires valid configuration before launch, installs signal handlers for `SIGINT` and `SIGTERM`, drains active queues on shutdown, and reports stream statistics upon exit with status 0.
 
-### 2.4 CI and Quality Pipeline
+### 2.4 TCP Relay & Framing Engine Subsystem (`RER-F-005`)
+
+- **Four Transport Conversion Combinations**: Full configurable forwarding across UDP-to-UDP, UDP-to-TCP, TCP-to-UDP, and TCP-to-TCP stream topologies.
+- **Explicit Framing Protocol**: Converts between continuous TCP byte streams and discrete datagrams using an explicit length-prefixed framing format:
+  - Header: 4-byte big-endian unsigned 32-bit integer (`uint32`) indicating payload byte length `N`.
+  - Body: Exactly `N` payload bytes.
+  - Oversized frames exceeding `max_packet_size` are dropped before queuing and accounted under `drops_oversized`.
+  - Transparent stream defragmentation handles chunked TCP reads.
+- **TCP Connection Lifecycle & Resilience**:
+  - Connect and reconnect with exponential backoff against destination outages at startup and during active streaming.
+  - Sockets configure explicit connect timeouts, write timeouts, and read timeouts.
+  - Unreachable destinations or connection drops increment `destination_errors` and `socket_errors` without panicking or halting the relay.
+  - In single TCP destination streams, datagrams arriving during destination outages are buffered in bounded memory and delivered upon reconnection.
+- **Slow Reader Backpressure**:
+  - Memory usage is strictly bounded by `max_queue_size` and `max_packet_size`.
+  - When slow TCP readers cause socket write stalls or write timeouts, backpressure events are tracked in `backpressure_events`.
+  - Queue saturation drops are strictly accounted for under `drops_queue_full` and `dropped_packets` according to the configured drop policy.
+
+### 2.5 Simulation & Verification Harness (`RER-F-004`)
+
+- Deterministic traffic generator (`TrafficGenerator`) and test receiver (`TrafficReceiver`) verifying expected counts and SHA-256 payload hashes.
+- Unprivileged simulation harness (`SimulationHarness`) testing all four transport combinations, impairments, and queue policies in CI.
+
+### 2.6 CI and Quality Pipeline
 
 - **Hosted Execution**: Builds entirely on standard GitHub Actions Linux runners without requiring local compilation or paid infrastructure.
 - **Enforced Quality Gates**:
@@ -77,13 +100,11 @@ rer/
 
 Future milestones (as detailed in [`docs/SPEC.md`](docs/SPEC.md) and [`ROADMAP.md`](ROADMAP.md)) will introduce the following subsystems:
 
-1. **TCP Relay & Conversion Engine (`RER-F-005`)**:
-   Asynchronous I/O handling TCP stream lifecycle/reconnection, backpressure, bounded buffer queues, and conversion combinations (UDP↔TCP, TCP↔UDP, TCP↔TCP).
-2. **Logical Interfaces and Directional Streams (`RER-F-006`)**:
+1. **Logical Interfaces and Directional Streams (`RER-F-006`)**:
    Paired directional streams modeling command TX/response RX and uplink/downlink relationships with independent counters, backpressure, and routing policies.
-3. **Management API and Diagnostics (`RER-F-007`, `RER-F-008`, `RER-F-009`)**:
+2. **Management API and Diagnostics (`RER-F-007`, `RER-F-008`, `RER-F-009`)**:
    Non-shell local HTTP/JSON management endpoints, structured diagnostic event feeds, sequence tracking, and payload inspection.
-4. **Simulation and Verification Harness (`RER-F-004`, `RER-F-010`, `RER-F-011`)**:
-   Traffic generation, deterministic multi-relay topology emulation, and capture replay verification.
-5. **Observability and Packaging (`RER-F-012`–`RER-F-015`)**:
+3. **Multi-Hop Topology Emulation (`RER-F-010`, `RER-F-011`)**:
+   Deterministic multi-relay topology emulation and capture replay verification.
+4. **Observability and Packaging (`RER-F-012`–`RER-F-015`)**:
    Prometheus/OpenMetrics exporter, non-root Docker images, Helm charts, and standalone `.deb`/`.rpm` packaging.

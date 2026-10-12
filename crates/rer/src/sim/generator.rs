@@ -1,5 +1,5 @@
-use std::io;
-use std::net::UdpSocket;
+use std::io::{self, Write};
+use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -252,6 +252,91 @@ impl TrafficGenerator {
                 }
             }
         }
+
+        let elapsed = start.elapsed();
+        let stream_hash = sha256_hex(&all_payloads);
+
+        Ok(GeneratorStats {
+            packets_emitted: self.emitted_count,
+            bytes_emitted: total_bytes,
+            duration_ms: elapsed.as_millis() as u64,
+            stream_hash,
+        })
+    }
+
+    /// Sends generated packets over TCP to `target_addr` with length-prefixed framing,
+    /// pacing according to `rate` and `burst`.
+    pub fn run_tcp(&mut self, target_addr: &str) -> io::Result<GeneratorStats> {
+        let addrs = target_addr.to_socket_addrs()?.collect::<Vec<_>>();
+        if addrs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!("no address resolved for '{}'", target_addr),
+            ));
+        }
+
+        // Retry connecting for up to 3 seconds in case the listener is still starting
+        let start_conn = Instant::now();
+        let mut stream_opt = None;
+        while start_conn.elapsed() < Duration::from_secs(3) {
+            match TcpStream::connect_timeout(&addrs[0], Duration::from_millis(500)) {
+                Ok(s) => {
+                    let _ = s.set_nodelay(true);
+                    let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
+                    stream_opt = Some(s);
+                    break;
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+
+        let mut stream = stream_opt.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("failed to connect to TCP destination '{}'", target_addr),
+            )
+        })?;
+
+        let rate = self.config.rate.unwrap_or(0.0);
+        let burst = self.config.burst.unwrap_or(1).max(1);
+
+        let burst_delay = if rate > 0.0 {
+            Duration::from_secs_f64(burst as f64 / rate)
+        } else {
+            Duration::ZERO
+        };
+
+        let start = Instant::now();
+        self.start_time = Some(start);
+
+        let mut total_bytes = 0u64;
+        let mut all_payloads = Vec::new();
+        let mut burst_counter = 0;
+        let mut next_burst_time = Instant::now();
+
+        while let Some(pkt) = self.next_packet() {
+            let pkt_bytes = pkt.to_bytes();
+            let frame = crate::framing::encode_frame(&pkt_bytes);
+            stream.write_all(&frame)?;
+            total_bytes += frame.len() as u64;
+            all_payloads.extend_from_slice(&pkt.payload);
+
+            burst_counter += 1;
+            if burst_counter >= burst {
+                burst_counter = 0;
+                if rate > 0.0 {
+                    next_burst_time += burst_delay;
+                    let now = Instant::now();
+                    if next_burst_time > now {
+                        thread::sleep(next_burst_time - now);
+                    }
+                }
+            }
+        }
+
+        stream.flush()?;
 
         let elapsed = start.elapsed();
         let stream_hash = sha256_hex(&all_payloads);

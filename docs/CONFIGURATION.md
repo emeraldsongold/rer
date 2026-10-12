@@ -87,6 +87,25 @@ Each stream specifies forwarding from a `source` to one or more destinations:
 | `address` | string | (required) | Network address in `host:port` format (e.g. `127.0.0.1:5000`). Port must be between 1 and 65535. |
 | `mode` | string | `"listen"` for source, `"connect"` for dest | Connection mode: `"listen"` or `"connect"`. |
 
+### Transport Conversion and TCP Framing Protocol
+
+RER supports all four transport conversion combinations across ingress and egress:
+- **UDP to UDP**: Preserves discrete UDP datagram boundaries.
+- **UDP to TCP**: Ingress UDP datagrams are framed into TCP byte streams using a 4-byte big-endian length prefix.
+- **TCP to UDP**: Ingress framed TCP messages are decoded using their 4-byte length header and transmitted as individual UDP datagrams.
+- **TCP to TCP**: End-to-end framed stream forwarding.
+
+#### TCP Wire Framing Format
+
+```text
++---------------------------+------------------------------------+
+| Length Prefix (4 bytes)   | Payload Bytes (N bytes)            |
+| uint32 big-endian (N)     | [u8; N]                            |
++---------------------------+------------------------------------+
+```
+
+Frames with length exceeding `max_packet_size` are dropped at ingress and tracked under `drops_oversized`. Destination outages trigger automatic reconnection with exponential backoff. Slow TCP readers that stall transmission cause bounded queue saturation and explicit drop policy enforcement without unbounded memory growth.
+
 ## 6. Logical Interfaces (`LogicalInterfaceConfig`)
 
 Logical interfaces associate related directional streams, such as command TX and telemetry RX paths (SPEC §6):

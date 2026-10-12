@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod config;
 pub mod health;
+pub mod framing;
 pub mod relay;
 pub mod secret;
 pub mod signals;
@@ -21,6 +22,8 @@ pub use relay::{
     BoundedQueue, Datagram, Relay, RelayHealthHandle, StreamHealthSnapshot, StreamStats,
     StreamStatsSnapshot,
 };
+pub use framing::{encode_frame, read_frame, write_frame};
+pub use relay::{BoundedQueue, Datagram, Relay, StreamStats, StreamStatsSnapshot};
 pub use secret::SecretString;
 pub use sim::{
     GeneratorConfig, GeneratorStats, HarnessConfig, ImpairmentConfig, Packet, ReceiverReport,

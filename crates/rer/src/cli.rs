@@ -776,6 +776,7 @@ fn run_harness_cli(args: HarnessArgs) -> ExitCode {
         use_relay: true,
         relay_queue_capacity: None,
         relay_drop_policy: None,
+        ..Default::default()
     };
 
     match SimulationHarness::run(harness_config) {
