@@ -1,0 +1,32 @@
+# Simple single-instance relay deployment example for RER Helm chart
+# Scaling replicas does not preserve UDP/TCP routing semantics automatically.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/emeraldsongold/rer
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+
+service:
+  type: ClusterIP
+  ports:
+    - name: telemetry-udp
+      port: 5000
+      targetPort: 5000
+      protocol: UDP
+
+config: |
+  version: "1"
+  instances:
+    - id: "rer-simple-01"
+      streams:
+        - id: "telemetry-stream"
+          source:
+            transport: "udp"
+            address: "0.0.0.0:5000"
+          destination:
+            transport: "udp"
+            address: "127.0.0.1:5001"
+          buffer:
+            max_queue_size: 1024
+            drop_policy: "drop_oldest"

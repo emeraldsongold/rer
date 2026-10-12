@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-014 (Helm Chart and Kubernetes Deployment Tests)
+- **Helm Chart Packaging**: Created complete Helm chart (`deploy/helm/rer`) matching application version (`0.1.0`), providing Deployment, Service, ServiceAccount, ConfigMap, PodDisruptionBudget, ServiceMonitor, and PVC templates conforming to SPEC §16.D.
+- **Values Schema Validation**: Implemented JSON Schema Draft 7 specification (`deploy/helm/rer/values.schema.json`) validating chart values, types, required properties, and port definitions across default values, simple deployment (`values-simple.yaml`), and multi-instance topology (`values-multi-instance.yaml`).
+- **Non-Root Hardening & Security Context**: Configured Restricted Pod Security Standard contexts with unprivileged UID/GID `65532:65532`, `readOnlyRootFilesystem: true`, privilege escalation disabled, dropped `ALL` capabilities, and dedicated `emptyDir` mount for `/tmp` health sockets.
+- **Application Health Probes & Resource Limits**: Added liveness, readiness, and startup exec probes querying `/usr/local/bin/rer health` without excessive traffic, paired with default CPU and memory requests and limits.
+- **Replica Scaling Semantics Documentation**: Explicitly documented that scaling replicas does not preserve UDP/TCP routing semantics automatically across chart documentation, values files, and release notes, providing multi-instance configuration examples with explicit port ownership.
+- **Smoke Deployment Script & Integration Tests**: Created `deploy/helm/smoke-test.sh` for linting, schema checking, and live cluster deployment smoke tests on free CI Kubernetes (kind), with cleanly documented limitations when container clusters are unavailable, alongside comprehensive Rust integration tests (`crates/rer/tests/helm_tests.rs`).
+
 ### Added - Milestone RER-F-006 (Logical Interfaces, Paired Directional Streams, Multiple Streams, and Fan-Out)
 - **Logical Interfaces**: Expressed logical interfaces with one or two directional streams (`tx_stream`, `rx_stream`) in YAML configuration and exposed their topology via CLI output (`crates/rer/src/config.rs`, `crates/rer/src/cli.rs`).
 - **Directional Independence**: Guaranteed that transmit (TX) and receive (RX) directions operate with independent counters (`StreamStats`), socket endpoints, transport protocols, bounded queues, error tracking, and routing policies (`crates/rer/src/relay.rs`).

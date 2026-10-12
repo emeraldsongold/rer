@@ -1,0 +1,134 @@
+# Default values for RER (RER Engineering Relay) Helm chart.
+# Conforms to SPEC §16.D and §17: non-root security context, probes, resources, configurable ports.
+
+# Number of pod replicas.
+# WARNING: Scaling replicas does not preserve UDP/TCP routing semantics automatically.
+# RER streams are stateful point-to-point or point-to-multipoint relays. In Kubernetes,
+# spreading inbound UDP/TCP traffic across multiple replica pods via a standard ClusterIP
+# or LoadBalancer Service load-balances incoming packets/connections across replicas arbitrarily,
+# breaking sequence continuity, stream state tracking, and deterministic routing semantics.
+# Multi-instance relay topologies should be deployed as distinct instances or relay chains with
+# explicit port ownership and dedicated endpoints, rather than increasing replicaCount.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/emeraldsongold/rer
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion (0.1.0)
+  tag: ""
+  digest: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  annotations: {}
+  ports:
+    - name: telemetry-udp
+      port: 5000
+      targetPort: 5000
+      protocol: UDP
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 32Mi
+
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    enabled: true
+    initialDelaySeconds: 1
+    periodSeconds: 2
+    failureThreshold: 15
+
+# Default inline configuration mounted into /etc/rer/rer.yaml via ConfigMap.
+# For sensitive settings, see existingSecret below.
+config: |
+  version: "1"
+  instances:
+    - id: "rer-k8s-node-01"
+      streams:
+        - id: "telemetry-stream"
+          source:
+            transport: "udp"
+            address: "0.0.0.0:5000"
+          destination:
+            transport: "udp"
+            address: "127.0.0.1:5001"
+          buffer:
+            max_queue_size: 1024
+            drop_policy: "drop_oldest"
+
+# Alternative for sensitive settings: reference an existing Kubernetes Secret.
+# If specified, the Secret is mounted at /etc/rer/rer.yaml instead of the ConfigMap.
+existingSecret: ""
+secretKey: "rer.yaml"
+
+persistence:
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  mountPath: /var/lib/rer
+  existingClaim: ""
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+metrics:
+  enabled: false
+  service:
+    port: 9100
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

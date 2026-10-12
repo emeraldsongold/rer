@@ -1,0 +1,18 @@
+RER (RER Engineering Relay) has been successfully deployed!
+
+Chart Version: {{ .Chart.Version }}
+App Version:   {{ .Chart.AppVersion }}
+
+Deployment: {{ include "rer.fullname" . }}
+Service:    {{ include "rer.fullname" . }} (Type: {{ .Values.service.type }})
+
+Replicas: {{ .Values.replicaCount }}
+IMPORTANT: Scaling replicas does not preserve UDP/TCP routing semantics automatically.
+Stream state tracking, packet sequencing, and directional relay semantics require
+dedicated instances or relay chains with explicit port ownership.
+
+To check daemon health:
+  kubectl exec -it deployment/{{ include "rer.fullname" . }} -- /usr/local/bin/rer health
+
+To view forwarding status:
+  kubectl exec -it deployment/{{ include "rer.fullname" . }} -- /usr/local/bin/rer status
