@@ -1,0 +1,16 @@
+# RER Relay Chain: Ingress Node
+# Forwards inbound telemetry from external clients to the egress relay node.
+version: "1"
+instances:
+  - id: "chain-ingress"
+    streams:
+      - id: "chain-hop1"
+        source:
+          transport: "udp"
+          address: "0.0.0.0:5000"
+        destination:
+          transport: "udp"
+          address: "relay-egress:5001"
+        buffer:
+          max_queue_size: 1024
+          drop_policy: "drop_oldest"

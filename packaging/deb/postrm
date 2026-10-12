@@ -1,0 +1,36 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        echo "RER package removed."
+        echo "Configuration in /etc/rer/ and state in /var/lib/rer/ have been preserved."
+        echo "To remove all configuration and state, run: apt-get purge rer (or dpkg --purge rer)"
+        ;;
+    purge)
+        echo "Purging RER configuration and state..."
+        rm -rf /etc/rer
+        rm -rf /var/lib/rer
+        if getent passwd rer >/dev/null 2>&1; then
+            userdel rer 2>/dev/null || true
+        fi
+        if getent group rer >/dev/null 2>&1; then
+            groupdel rer 2>/dev/null || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        echo "RER configuration and state purged."
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

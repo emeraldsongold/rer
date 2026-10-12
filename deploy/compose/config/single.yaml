@@ -1,0 +1,16 @@
+# RER Single-Instance Configuration
+# Used by deploy/compose/docker-compose.single.yml
+version: "1"
+instances:
+  - id: "rer-single-01"
+    streams:
+      - id: "telemetry-stream"
+        source:
+          transport: "udp"
+          address: "0.0.0.0:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+        buffer:
+          max_queue_size: 1024
+          drop_policy: "drop_oldest"

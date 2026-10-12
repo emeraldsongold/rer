@@ -35,8 +35,11 @@ pub enum Commands {
     /// Run the relay
     Run(RunArgs),
 
-    /// Show status of relay instances (planned)
-    Status(PlaceholderArgs),
+    /// Check health of running relay instance
+    Health(HealthArgs),
+
+    /// Show status of relay instances
+    Status(StatusArgs),
 
     /// Diagnose network issues (planned)
     Diagnose(PlaceholderArgs),
@@ -104,6 +107,40 @@ pub struct RunArgs {
     /// Path to YAML configuration file (alternative flag)
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Path to Unix domain socket for health and status checks
+    #[arg(long, default_value = "/tmp/relay_health.sock")]
+    pub health_socket: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HealthArgs {
+    /// Path to Unix domain socket for health probe
+    #[arg(long, default_value = "/tmp/relay_health.sock")]
+    pub socket: PathBuf,
+
+    /// Timeout in seconds to wait for health response
+    #[arg(short, long, default_value = "2.0")]
+    pub timeout: f64,
+
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StatusArgs {
+    /// Path to Unix domain socket for status probe
+    #[arg(long, default_value = "/tmp/relay_health.sock")]
+    pub socket: PathBuf,
+
+    /// Timeout in seconds to wait for status response
+    #[arg(short, long, default_value = "2.0")]
+    pub timeout: f64,
+
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -352,10 +389,8 @@ pub fn execute(cli: Cli) -> ExitCode {
             ExitCode::SUCCESS
         }
         Commands::Run(args) => execute_run(args),
-        Commands::Status(_) => {
-            eprintln!("rer status is not yet implemented (scheduled in roadmap milestone RER-F-007). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Health(args) => execute_health(args),
+        Commands::Status(args) => execute_status(args),
         Commands::Diagnose(_) => {
             eprintln!("rer diagnose is not yet implemented (scheduled in roadmap milestone RER-F-008). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
@@ -595,8 +630,25 @@ fn execute_run(args: RunArgs) -> ExitCode {
         eprintln!("Warning: failed to register signal handlers: {}", err);
     }
 
+    let socket_path = std::env::var("RER_HEALTH_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or(args.health_socket);
+
     match crate::relay::Relay::start(&config) {
         Ok(relay) => {
+            let health_server =
+                match crate::health::HealthServer::start(&socket_path, relay.health_handle()) {
+                    Ok(srv) => Some(srv),
+                    Err(err) => {
+                        eprintln!(
+                            "Warning: health socket unavailable at '{}': {}",
+                            socket_path.display(),
+                            err
+                        );
+                        None
+                    }
+                };
+
             println!("RER relay running. Press Ctrl-C or send SIGTERM to stop.");
             for inst in config.all_instances() {
                 if !inst.logical_interfaces.is_empty() {
@@ -619,12 +671,116 @@ fn execute_run(args: RunArgs) -> ExitCode {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             println!("Shutdown signal received. Stopping relay gracefully...");
+            if let Some(srv) = health_server {
+                srv.stop();
+            }
             relay.stop();
             println!("RER relay stopped gracefully.");
             ExitCode::SUCCESS
         }
         Err(err) => {
             eprintln!("Failed to start relay: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn execute_health(args: HealthArgs) -> ExitCode {
+    let socket_path = std::env::var("RER_HEALTH_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or(args.socket);
+
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+    match crate::health::query_health(&socket_path, timeout) {
+        Ok(report) => {
+            let is_healthy = report.status == crate::health::STATUS_HEALTHY;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            } else if is_healthy {
+                println!(
+                    "OK: RER relay is healthy (uptime: {}s, streams: {})",
+                    report.uptime_seconds,
+                    report.streams.len()
+                );
+            } else {
+                eprintln!(
+                    "Health check failed: relay status is '{}' (uptime: {}s)",
+                    report.status, report.uptime_seconds
+                );
+            }
+
+            if is_healthy {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            if args.json {
+                let err_obj = serde_json::json!({
+                    "status": "unhealthy",
+                    "error": format!("unable to connect to relay health socket at '{}': {}", socket_path.display(), err)
+                });
+                println!("{}", serde_json::to_string_pretty(&err_obj).unwrap());
+            } else {
+                eprintln!(
+                    "Health check failed: unable to connect to relay health socket at '{}': {}",
+                    socket_path.display(),
+                    err
+                );
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn execute_status(args: StatusArgs) -> ExitCode {
+    let socket_path = std::env::var("RER_HEALTH_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or(args.socket);
+
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+    match crate::health::query_health(&socket_path, timeout) {
+        Ok(report) => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            } else {
+                println!("RER Relay Status: {}", report.status);
+                println!("Version: {}", report.version);
+                println!("Uptime: {}s", report.uptime_seconds);
+                println!("Streams ({}):", report.streams.len());
+                for s in &report.streams {
+                    println!(
+                        "  - {}: {} (rx: {}, tx: {}, drops: {}, errors: {})",
+                        s.stream_id,
+                        if s.healthy { "healthy" } else { "degraded" },
+                        s.received_packets,
+                        s.forwarded_packets,
+                        s.dropped_packets,
+                        s.errors
+                    );
+                }
+            }
+            if report.status == crate::health::STATUS_HEALTHY {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            if args.json {
+                let err_obj = serde_json::json!({
+                    "status": "unknown",
+                    "error": format!("cannot connect to relay at '{}': {}", socket_path.display(), err)
+                });
+                println!("{}", serde_json::to_string_pretty(&err_obj).unwrap());
+            } else {
+                eprintln!(
+                    "Error: cannot connect to RER relay at '{}': {}",
+                    socket_path.display(),
+                    err
+                );
+            }
             ExitCode::from(1)
         }
     }

@@ -1,0 +1,22 @@
+# RER Engineering Relay Configuration
+# Default configuration installed under /etc/rer/rer.yaml.
+# Review and adjust endpoints before starting the systemd service.
+# Documentation: /usr/share/doc/rer/CONFIGURATION.md
+
+version: "1"
+
+instances:
+  - id: "relay-default"
+    name: "Default Relay Instance"
+    mode: "production"
+    streams:
+      - id: "default-udp-stream"
+        description: "Default loopback UDP datagram forwarder"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+          mode: "listen"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+          mode: "connect"
