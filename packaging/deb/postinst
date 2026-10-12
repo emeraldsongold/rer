@@ -1,0 +1,43 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if ! getent group rer >/dev/null 2>&1; then
+            groupadd --system rer >/dev/null 2>&1 || true
+        fi
+        if ! getent passwd rer >/dev/null 2>&1; then
+            useradd --system -g rer -d /var/lib/rer -s /usr/sbin/nologin -c "RER Engineering Relay" rer >/dev/null 2>&1 || true
+        fi
+
+        # Ensure correct ownership and directory permissions
+        mkdir -p /var/lib/rer
+        chown rer:rer /var/lib/rer 2>/dev/null || true
+        chmod 0750 /var/lib/rer
+
+        mkdir -p /etc/rer
+        chmod 0755 /etc/rer
+        if [ -f /etc/rer/rer.yaml ]; then
+            chmod 0644 /etc/rer/rer.yaml
+        fi
+
+        # Reload systemd daemon if systemd is active
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+
+        # Safe defaults: unit is NOT enabled or started automatically
+        echo "RER package installed successfully with safe defaults."
+        echo "Service 'rer.service' is NOT enabled or started automatically."
+        echo "Review configuration in /etc/rer/rer.yaml before starting."
+        echo "To enable and start: systemctl enable --now rer"
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

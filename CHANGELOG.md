@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-015 (.deb, .rpm and Standalone Binary Packaging)
+- **Multi-Architecture Standalone Artifacts**: Added standalone tarball packaging for Linux x86-64 and ARM64 (AArch64) containing binaries, systemd units, example configurations, and documentation with SHA-256 checksums (`SHA256SUMS`) and version metadata (`metadata.json`).
+- **Debian (.deb) and RPM (.rpm) Packaging**: Created automated packaging definitions and scripts for Debian/Ubuntu (`.deb`) and RHEL/Fedora/compatible distributions (`.rpm`), installing `/usr/bin/rer`, example configuration under `/etc/rer/rer.yaml`, systemd unit `/usr/lib/systemd/system/rer.service`, documentation under `/usr/share/doc/rer/`, and state directory `/var/lib/rer/`.
+- **Safe Service Management Defaults**: Ensured systemd unit is installed with safe defaults and is neither enabled nor started automatically upon installation.
+- **Configuration Preservation**: Registered `/etc/rer/rer.yaml` in Debian `conffiles` and RPM `%config(noreplace)`, ensuring operator configuration edits are preserved across package upgrades.
+- **Data Loss Prevention on Uninstall**: Implemented maintainer scripts (`postrm`, `%postun`) ensuring uninstallation does not silently destroy operator configuration or state data, leaving `/etc/rer` and `/var/lib/rer` intact upon package removal unless explicitly purged.
+- **Smoke Testing and Test Suite**: Added `packaging/smoke-test.sh` for container smoke testing of clean install, upgrade, and uninstall without data loss, alongside automated integration tests (`crates/rer/tests/packaging_tests.rs`).
+
+### Added - Milestone RER-F-004 (Initial Traffic Generator and Simulation Harness)
 ### Added - Milestone RER-F-005 (TCP Relay, Four Transport Conversions, Framing, Reconnection, and Backpressure)
 - **Four Transport Conversion Combinations**: Implemented forwarding across all four transport combinations: UDP-to-UDP, UDP-to-TCP, TCP-to-UDP, and TCP-to-TCP (`crates/rer/src/relay.rs`).
 - **Explicit Framing Protocol**: Added explicit length-prefixed framing between TCP byte streams and discrete datagrams using a 4-byte big-endian unsigned 32-bit length header, preserving datagram boundaries and payload bytes with defragmentation support (`crates/rer/src/framing.rs`).
