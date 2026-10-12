@@ -925,7 +925,6 @@ impl StreamRunner {
     }
 }
 
-
 /// Information about a configured logical interface on an instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogicalInterfaceInfo {
