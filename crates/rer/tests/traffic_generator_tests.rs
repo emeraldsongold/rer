@@ -378,3 +378,43 @@ fn test_simulation_harness_with_relay_queue_drop_policy() {
     assert!(report.pass);
     assert_eq!(report.received_count, 20);
 }
+
+#[test]
+fn test_simulation_harness_duplicate_scenario() {
+    let harness_config = HarnessConfig {
+        test_id: Some("ci-duplicate-scenario-test".into()),
+        generator: GeneratorConfig {
+            seed: 2026,
+            packet_size: 128,
+            rate: None,
+            burst: None,
+            duration: None,
+            count: Some(1000),
+        },
+        impairments: Some(ImpairmentConfig {
+            seed: 1337,
+            loss_rate: 0.0,
+            duplicate_rate: 0.1,
+            reorder_rate: 0.0,
+            delay_ms: 0,
+            jitter_ms: 0,
+        }),
+        use_relay: true,
+        relay_queue_capacity: None,
+        relay_drop_policy: None,
+        ..Default::default()
+    };
+
+    let report = SimulationHarness::run(harness_config).expect("harness run");
+
+    assert_eq!(report.expected_count, Some(1000));
+    assert_eq!(
+        report.lost_count, 0,
+        "lost_count must be 0 despite duplicates"
+    );
+    assert!(
+        report.duplicate_count > 0,
+        "duplicate_count must be above 0 with 10% duplication"
+    );
+    assert_eq!(report.unique_received_count, 1000);
+}

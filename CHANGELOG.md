@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Milestone RER-F-025 (Traffic receiver unique packet accounting)
+- **Unique Packet Completion Condition**: Updated `listen_udp` and `listen_tcp` stop conditions to complete when every expected sequence number has been received once or when the idle timeout elapses, rather than stopping when total datagrams read reached `expected_count`.
+- **Duplicate Loss Masking Prevention**: Duplicated packets arriving before the last original packet in a stream no longer prematurely terminate receiver reads or hide subsequent originals as lost.
+- **Accurate Loss and Duplication Reporting**: Verified that streams with duplicates report `lost_count: 0`, `unique_received_count` matching `expected_count`, and correct `duplicate_count`, while streams with genuinely missing sequences continue to report them in `lost_sequences` and end at the idle timeout.
+
 ### Added - Milestone RER-F-018 (Legacy OS Compatibility Experiments and Documented Results)
 - **Legacy OS Compatibility Evaluation**: Codified experimental test script (`packaging/legacy-compat-test.sh`) to evaluate packaged artifacts (.deb, .rpm, .tar.gz) across clean Debian 10 Buster, Ubuntu 20.04 LTS, and RHEL 7 / CentOS 7 container environments where images and engines are available, with automated limitation detection and static ELF ABI inspection fallback.
 - **Experimental Findings & Limitations in PLATFORM_SUPPORT.md**: Documented comprehensive evaluation results, glibc symbol resolution constraints (GLIBC_2.32/GLIBC_2.34 dependencies), systemd hardening version boundaries (systemd 241/245 vs 219), package format compatibility, and operating system EOL lifecycle status in `PLATFORM_SUPPORT.md`.
