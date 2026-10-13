@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-018 (Legacy OS Compatibility Experiments and Documented Results)
+- **Legacy OS Compatibility Evaluation**: Codified experimental test script (`packaging/legacy-compat-test.sh`) to evaluate packaged artifacts (.deb, .rpm, .tar.gz) across clean Debian 10 Buster, Ubuntu 20.04 LTS, and RHEL 7 / CentOS 7 container environments where images and engines are available, with automated limitation detection and static ELF ABI inspection fallback.
+- **Experimental Findings & Limitations in PLATFORM_SUPPORT.md**: Documented comprehensive evaluation results, glibc symbol resolution constraints (GLIBC_2.32/GLIBC_2.34 dependencies), systemd hardening version boundaries (systemd 241/245 vs 219), package format compatibility, and operating system EOL lifecycle status in `PLATFORM_SUPPORT.md`.
+- **Truth in Documentation Enforcement**: Formally reinforced SPEC §4 requirement that a successful compile alone is never claimed as support, designating legacy Linux systems as unsupported for standard dynamic packages while verifying static musl standalone binary functionality where feasible.
+- **Automated Integration Tests**: Added integration test suite (`crates/rer/tests/legacy_compat_tests.rs`) validating script execution, glibc dependency analysis, systemd compatibility constraints, and documentation integrity.
+
 ### Added - Milestone RER-F-007 (Management API and CLI status, health, and counters)
 - **Approved Management Architecture**: Documented architectural approval in ADR-0004 for the versioned JSON management API, its transports, roles, and authentication scheme (`DECISIONS.md`).
 - **Versioned JSON Management API**: Implemented versioned JSON wire envelope protocol (`v1`) with structured request/response framing, version validation, and action dispatch (`crates/rer/src/management.rs`).
