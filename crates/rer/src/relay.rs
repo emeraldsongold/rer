@@ -22,6 +22,109 @@ pub const DEFAULT_MAX_PACKET_SIZE: usize = 65535;
 /// Default overload drop policy when not explicitly configured.
 pub const DEFAULT_DROP_POLICY: DropPolicy = DropPolicy::DropOldest;
 
+/// Resolves an endpoint address string into a `SocketAddr` using deterministic address family selection.
+///
+/// # Selection Rule
+/// When a hostname resolves to addresses in both IPv4 and IPv6 families, RER selects the first resolved
+/// IPv4 address to preserve backward compatibility with existing IPv4 network deployments and configurations.
+/// If the resolved addresses contain only IPv6 addresses, RER selects the first resolved IPv6 address.
+/// When only IPv4 addresses are present, the first IPv4 address is selected.
+/// Bracketed IPv6 literals (e.g. `[::1]:5000`) and IPv4 literals (e.g. `127.0.0.1:5000`) resolve directly
+/// to their respective single address family.
+///
+/// # Errors
+/// Returns an `io::Error` if address parsing or hostname resolution fails, or if no addresses are resolved.
+pub fn resolve_endpoint(address: &str) -> io::Result<SocketAddr> {
+    let trimmed = address.trim();
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let addrs: Vec<SocketAddr> = trimmed.to_socket_addrs()?.collect();
+    select_socket_addr(&addrs).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("no socket addresses resolved for '{address}'"),
+        )
+    })
+}
+
+/// Applies the documented address family selection rule to a slice of resolved `SocketAddr`s.
+#[must_use]
+pub fn select_socket_addr(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    if addrs.is_empty() {
+        return None;
+    }
+    if let Some(&ipv4) = addrs.iter().find(|a| a.is_ipv4()) {
+        Some(ipv4)
+    } else {
+        Some(addrs[0])
+    }
+}
+
+/// Binds a TCP listener socket, explicitly setting `IPV6_V6ONLY` on IPv6 sockets.
+///
+/// # Errors
+/// Returns an `io::Error` if creating, configuring, or binding the listener socket fails.
+pub fn bind_tcp_listener(addr: SocketAddr) -> io::Result<TcpListener> {
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
+}
+
+/// Binds a UDP socket, explicitly setting `IPV6_V6ONLY` on IPv6 sockets.
+///
+/// # Errors
+/// Returns an `io::Error` if creating, configuring, or binding the socket fails.
+pub fn bind_udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
+/// Formats an endpoint address string, ensuring IPv6 addresses appear in bracketed form.
+#[must_use]
+pub fn format_endpoint(address: &str) -> String {
+    let trimmed = address.trim();
+    if trimmed.starts_with('[') || trimmed.starts_with('/') {
+        return trimmed.to_string();
+    }
+    if let Ok(socket_addr) = trimmed.parse::<SocketAddr>() {
+        return socket_addr.to_string();
+    }
+    if !trimmed.starts_with('[') && trimmed.contains(':') {
+        if let Some(last_colon) = trimmed.rfind(':') {
+            let host = &trimmed[..last_colon];
+            let port = &trimmed[last_colon + 1..];
+            if host.parse::<std::net::Ipv6Addr>().is_ok() && port.parse::<u16>().is_ok() {
+                return format!("[{}]:{}", host, port);
+            }
+        }
+        if trimmed.parse::<std::net::Ipv6Addr>().is_ok() {
+            return format!("[{}]", trimmed);
+        }
+    }
+    trimmed.to_string()
+}
+
 /// A discrete UDP or TCP datagram payload preserving datagram boundary and source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Datagram {
@@ -201,25 +304,21 @@ impl TcpDestinationConnection {
             }
         }
 
-        let addrs = match self.address.to_socket_addrs() {
-            Ok(addrs) => addrs.collect::<Vec<_>>(),
+        let target_addr = match resolve_endpoint(&self.address) {
+            Ok(addr) => addr,
             Err(e) => {
                 stats.destination_errors.fetch_add(1, Ordering::Relaxed);
                 stats.socket_errors.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "[tcp destination] Address resolution error for '{}': {}",
-                    self.address, e
+                    format_endpoint(&self.address),
+                    e
                 );
                 return false;
             }
         };
 
-        if addrs.is_empty() {
-            stats.destination_errors.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-
-        match TcpStream::connect_timeout(&addrs[0], self.connect_timeout) {
+        match TcpStream::connect_timeout(&target_addr, self.connect_timeout) {
             Ok(s) => {
                 let _ = s.set_write_timeout(Some(self.write_timeout));
                 let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
@@ -237,7 +336,9 @@ impl TcpDestinationConnection {
                 self.next_connect_attempt = Some(Instant::now() + wait);
                 eprintln!(
                     "[tcp destination] Connect error to '{}' (backoff {:?}): {}",
-                    self.address, wait, e
+                    format_endpoint(&self.address),
+                    wait,
+                    e
                 );
                 false
             }
@@ -369,7 +470,8 @@ impl StreamRunner {
         // -------------------------------------------------------------------
         match stream.source.transport {
             TransportType::Udp => {
-                let recv_socket = UdpSocket::bind(&stream.source.address)?;
+                let bind_addr = resolve_endpoint(&stream.source.address)?;
+                let recv_socket = bind_udp_socket(bind_addr)?;
                 recv_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
                 let recv_stream_id = stream_id.clone();
@@ -469,7 +571,8 @@ impl StreamRunner {
 
                 match mode {
                     ConnectionMode::Listen => {
-                        let listener = TcpListener::bind(&stream.source.address)?;
+                        let bind_addr = resolve_endpoint(&stream.source.address)?;
+                        let listener = bind_tcp_listener(bind_addr)?;
                         listener.set_nonblocking(true)?;
 
                         let recv_handle = thread::spawn(move || {
@@ -593,8 +696,8 @@ impl StreamRunner {
                             let max_backoff = Duration::from_millis(1000);
 
                             while !recv_shutdown.load(Ordering::Relaxed) {
-                                let addrs = match target_addr_str.to_socket_addrs() {
-                                    Ok(a) => a.collect::<Vec<_>>(),
+                                let target_addr = match resolve_endpoint(&target_addr_str) {
+                                    Ok(a) => a,
                                     Err(_) => {
                                         recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
                                         thread::sleep(backoff);
@@ -602,13 +705,8 @@ impl StreamRunner {
                                     }
                                 };
 
-                                if addrs.is_empty() {
-                                    thread::sleep(backoff);
-                                    continue;
-                                }
-
                                 match TcpStream::connect_timeout(
-                                    &addrs[0],
+                                    &target_addr,
                                     Duration::from_millis(500),
                                 ) {
                                     Ok(mut stream) => {
@@ -634,7 +732,7 @@ impl StreamRunner {
 
                                                     let datagram = Datagram {
                                                         payload,
-                                                        source_addr: addrs[0],
+                                                        source_addr: target_addr,
                                                     };
 
                                                     let push_res = {
@@ -718,8 +816,8 @@ impl StreamRunner {
         let fwd_is_active = Arc::clone(&is_active);
 
         let fwd_handle = thread::spawn(move || {
-            let ipv4_socket = UdpSocket::bind("0.0.0.0:0").ok();
-            let ipv6_socket = UdpSocket::bind("[::]:0").ok();
+            let ipv4_socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0))).ok();
+            let ipv6_socket = bind_udp_socket(SocketAddr::from(([0; 16], 0))).ok();
 
             // Track TCP destination connections
             let mut tcp_conns: Vec<Option<TcpDestinationConnection>> = dest_specs
@@ -788,68 +886,54 @@ impl StreamRunner {
                         for (idx, dest) in dest_specs.iter().enumerate() {
                             match dest.transport {
                                 TransportType::Udp => {
-                                    let addrs_res = dest.address.to_socket_addrs();
-                                    match addrs_res {
-                                        Ok(mut addrs) => {
-                                            if let Some(target_addr) = addrs.next() {
-                                                let socket_res = match target_addr {
-                                                    SocketAddr::V4(_) => ipv4_socket
-                                                        .as_ref()
-                                                        .ok_or_else(|| {
-                                                            io::Error::new(
-                                                                io::ErrorKind::AddrNotAvailable,
-                                                                "IPv4 socket unavailable",
-                                                            )
-                                                        })
-                                                        .and_then(|s| {
-                                                            s.send_to(
-                                                                &datagram.payload,
-                                                                target_addr,
-                                                            )
-                                                        }),
-                                                    SocketAddr::V6(_) => ipv6_socket
-                                                        .as_ref()
-                                                        .ok_or_else(|| {
-                                                            io::Error::new(
-                                                                io::ErrorKind::AddrNotAvailable,
-                                                                "IPv6 socket unavailable",
-                                                            )
-                                                        })
-                                                        .and_then(|s| {
-                                                            s.send_to(
-                                                                &datagram.payload,
-                                                                target_addr,
-                                                            )
-                                                        }),
-                                                };
+                                    match resolve_endpoint(&dest.address) {
+                                        Ok(target_addr) => {
+                                            let socket_res = match target_addr {
+                                                SocketAddr::V4(_) => ipv4_socket
+                                                    .as_ref()
+                                                    .ok_or_else(|| {
+                                                        io::Error::new(
+                                                            io::ErrorKind::AddrNotAvailable,
+                                                            "IPv4 socket unavailable",
+                                                        )
+                                                    })
+                                                    .and_then(|s| {
+                                                        s.send_to(&datagram.payload, target_addr)
+                                                    }),
+                                                SocketAddr::V6(_) => ipv6_socket
+                                                    .as_ref()
+                                                    .ok_or_else(|| {
+                                                        io::Error::new(
+                                                            io::ErrorKind::AddrNotAvailable,
+                                                            "IPv6 socket unavailable",
+                                                        )
+                                                    })
+                                                    .and_then(|s| {
+                                                        s.send_to(&datagram.payload, target_addr)
+                                                    }),
+                                            };
 
-                                                match socket_res {
-                                                    Ok(sent) => {
-                                                        fwd_stats
-                                                            .forwarded_packets
-                                                            .fetch_add(1, Ordering::Relaxed);
-                                                        fwd_stats.forwarded_bytes.fetch_add(
-                                                            sent as u64,
-                                                            Ordering::Relaxed,
-                                                        );
-                                                    }
-                                                    Err(err) => {
-                                                        fwd_stats
-                                                            .destination_errors
-                                                            .fetch_add(1, Ordering::Relaxed);
-                                                        fwd_stats
-                                                            .socket_errors
-                                                            .fetch_add(1, Ordering::Relaxed);
-                                                        eprintln!(
-                                                            "[stream {}] UDP destination error sending to {}: {}",
-                                                            fwd_stream_id, target_addr, err
-                                                        );
-                                                    }
+                                            match socket_res {
+                                                Ok(sent) => {
+                                                    fwd_stats
+                                                        .forwarded_packets
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    fwd_stats
+                                                        .forwarded_bytes
+                                                        .fetch_add(sent as u64, Ordering::Relaxed);
                                                 }
-                                            } else {
-                                                fwd_stats
-                                                    .destination_errors
-                                                    .fetch_add(1, Ordering::Relaxed);
+                                                Err(err) => {
+                                                    fwd_stats
+                                                        .destination_errors
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    fwd_stats
+                                                        .socket_errors
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    eprintln!(
+                                                        "[stream {}] UDP destination error sending to {}: {}",
+                                                        fwd_stream_id, target_addr, err
+                                                    );
+                                                }
                                             }
                                         }
                                         Err(err) => {
@@ -859,7 +943,7 @@ impl StreamRunner {
                                             fwd_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
                                             eprintln!(
                                                 "[stream {}] Destination resolution error for '{}': {}",
-                                                fwd_stream_id, dest.address, err
+                                                fwd_stream_id, format_endpoint(&dest.address), err
                                             );
                                         }
                                     }
@@ -870,7 +954,7 @@ impl StreamRunner {
                                             all_succeeded = false;
                                             eprintln!(
                                                 "[stream {}] TCP destination error sending to {}: {}",
-                                                fwd_stream_id, dest.address, e
+                                                fwd_stream_id, format_endpoint(&dest.address), e
                                             );
                                         }
                                     }

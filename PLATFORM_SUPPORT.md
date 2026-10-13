@@ -40,9 +40,28 @@ As outlined in SPEC §4, the following legacy environments are designated as bes
 
 *Note per SPEC §4*: Legacy compatibility will not be claimed merely because compilation succeeds; actual binary artifacts will be tested in clean containerized environments during Milestone RER-F-018.
 
-## 4. Explicitly Out of Scope for Initial Baseline
+## 4. IPv6 Support and Tested Verification Matrix (Milestone RER-F-023)
+
+RER provides native IPv6 support across UDP and TCP relay endpoints and remote management listeners.
+
+### Tested Capabilities in Continuous Integration
+On Tier 1 platform (`x86_64-unknown-linux-gnu` on Ubuntu hosted runner):
+- **Endpoint Transports**: Bracketed IPv6 literals (`[::1]:port` and `[::]:port`) for UDP and TCP in all four transport conversions (UDP-to-UDP, UDP-to-TCP, TCP-to-UDP, and TCP-to-TCP).
+- **Bidirectional Forwarding**: IPv4-to-IPv6 and IPv6-to-IPv4 forwarding preserving datagram boundaries and payload bytes.
+- **Mixed-Family Fan-Out**: Concurrent egress fan-out to mixed combinations of IPv4 and IPv6 UDP/TCP destinations.
+- **Listener Isolation (`IPV6_V6ONLY`)**: Explicit configuration of the `IPV6_V6ONLY` socket option using the `socket2` crate on all IPv6 listeners, ensuring `[::]` accepts IPv6 only and `0.0.0.0` accepts IPv4 only.
+- **Address Family Selection Rule**: Deterministic selection when a hostname resolves to multiple address families, selecting the first IPv4 address if present, and falling back to IPv6.
+- **Destination Error Accounting**: Destination resolution errors or unreachable endpoints are accounted under `destination_errors` without halting forwarding to other healthy destinations.
+- **Bracketed Formatting**: Diagnostic output and management APIs present IPv6 endpoints in bracketed form (`[::1]:port`).
+
+### Platform Limitations and Untested Capabilities
+- **Environments Without IPv6 Loopback**: In container sandboxes where `::1` cannot be bound (such as restricted container execution environments without IPv6 loopback), IPv6 loopback integration tests skip with a visible diagnostic message (`SKIPPED: IPv6 loopback ([::1]) is unavailable...`) and never pass silently.
+- **Scoped Link-Local Addresses**: Scoped IPv6 addresses with zone identifiers (`[fe80::1%eth0]`) belong to roadmap milestone RER-F-024 and are not claimed at milestone RER-F-023. Nothing beyond the above tested baseline is claimed.
+
+## 5. Explicitly Out of Scope for Initial Baseline
 
 The following environments and platforms are intentionally out of scope for initial development:
 - Specialized aerospace embedded processors (e.g., Xiphos hardware)
 - Proprietary real-time operating systems (e.g., VxWorks)
 - Any target requiring paid commercial toolchains or specialized hardware
+

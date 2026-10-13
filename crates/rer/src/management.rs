@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -845,7 +845,8 @@ impl ManagementServer {
             ));
         }
 
-        let listener = TcpListener::bind(addr)?;
+        let bind_addr = crate::relay::resolve_endpoint(addr)?;
+        let listener = crate::relay::bind_tcp_listener(bind_addr)?;
         listener.set_nonblocking(true)?;
 
         let worker_shutdown = Arc::clone(&shutdown_flag);
@@ -1061,7 +1062,8 @@ pub fn query_management_raw(
 
     let is_remote = crate::config::is_remote_endpoint(endpoint);
     let response_line = if is_remote {
-        let mut stream = TcpStream::connect(endpoint)?;
+        let target_addr = crate::relay::resolve_endpoint(endpoint)?;
+        let mut stream = TcpStream::connect_timeout(&target_addr, timeout)?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         writeln!(stream, "{req_json}")?;

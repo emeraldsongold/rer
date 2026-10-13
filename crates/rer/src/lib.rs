@@ -28,6 +28,7 @@ pub use management::{
     DEFAULT_MANAGEMENT_SOCKET, MGMT_API_VERSION,
 };
 pub use relay::{
+    bind_tcp_listener, bind_udp_socket, format_endpoint, resolve_endpoint, select_socket_addr,
     BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,
     StreamHealthSnapshot, StreamStats, StreamStatsSnapshot,
 };
