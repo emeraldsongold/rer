@@ -332,6 +332,12 @@ impl Config {
                         path: format!("{}.endpoint", mgmt_prefix),
                         reason: "management endpoint must not be empty when enabled".to_string(),
                     });
+                } else if mgmt.enabled && is_remote_endpoint(&mgmt.endpoint) {
+                    validate_endpoint_address(
+                        &mgmt.endpoint,
+                        &format!("{}.endpoint", mgmt_prefix),
+                        &mut errors,
+                    );
                 }
                 if mgmt.enabled && is_untrusted_remote_endpoint(&mgmt.endpoint) {
                     if mgmt
@@ -587,58 +593,7 @@ fn validate_endpoint(
     is_source: bool,
     errors: &mut Vec<ValidationError>,
 ) {
-    // Address validation
-    let addr = ep.address.trim();
-    if addr.is_empty() {
-        errors.push(ValidationError {
-            path: format!("{}.address", path),
-            reason: "address must not be empty".to_string(),
-        });
-        return;
-    }
-
-    if let Some(last_colon) = addr.rfind(':') {
-        let host = &addr[..last_colon];
-        let port_str = &addr[last_colon + 1..];
-
-        if host.is_empty() {
-            errors.push(ValidationError {
-                path: format!("{}.address", path),
-                reason: "address host part must not be empty".to_string(),
-            });
-        }
-
-        match port_str.parse::<u32>() {
-            Ok(0) => {
-                errors.push(ValidationError {
-                    path: format!("{}.address", path),
-                    reason: "port 0 is invalid; must be between 1 and 65535".to_string(),
-                });
-            }
-            Ok(port) if port > 65535 => {
-                errors.push(ValidationError {
-                    path: format!("{}.address", path),
-                    reason: format!("port {} is out of valid range 1..=65535", port),
-                });
-            }
-            Ok(_) => {}
-            Err(_) => {
-                errors.push(ValidationError {
-                    path: format!("{}.address", path),
-                    reason: format!(
-                        "invalid port '{}'; must be an integer between 1 and 65535",
-                        port_str
-                    ),
-                });
-            }
-        }
-    } else {
-        errors.push(ValidationError {
-            path: format!("{}.address", path),
-            reason: "invalid address format: expected 'host:port' (e.g. '127.0.0.1:5000')"
-                .to_string(),
-        });
-    }
+    validate_endpoint_address(&ep.address, &format!("{}.address", path), errors);
 
     // Conflicting modes
     if is_source && ep.transport == TransportType::Udp && ep.mode == Some(ConnectionMode::Connect) {
@@ -646,6 +601,324 @@ fn validate_endpoint(
             path: format!("{}.mode", path),
             reason: "conflicting settings: UDP source cannot be in 'connect' mode".to_string(),
         });
+    }
+}
+
+/// Validates an endpoint address string offline and deterministically.
+///
+/// An endpoint address must be `host:port` where `host` is:
+/// - an IPv4 literal (e.g. `127.0.0.1`),
+/// - a bracketed IPv6 literal (e.g. `[::1]`), optionally with a zone identifier (e.g. `[fe80::1%eth0]`),
+/// - or a syntactically valid hostname (e.g. `localhost`, `relay-1.example.com`).
+///
+/// Ports must be an integer between 1 and 65535.
+pub fn validate_endpoint_address(addr_str: &str, path: &str, errors: &mut Vec<ValidationError>) {
+    let addr = addr_str.trim();
+    if addr.is_empty() {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: "address must not be empty".to_string(),
+        });
+        return;
+    }
+
+    // Unix-domain-socket paths keep their current handling and are not run through host validation.
+    if !is_remote_endpoint(addr) {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: "invalid address format: expected 'host:port' (e.g. '127.0.0.1:5000')"
+                .to_string(),
+        });
+        return;
+    }
+
+    if addr.starts_with('[') {
+        let Some(close_idx) = addr.find(']') else {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "malformed bracketed IPv6 address: missing closing ']'".to_string(),
+            });
+            return;
+        };
+
+        let raw_host = &addr[1..close_idx];
+        let remainder = &addr[close_idx + 1..];
+
+        if remainder.is_empty() {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "invalid address format: expected 'host:port' (missing port after bracketed IPv6)".to_string(),
+            });
+            return;
+        }
+
+        if !remainder.starts_with(':') {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!(
+                    "invalid characters after closing bracket: '{}'; expected ':port'",
+                    remainder
+                ),
+            });
+            return;
+        }
+
+        let port_str = &remainder[1..];
+        validate_port(port_str, path, errors);
+        validate_bracketed_ipv6_host(raw_host, path, errors);
+    } else {
+        let colon_count = addr.matches(':').count();
+        if colon_count == 0 {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "invalid address format: expected 'host:port' (e.g. '127.0.0.1:5000')"
+                    .to_string(),
+            });
+            return;
+        }
+
+        if colon_count > 1 {
+            // Unbracketed IPv6 literal or multiple colons
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "IPv6 literals must be bracketed in address (e.g. '[::1]:80')".to_string(),
+            });
+            return;
+        }
+
+        // Exactly one colon
+        let (host, port_str) = addr.split_once(':').unwrap();
+        validate_port(port_str, path, errors);
+        validate_unbracketed_host(host, path, errors);
+    }
+}
+
+fn validate_port(port_str: &str, path: &str, errors: &mut Vec<ValidationError>) {
+    if port_str.is_empty() {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: "port must not be empty; must be an integer between 1 and 65535".to_string(),
+        });
+        return;
+    }
+
+    if port_str.starts_with('-') {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!(
+                "negative port '{}' is invalid; must be between 1 and 65535",
+                port_str
+            ),
+        });
+        return;
+    }
+
+    if !port_str.chars().all(|c| c.is_ascii_digit()) {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!(
+                "non-numeric port '{}' is invalid; must be an integer between 1 and 65535",
+                port_str
+            ),
+        });
+        return;
+    }
+
+    match port_str.parse::<u64>() {
+        Ok(0) => {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "port 0 is invalid; must be between 1 and 65535".to_string(),
+            });
+        }
+        Ok(p) if p > 65535 => {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!("port {} is out of valid range 1..=65535", p),
+            });
+        }
+        Ok(_) => {}
+        Err(_) => {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!("port '{}' is out of valid range 1..=65535", port_str),
+            });
+        }
+    }
+}
+
+fn validate_bracketed_ipv6_host(raw_host: &str, path: &str, errors: &mut Vec<ValidationError>) {
+    if raw_host.is_empty() {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: "IPv6 address inside brackets cannot be empty".to_string(),
+        });
+        return;
+    }
+
+    if raw_host.contains('%') {
+        let percent_count = raw_host.matches('%').count();
+        if percent_count > 1 {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "IPv6 literal cannot contain multiple zone identifiers ('%')".to_string(),
+            });
+            return;
+        }
+
+        let (ip_part, zone_part) = raw_host.split_once('%').unwrap();
+        // Validate zone identifier
+        if zone_part.is_empty() {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: "IPv6 zone identifier cannot be empty".to_string(),
+            });
+            return;
+        }
+        if zone_part.len() > 15 {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!(
+                    "IPv6 zone identifier '{}' exceeds maximum length of 15 bytes",
+                    zone_part
+                ),
+            });
+            return;
+        }
+        if zone_part
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!(
+                    "IPv6 zone identifier '{}' contains whitespace or control characters",
+                    zone_part
+                ),
+            });
+            return;
+        }
+
+        // Validate IP part
+        if ip_part.parse::<std::net::Ipv6Addr>().is_err() {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!("invalid IPv6 address '{}'", ip_part),
+            });
+        }
+    } else if raw_host.parse::<std::net::Ipv6Addr>().is_err() {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!("invalid IPv6 address '{}'", raw_host),
+        });
+    }
+}
+
+fn validate_unbracketed_host(host: &str, path: &str, errors: &mut Vec<ValidationError>) {
+    if host.is_empty() {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: "address host part must not be empty".to_string(),
+        });
+        return;
+    }
+
+    if host.contains('[') || host.contains(']') {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!("malformed host '{}': unbracketed brackets", host),
+        });
+        return;
+    }
+
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!("host '{}' contains spaces or control characters", host),
+        });
+        return;
+    }
+
+    // Check if valid IPv4 literal
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return;
+    }
+
+    // Not a valid IPv4 literal; check if it's an invalid IPv4 literal or a hostname
+    let labels: Vec<&str> = host.split('.').collect();
+    let all_labels_numeric = labels
+        .iter()
+        .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit()));
+    if all_labels_numeric {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!("invalid IPv4 address '{}'", host),
+        });
+        return;
+    }
+
+    // Validate as hostname
+    if host.len() > 253 {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!("hostname '{}' exceeds maximum length of 253 bytes", host),
+        });
+        return;
+    }
+
+    if host.starts_with('.') || host.ends_with('.') || host.contains("..") {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            reason: format!("hostname '{}' contains empty label", host),
+        });
+        return;
+    }
+
+    if let Some(last_label) = labels.last() {
+        if last_label.chars().all(|c| c.is_ascii_digit()) {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!("hostname '{}' has an all-numeric top-level domain", host),
+            });
+            return;
+        }
+    }
+
+    for label in &labels {
+        if label.is_empty() {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!("hostname '{}' contains empty label", host),
+            });
+            return;
+        }
+        if label.len() > 63 {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!(
+                    "hostname label '{}' exceeds maximum length of 63 bytes",
+                    label
+                ),
+            });
+            return;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!(
+                    "hostname label '{}' cannot start or end with a hyphen",
+                    label
+                ),
+            });
+            return;
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                reason: format!("hostname label '{}' contains invalid character", label),
+            });
+            return;
+        }
     }
 }
 
