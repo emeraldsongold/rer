@@ -229,6 +229,63 @@ rer metrics --socket /tmp/relay_health.sock --json
 rer metrics --socket /tmp/relay_health.sock --format prometheus
 ```
 
+### Metrics Endpoint Configuration (`metrics`)
+
+RER supports an optional OpenMetrics / Prometheus HTTP endpoint for metrics scraping.
+The metrics endpoint is optional, bound to loopback (`127.0.0.1:9100`) by default, and never required for forwarding.
+
+```yaml
+instances:
+  - id: "telemetry-relay-1"
+    metrics:
+      enabled: true
+      endpoint: "127.0.0.1:9100"
+      path: "/metrics"
+```
+
+Configuration fields:
+- `enabled`: Whether the metrics HTTP/TCP endpoint is enabled (`true` or `false`).
+- `endpoint`: Bind address in `host:port` format. Defaults to `127.0.0.1:9100` (loopback).
+- `path`: HTTP request path for scraping. Defaults to `/metrics`.
+
+### OpenMetrics Specification, Metric Names, and Labels
+
+Metrics are exposed in standard OpenMetrics text format (RFC 9457), grouped by metric family, ending with the mandatory `# EOF` terminator.
+
+#### Aggregate and Instance Metrics
+
+| Metric Name | Type | Description | Labels |
+|---|---|---|---|
+| `rer_uptime_seconds` | gauge | Daemon uptime in seconds | none |
+| `rer_healthy` | gauge | Relay health status (1 = healthy, 0 = degraded/unhealthy) | none |
+| `rer_received_packets_total` | counter | Total packets received across all streams | none |
+| `rer_received_bytes_total` | counter | Total bytes received across all streams | none |
+| `rer_forwarded_packets_total` | counter | Total packets forwarded across all streams | none |
+| `rer_forwarded_bytes_total` | counter | Total bytes forwarded across all streams | none |
+| `rer_dropped_packets_total` | counter | Total packets dropped across all streams | none |
+| `rer_socket_errors_total` | counter | Total socket errors encountered across all streams | none |
+| `rer_destination_errors_total` | counter | Total destination errors encountered across all streams | none |
+| `rer_backpressure_events_total` | counter | Total backpressure events recorded across all streams | none |
+
+#### Per-Stream Metrics
+
+Per-stream metrics carry the `stream` label containing the stream's unique configured identifier:
+
+| Metric Name | Type | Description | Labels |
+|---|---|---|---|
+| `rer_stream_received_packets_total` | counter | Total packets received on the stream | `stream="<id>"` |
+| `rer_stream_received_bytes_total` | counter | Total bytes received on the stream | `stream="<id>"` |
+| `rer_stream_forwarded_packets_total` | counter | Total packets forwarded on the stream | `stream="<id>"` |
+| `rer_stream_forwarded_bytes_total` | counter | Total bytes forwarded on the stream | `stream="<id>"` |
+| `rer_stream_dropped_packets_total` | counter | Total packets dropped on the stream | `stream="<id>"` |
+| `rer_stream_drops_queue_full_total` | counter | Total packets dropped due to queue buffer exhaustion | `stream="<id>"` |
+| `rer_stream_drops_oversized_total` | counter | Total packets dropped exceeding maximum packet size | `stream="<id>"` |
+| `rer_stream_queue_depth` | gauge | Current number of datagrams queued in stream buffer | `stream="<id>"` |
+| `rer_stream_destination_errors_total` | counter | Total destination resolution and transmission errors | `stream="<id>"` |
+| `rer_stream_socket_errors_total` | counter | Total socket errors encountered for the stream | `stream="<id>"` |
+| `rer_stream_backpressure_events_total` | counter | Total backpressure events recorded for the stream | `stream="<id>"` |
+| `rer_stream_healthy` | gauge | Whether the stream runner is currently healthy (1) or degraded (0) | `stream="<id>"` |
+
 ### Safety and Secret Handling
 
 Sensitive fields (such as `auth_token`) are typed as `SecretString` and are masked as `[REDACTED]` when printing effective configuration via `rer validate --effective` or `rer inspect`. Remote management across network interfaces requires authentication and TLS encryption (SPEC §9, §17).

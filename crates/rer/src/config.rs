@@ -41,6 +41,10 @@ pub struct InstanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub management: Option<ManagementConfig>,
 
+    /// Prometheus/OpenMetrics metrics endpoint configuration (SPEC §15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsConfig>,
+
     /// Forwarding streams configured on this instance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub streams: Vec<StreamConfig>,
@@ -52,6 +56,32 @@ pub struct InstanceConfig {
     /// Instance-level bounded buffer and queue limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
+}
+
+/// Prometheus and OpenMetrics metrics endpoint configuration (SPEC §15).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// Whether the metrics HTTP/TCP endpoint is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Bind address for the metrics endpoint (e.g. "127.0.0.1:9100").
+    /// Bound to loopback by default.
+    #[serde(default = "default_metrics_endpoint")]
+    pub endpoint: String,
+
+    /// HTTP request path for metrics scraping (e.g. "/metrics"). Defaults to "/metrics".
+    #[serde(default = "default_metrics_path")]
+    pub path: String,
+}
+
+fn default_metrics_endpoint() -> String {
+    "127.0.0.1:9100".to_string()
+}
+
+fn default_metrics_path() -> String {
+    "/metrics".to_string()
 }
 
 /// Operational diagnostic modes (SPEC §10).
@@ -377,6 +407,17 @@ impl Config {
                             reason: "key_file must not be empty".to_string(),
                         });
                     }
+                }
+            }
+
+            // Check metrics configuration
+            if let Some(metrics) = &inst.metrics {
+                let metrics_prefix = format!("{}.metrics", inst_prefix);
+                if metrics.enabled && metrics.endpoint.trim().is_empty() {
+                    errors.push(ValidationError {
+                        path: format!("{}.endpoint", metrics_prefix),
+                        reason: "metrics endpoint must not be empty when enabled".to_string(),
+                    });
                 }
             }
 
