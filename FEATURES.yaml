@@ -433,6 +433,32 @@ items:
       - Unit tests cover parsing, formatting and error cases offline, and a loopback integration test exercises a scoped address where the platform allows it and skips with a visible reason otherwise.
       - PLATFORM_SUPPORT.md states what scoped-address behaviour is tested and that link-local addresses on real network interfaces are not covered by CI.
 
+  - id: RER-F-025
+    order: 25
+    phase: Core relay
+    title: Traffic receiver counts unique packets, so duplicated packets no longer hide the last originals
+    type: test
+    priority: P2
+    risk: low
+    autonomy: ready-auto
+    depends_on: [RER-F-004]
+    spec_refs: ["§13"]
+    test_profile: standard
+    notes: >-
+      Found by the first pipeline simulation on 2026-10-13 (main at ced935e). With 10% duplication the harness reported
+      95 lost packets (sequences 905 to 999) although the relay had forwarded all 1000. Cause in crates/rer/src/sim/receiver.rs
+      — listen_udp and listen_tcp stop reading when total_received reaches expected_count, and total_received counts
+      duplicate copies, so the receiver quits after 905 originals and 95 copies. Fix the stop condition only. The relay is not
+      at fault. Keep received_count as the number of datagrams read, keep the idle timeout, and keep the current meaning of
+      pass (duplicates still make it false). The unit tests must not depend on timing.
+    acceptance:
+      - The UDP receiver and the TCP receiver finish when every expected sequence number has been seen once, or when the idle timeout elapses, never because the number of datagrams read reached expected_count.
+      - A stream of expected_count originals interleaved with duplicate copies, with the copies arriving before the last originals, reports lost_count 0, unique_received_count equal to expected_count and duplicate_count equal to the copies read before the last original.
+      - A stream with a genuinely missing sequence still reports it in lost_sequences and still ends at the idle timeout.
+      - The harness duplicate scenario (duplication rate 10%, 1000 packets, fixed seed) reports lost_count 0 and a duplicate_count above 0, and a test asserts both.
+      - The report fields and the meaning of pass are unchanged for streams without duplicates, shown by the existing receiver tests passing unmodified.
+      - CHANGELOG.md records the fix and KNOWN_ISSUES.md lists no loss-accounting caveat that this removes.
+
   - id: RER-T-001
     kind: track
     order: 101
