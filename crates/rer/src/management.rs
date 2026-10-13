@@ -1164,7 +1164,8 @@ impl MetricsServer {
         health_handle: RelayHealthHandle,
         shutdown_flag: Arc<AtomicBool>,
     ) -> io::Result<(JoinHandle<()>, String)> {
-        let listener = TcpListener::bind(endpoint)?;
+        let bind_addr = crate::relay::resolve_endpoint(endpoint)?;
+        let listener = crate::relay::bind_tcp_listener(bind_addr)?;
         listener.set_nonblocking(true)?;
         let bound_addr = listener.local_addr()?.to_string();
 
