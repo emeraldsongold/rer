@@ -942,13 +942,14 @@ fn execute_metrics(args: MetricsArgs) -> ExitCode {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "error": format!("cannot connect to management endpoint at '{}': {}", target, err)
+                        "error": format!("cannot connect to management endpoint at '{}': {}", crate::relay::format_endpoint(&target), err)
                     })
                 );
             } else {
                 eprintln!(
                     "Error: cannot connect to RER metrics at '{}': {}",
-                    target, err
+                    crate::relay::format_endpoint(&target),
+                    err
                 );
             }
             ExitCode::from(1)
@@ -1192,13 +1193,14 @@ fn execute_streams(args: StreamsArgs) -> ExitCode {
                     println!(
                         "{}",
                         serde_json::json!({
-                            "error": format!("cannot connect to management endpoint at '{}': {}", target, err)
+                            "error": format!("cannot connect to management endpoint at '{}': {}", crate::relay::format_endpoint(&target), err)
                         })
                     );
                 } else {
                     eprintln!(
                         "Error: cannot connect to management endpoint at '{}': {}",
-                        target, err
+                        crate::relay::format_endpoint(&target),
+                        err
                     );
                 }
                 return ExitCode::from(1);
@@ -1378,7 +1380,7 @@ fn stream_to_report(stream: &crate::config::StreamConfig) -> StreamReport {
     let source_mode = stream.source.mode.unwrap_or(ConnectionMode::Listen);
     let source = EndpointReport {
         transport: format!("{:?}", stream.source.transport).to_lowercase(),
-        address: stream.source.address.clone(),
+        address: crate::relay::format_endpoint(&stream.source.address),
         mode: format!("{:?}", source_mode).to_lowercase(),
     };
 
@@ -1387,7 +1389,7 @@ fn stream_to_report(stream: &crate::config::StreamConfig) -> StreamReport {
         let dest_mode = dest.mode.unwrap_or(ConnectionMode::Connect);
         destinations.push(EndpointReport {
             transport: format!("{:?}", dest.transport).to_lowercase(),
-            address: dest.address.clone(),
+            address: crate::relay::format_endpoint(&dest.address),
             mode: format!("{:?}", dest_mode).to_lowercase(),
         });
     }
@@ -1396,7 +1398,7 @@ fn stream_to_report(stream: &crate::config::StreamConfig) -> StreamReport {
             let dest_mode = dest.mode.unwrap_or(ConnectionMode::Connect);
             destinations.push(EndpointReport {
                 transport: format!("{:?}", dest.transport).to_lowercase(),
-                address: dest.address.clone(),
+                address: crate::relay::format_endpoint(&dest.address),
                 mode: format!("{:?}", dest_mode).to_lowercase(),
             });
         }

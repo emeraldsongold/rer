@@ -84,8 +84,36 @@ Each stream specifies forwarding from a `source` to one or more destinations:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `transport` | string | (required) | Transport protocol: `"udp"` or `"tcp"`. |
-| `address` | string | (required) | Network address in `host:port` format (e.g. `127.0.0.1:5000`). Port must be between 1 and 65535. |
+| `address` | string | (required) | Network address in `host:port` format (e.g. `127.0.0.1:5000` or `[::1]:5000`). Port must be between 1 and 65535. |
 | `mode` | string | `"listen"` for source, `"connect"` for dest | Connection mode: `"listen"` or `"connect"`. |
+
+#### Address Formats and IPv6 Support
+
+Endpoints accept IPv4 literals (`127.0.0.1:5000`), bracketed IPv6 literals (`[::1]:5000`, `[::]:5000`), and syntactically valid hostnames (`localhost:5000`). Unbracketed IPv6 literals (`::1:5000`) are rejected during validation.
+
+IPv6 endpoints are fully supported for both UDP and TCP across all four transport conversion combinations (UDP to UDP, UDP to TCP, TCP to UDP, and TCP to TCP), as well as multi-destination fan-out. IPv4-only configurations behave exactly as before.
+
+#### Hostname Address Family Selection Rule
+
+When an endpoint address specifies a hostname (such as `localhost:5000`) that resolves to addresses in both IPv4 and IPv6 families:
+- **Selection Rule**: RER deterministically selects the first IPv4 address returned by the system resolver to preserve backward compatibility with existing IPv4 network deployments and configurations.
+- **Fallback**: If the hostname resolves exclusively to IPv6 addresses, RER selects the first resolved IPv6 address.
+- **Explicit Literals**: Explicit bracketed IPv6 literals (`[::1]:5000`) always use IPv6, and IPv4 literals (`127.0.0.1:5000`) always use IPv4 without ambiguity.
+
+#### IPv6 Listener Isolation (`IPV6_V6ONLY`)
+
+All IPv6 listeners (both TCP listening endpoints and UDP receiver sockets) explicitly set the `IPV6_V6ONLY` socket option using the `socket2` crate:
+- `[::]` accepts IPv6 connections and datagrams only; IPv4 traffic is refused.
+- `0.0.0.0` accepts IPv4 traffic only.
+- Dual-stack operation requires configuring two explicit endpoints (one IPv4, one IPv6). Implicit dual-stack wildcard sockets are prohibited by architectural invariant.
+
+#### Destination Error Handling and Multi-Destination Fan-Out
+
+In multi-destination streams (`destinations`), an unresolvable hostname or unreachable destination (such as an unreachable IPv6 host or closed TCP port) is recorded under `destination_errors` and `socket_errors` and logged to diagnostics. It does not stop, interrupt, or degrade forwarding to other reachable destinations.
+
+#### Tested Scope of IPv6 Support
+
+Tested IPv6 support in continuous integration covers bracketed IPv6 literals (`[::1]` and `[::]`) for UDP and TCP, all four transport conversions, cross-family forwarding (IPv4 to IPv6 and IPv6 to IPv4), multi-destination fan-out, and explicit `IPV6_V6ONLY` listener isolation. Scoped link-local addresses with zone identifiers (`[fe80::1%eth0]`) are reserved for roadmap milestone RER-F-024 and are not claimed at this milestone.
 
 ### Transport Conversion and TCP Framing Protocol
 

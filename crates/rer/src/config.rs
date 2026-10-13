@@ -985,7 +985,13 @@ pub fn is_untrusted_remote_endpoint(endpoint: &str) -> bool {
         .trim_start_matches("tcp://")
         .trim_start_matches("http://")
         .trim_start_matches("https://");
-    let host_part = if let Some(idx) = host.rfind(':') {
+    let host_part = if host.starts_with('[') {
+        if let Some(close_idx) = host.find(']') {
+            &host[1..close_idx]
+        } else {
+            host
+        }
+    } else if let Some(idx) = host.rfind(':') {
         &host[..idx]
     } else {
         host
