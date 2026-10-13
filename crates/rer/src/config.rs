@@ -997,7 +997,8 @@ pub fn is_untrusted_remote_endpoint(endpoint: &str) -> bool {
         host
     };
     let h = host_part.trim_matches('[').trim_matches(']');
-    h != "127.0.0.1" && h != "localhost" && h != "::1"
+    let h_clean = h.split('%').next().unwrap_or(h);
+    h_clean != "127.0.0.1" && h_clean != "localhost" && h_clean != "::1"
 }
 
 /// Generates the canonical JSON Schema for RER configuration.

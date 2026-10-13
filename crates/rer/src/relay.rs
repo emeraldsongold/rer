@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    Config, ConnectionMode, DropPolicy, InstanceConfig, StreamConfig, TransportType,
+    Config, ConnectionMode, DropPolicy, EndpointConfig, InstanceConfig, StreamConfig, TransportType,
 };
 use crate::framing;
 
@@ -22,6 +22,191 @@ pub const DEFAULT_MAX_PACKET_SIZE: usize = 65535;
 /// Default overload drop policy when not explicitly configured.
 pub const DEFAULT_DROP_POLICY: DropPolicy = DropPolicy::DropOldest;
 
+/// Resolves a network interface name (e.g. "eth0", "lo") to its numeric interface index.
+///
+/// Returns 0 if the interface name cannot be found or is not valid.
+#[must_use]
+pub fn interface_name_to_index(name: &str) -> u32 {
+    let Ok(c_name) = std::ffi::CString::new(name) else {
+        return 0;
+    };
+    // SAFETY: libc::if_nametoindex reads a null-terminated C string and does not retain the pointer.
+    let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    index as u32
+}
+
+/// A parsed endpoint address preserving an IPv6 zone identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedEndpoint {
+    pub ip: std::net::Ipv6Addr,
+    pub zone: Option<String>,
+    pub port: u16,
+}
+
+impl ScopedEndpoint {
+    /// Parses an endpoint address string into a `ScopedEndpoint`.
+    ///
+    /// # Errors
+    /// Returns an `io::Error` if the string cannot be parsed as a bracketed IPv6 endpoint.
+    pub fn parse(address: &str) -> io::Result<Self> {
+        let trimmed = address.trim();
+        if !trimmed.starts_with('[') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("expected bracketed IPv6 address, got '{trimmed}'"),
+            ));
+        }
+        let Some(close_bracket) = trimmed.find(']') else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("missing closing bracket in '{trimmed}'"),
+            ));
+        };
+        let host_part = &trimmed[1..close_bracket];
+        let port_part = &trimmed[close_bracket + 1..];
+        if !port_part.starts_with(':') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("missing port delimiter ':' in '{trimmed}'"),
+            ));
+        }
+        let port: u16 = port_part[1..].parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid port '{}': {e}", &port_part[1..]),
+            )
+        })?;
+
+        if let Some((ip_part, zone_part)) = host_part.split_once('%') {
+            if zone_part.contains('%') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "multiple zone identifiers in address",
+                ));
+            }
+            if zone_part.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "IPv6 zone identifier cannot be empty",
+                ));
+            }
+            let ip: std::net::Ipv6Addr = ip_part.parse().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid IPv6 address '{ip_part}': {e}"),
+                )
+            })?;
+            Ok(Self {
+                ip,
+                zone: Some(zone_part.to_string()),
+                port,
+            })
+        } else {
+            let ip: std::net::Ipv6Addr = host_part.parse().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid IPv6 address '{host_part}': {e}"),
+                )
+            })?;
+            Ok(Self {
+                ip,
+                zone: None,
+                port,
+            })
+        }
+    }
+}
+
+impl std::fmt::Display for ScopedEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(ref zone) = self.zone {
+            write!(f, "[{}%{}]:{}", self.ip, zone, self.port)
+        } else {
+            write!(f, "[{}]:{}", self.ip, self.port)
+        }
+    }
+}
+
+/// Parses a bracketed IPv6 socket address with an optional zone identifier,
+/// resolving interface names via `interface_name_to_index`.
+///
+/// # Errors
+/// Returns an `io::Error` of kind `io::ErrorKind::NotFound` if the specified interface name is unknown,
+/// or `io::ErrorKind::InvalidInput` if the address syntax is malformed.
+pub fn parse_scoped_socket_addr(address: &str) -> io::Result<SocketAddr> {
+    let endpoint = ScopedEndpoint::parse(address)?;
+    let scope_id = if let Some(ref zone) = endpoint.zone {
+        if let Ok(numeric_id) = zone.parse::<u32>() {
+            numeric_id
+        } else {
+            let idx = interface_name_to_index(zone);
+            if idx == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("unknown network interface '{zone}'"),
+                ));
+            }
+            idx
+        }
+    } else {
+        0
+    };
+
+    Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+        endpoint.ip,
+        endpoint.port,
+        0,
+        scope_id,
+    )))
+}
+
+/// Resolves an endpoint address string into a `SocketAddr` with optional configuration path attribution.
+///
+/// # Errors
+/// Returns an `io::Error` if address parsing or resolution fails. If `config_path` is provided,
+/// errors are attributed with `{config_path}: {error}`.
+pub fn resolve_endpoint_with_context(
+    address: &str,
+    config_path: Option<&str>,
+) -> io::Result<SocketAddr> {
+    let trimmed = address.trim();
+    if trimmed.starts_with('[') {
+        if let Some(close_idx) = trimmed.find(']') {
+            let host_part = &trimmed[1..close_idx];
+            if host_part.contains('%') {
+                return parse_scoped_socket_addr(trimmed).map_err(|err| {
+                    if let Some(path) = config_path {
+                        io::Error::new(err.kind(), format!("{path}: {err}"))
+                    } else {
+                        err
+                    }
+                });
+            }
+        }
+    }
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let addrs: Vec<SocketAddr> = match trimmed.to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(err) => {
+            return Err(if let Some(path) = config_path {
+                io::Error::new(err.kind(), format!("{path}: {err}"))
+            } else {
+                err
+            });
+        }
+    };
+    select_socket_addr(&addrs).ok_or_else(|| {
+        let msg = format!("no socket addresses resolved for '{address}'");
+        if let Some(path) = config_path {
+            io::Error::new(io::ErrorKind::AddrNotAvailable, format!("{path}: {msg}"))
+        } else {
+            io::Error::new(io::ErrorKind::AddrNotAvailable, msg)
+        }
+    })
+}
+
 /// Resolves an endpoint address string into a `SocketAddr` using deterministic address family selection.
 ///
 /// # Selection Rule
@@ -29,23 +214,13 @@ pub const DEFAULT_DROP_POLICY: DropPolicy = DropPolicy::DropOldest;
 /// IPv4 address to preserve backward compatibility with existing IPv4 network deployments and configurations.
 /// If the resolved addresses contain only IPv6 addresses, RER selects the first resolved IPv6 address.
 /// When only IPv4 addresses are present, the first IPv4 address is selected.
-/// Bracketed IPv6 literals (e.g. `[::1]:5000`) and IPv4 literals (e.g. `127.0.0.1:5000`) resolve directly
-/// to their respective single address family.
+/// Bracketed IPv6 literals (e.g. `[::1]:5000`, `[fe80::1%eth0]:5000`) and IPv4 literals (e.g. `127.0.0.1:5000`)
+/// resolve directly to their respective single address family and scope.
 ///
 /// # Errors
 /// Returns an `io::Error` if address parsing or hostname resolution fails, or if no addresses are resolved.
 pub fn resolve_endpoint(address: &str) -> io::Result<SocketAddr> {
-    let trimmed = address.trim();
-    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-    let addrs: Vec<SocketAddr> = trimmed.to_socket_addrs()?.collect();
-    select_socket_addr(&addrs).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            format!("no socket addresses resolved for '{address}'"),
-        )
-    })
+    resolve_endpoint_with_context(address, None)
 }
 
 /// Applies the documented address family selection rule to a slice of resolved `SocketAddr`s.
@@ -100,7 +275,8 @@ pub fn bind_udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
     Ok(socket.into())
 }
 
-/// Formats an endpoint address string, ensuring IPv6 addresses appear in bracketed form.
+/// Formats an endpoint address string, ensuring IPv6 addresses appear in bracketed form
+/// and preserving zone identifiers unchanged.
 #[must_use]
 pub fn format_endpoint(address: &str) -> String {
     let trimmed = address.trim();
@@ -114,8 +290,23 @@ pub fn format_endpoint(address: &str) -> String {
         if let Some(last_colon) = trimmed.rfind(':') {
             let host = &trimmed[..last_colon];
             let port = &trimmed[last_colon + 1..];
+            if host.contains('%') {
+                if let Some((ip_part, _zone_part)) = host.split_once('%') {
+                    if ip_part.parse::<std::net::Ipv6Addr>().is_ok() && port.parse::<u16>().is_ok()
+                    {
+                        return format!("[{}]:{}", host, port);
+                    }
+                }
+            }
             if host.parse::<std::net::Ipv6Addr>().is_ok() && port.parse::<u16>().is_ok() {
                 return format!("[{}]:{}", host, port);
+            }
+        }
+        if trimmed.contains('%') {
+            if let Some((ip_part, _zone_part)) = trimmed.split_once('%') {
+                if ip_part.parse::<std::net::Ipv6Addr>().is_ok() {
+                    return format!("[{}]", trimmed);
+                }
             }
         }
         if trimmed.parse::<std::net::Ipv6Addr>().is_ok() {
@@ -274,6 +465,7 @@ pub struct StreamStatsSnapshot {
 /// Connection manager for a TCP destination supporting reconnection with backoff and timeouts.
 struct TcpDestinationConnection {
     address: String,
+    config_path: String,
     stream: Option<TcpStream>,
     backoff: Duration,
     initial_backoff: Duration,
@@ -284,9 +476,10 @@ struct TcpDestinationConnection {
 }
 
 impl TcpDestinationConnection {
-    fn new(address: String) -> Self {
+    fn new(address: String, config_path: String) -> Self {
         Self {
             address,
+            config_path,
             stream: None,
             initial_backoff: Duration::from_millis(50),
             max_backoff: Duration::from_millis(1000),
@@ -308,19 +501,21 @@ impl TcpDestinationConnection {
             }
         }
 
-        let target_addr = match resolve_endpoint(&self.address) {
-            Ok(addr) => addr,
-            Err(e) => {
-                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
-                stats.socket_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "[tcp destination] Address resolution error for '{}': {}",
-                    format_endpoint(&self.address),
-                    e
-                );
-                return false;
-            }
-        };
+        let target_addr =
+            match resolve_endpoint_with_context(&self.address, Some(&self.config_path)) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                    stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                    eprintln!(
+                        "[tcp destination] Address resolution error for '{}' ('{}'): {}",
+                        self.config_path,
+                        format_endpoint(&self.address),
+                        e
+                    );
+                    return false;
+                }
+            };
 
         match TcpStream::connect_timeout(&target_addr, self.connect_timeout) {
             Ok(s) => {
@@ -428,8 +623,24 @@ impl StreamRunner {
         instance: &InstanceConfig,
         shutdown_flag: Arc<AtomicBool>,
     ) -> io::Result<Self> {
+        let stream_prefix = format!("instance.{}.stream.{}", instance.id, stream.id);
+        Self::start_with_path(stream, instance, shutdown_flag, &stream_prefix)
+    }
+
+    /// Starts forwarding for a single stream with explicit configuration path attribution.
+    ///
+    /// # Errors
+    /// Returns an error if the source socket cannot be bound or configured, including
+    /// the configuration path and interface name for unknown interface names.
+    pub fn start_with_path(
+        stream: &StreamConfig,
+        instance: &InstanceConfig,
+        shutdown_flag: Arc<AtomicBool>,
+        stream_prefix: &str,
+    ) -> io::Result<Self> {
         let stream_id = stream.id.clone();
         let stats = Arc::new(StreamStats::default());
+        let source_path = format!("{stream_prefix}.source.address");
 
         // Resolve buffer limits (stream config overrides instance config overrides default)
         let max_queue_size = stream
@@ -453,13 +664,18 @@ impl StreamRunner {
             .or_else(|| instance.buffer.as_ref().and_then(|b| b.drop_policy))
             .unwrap_or(DEFAULT_DROP_POLICY);
 
-        // Collect destination configurations
-        let mut dest_specs = Vec::new();
+        // Collect destination configurations with configuration paths
+        let mut dest_specs: Vec<(EndpointConfig, String)> = Vec::new();
         if let Some(dest) = &stream.destination {
-            dest_specs.push(dest.clone());
+            dest_specs.push((dest.clone(), format!("{stream_prefix}.destination.address")));
         }
         if let Some(dests) = &stream.destinations {
-            dest_specs.extend(dests.clone());
+            for (d_idx, dest) in dests.iter().enumerate() {
+                dest_specs.push((
+                    dest.clone(),
+                    format!("{stream_prefix}.destinations[{d_idx}].address"),
+                ));
+            }
         }
 
         // Shared bounded queue state
@@ -474,7 +690,8 @@ impl StreamRunner {
         // -------------------------------------------------------------------
         match stream.source.transport {
             TransportType::Udp => {
-                let bind_addr = resolve_endpoint(&stream.source.address)?;
+                let bind_addr =
+                    resolve_endpoint_with_context(&stream.source.address, Some(&source_path))?;
                 let recv_socket = bind_udp_socket(bind_addr)?;
                 recv_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
@@ -578,7 +795,10 @@ impl StreamRunner {
 
                 match mode {
                     ConnectionMode::Listen => {
-                        let bind_addr = resolve_endpoint(&stream.source.address)?;
+                        let bind_addr = resolve_endpoint_with_context(
+                            &stream.source.address,
+                            Some(&source_path),
+                        )?;
                         let listener = bind_tcp_listener(bind_addr)?;
                         listener.set_nonblocking(true)?;
 
@@ -701,13 +921,23 @@ impl StreamRunner {
                         runner_threads.push(recv_handle);
                     }
                     ConnectionMode::Connect => {
+                        if stream.source.address.contains('%') {
+                            let _ = resolve_endpoint_with_context(
+                                &stream.source.address,
+                                Some(&source_path),
+                            )?;
+                        }
                         let target_addr_str = stream.source.address.clone();
+                        let target_source_path = source_path.clone();
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
 
                             while !recv_shutdown.load(Ordering::Relaxed) {
-                                let target_addr = match resolve_endpoint(&target_addr_str) {
+                                let target_addr = match resolve_endpoint_with_context(
+                                    &target_addr_str,
+                                    Some(&target_source_path),
+                                ) {
                                     Ok(a) => a,
                                     Err(_) => {
                                         recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
@@ -837,9 +1067,12 @@ impl StreamRunner {
             // Track TCP destination connections
             let mut tcp_conns: Vec<Option<TcpDestinationConnection>> = dest_specs
                 .iter()
-                .map(|d| {
+                .map(|(d, path)| {
                     if d.transport == TransportType::Tcp {
-                        Some(TcpDestinationConnection::new(d.address.clone()))
+                        Some(TcpDestinationConnection::new(
+                            d.address.clone(),
+                            path.clone(),
+                        ))
                     } else {
                         None
                     }
@@ -847,7 +1080,7 @@ impl StreamRunner {
                 .collect();
 
             let is_single_tcp_dest =
-                dest_specs.len() == 1 && dest_specs[0].transport == TransportType::Tcp;
+                dest_specs.len() == 1 && dest_specs[0].0.transport == TransportType::Tcp;
 
             let mut held_datagram: Option<Datagram> = None;
 
@@ -901,10 +1134,13 @@ impl StreamRunner {
                     Some(datagram) => {
                         let mut all_succeeded = true;
 
-                        for (idx, dest) in dest_specs.iter().enumerate() {
+                        for (idx, (dest, dest_path)) in dest_specs.iter().enumerate() {
                             match dest.transport {
                                 TransportType::Udp => {
-                                    match resolve_endpoint(&dest.address) {
+                                    match resolve_endpoint_with_context(
+                                        &dest.address,
+                                        Some(dest_path),
+                                    ) {
                                         Ok(target_addr) => {
                                             let socket_res = match target_addr {
                                                 SocketAddr::V4(_) => ipv4_socket
@@ -960,8 +1196,11 @@ impl StreamRunner {
                                                 .fetch_add(1, Ordering::Relaxed);
                                             fwd_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
                                             eprintln!(
-                                                "[stream {}] Destination resolution error for '{}': {}",
-                                                fwd_stream_id, format_endpoint(&dest.address), err
+                                                "[stream {}] Destination resolution error for '{}' ('{}'): {}",
+                                                fwd_stream_id,
+                                                dest_path,
+                                                format_endpoint(&dest.address),
+                                                err
                                             );
                                         }
                                     }
@@ -1181,9 +1420,23 @@ impl Relay {
         let mut stream_runners = Vec::new();
         let mut logical_interfaces = Vec::new();
 
-        for inst in config.all_instances() {
-            for stream in &inst.streams {
-                let runner = StreamRunner::start(stream, &inst, Arc::clone(&shutdown_flag))?;
+        let is_single = config.instance.is_some();
+        let instances = config.all_instances();
+
+        for (inst_idx, inst) in instances.iter().enumerate() {
+            let inst_prefix = if is_single {
+                "instance".to_string()
+            } else {
+                format!("instances[{inst_idx}]")
+            };
+            for (s_idx, stream) in inst.streams.iter().enumerate() {
+                let stream_prefix = format!("{inst_prefix}.streams[{s_idx}]");
+                let runner = StreamRunner::start_with_path(
+                    stream,
+                    inst,
+                    Arc::clone(&shutdown_flag),
+                    &stream_prefix,
+                )?;
                 stream_runners.push(runner);
             }
             for iface in &inst.logical_interfaces {
@@ -1424,5 +1677,36 @@ mod tests {
 
         assert_eq!(queue.pop().unwrap().payload, vec![99]);
         assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_scoped_address_parsing_and_formatting() {
+        // Numeric zone
+        let addr = parse_scoped_socket_addr("[fe80::1%2]:5000").unwrap();
+        assert_eq!(
+            addr,
+            SocketAddr::V6(std::net::SocketAddrV6::new(
+                "fe80::1".parse().unwrap(),
+                5000,
+                0,
+                2
+            ))
+        );
+
+        // Unknown interface returns NotFound error mentioning interface
+        let err = parse_scoped_socket_addr("[fe80::1%nosuchif]:5000").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("nosuchif"));
+
+        // ScopedEndpoint round-trip formatting
+        let ep = ScopedEndpoint::parse("[fe80::1%eth0]:5000").unwrap();
+        assert_eq!(ep.to_string(), "[fe80::1%eth0]:5000");
+
+        // format_endpoint round-trip formatting
+        assert_eq!(
+            format_endpoint("[fe80::1%eth0]:5000"),
+            "[fe80::1%eth0]:5000"
+        );
+        assert_eq!(format_endpoint("fe80::1%eth0:5000"), "[fe80::1%eth0]:5000");
     }
 }

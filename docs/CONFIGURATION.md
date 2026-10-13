@@ -113,7 +113,7 @@ In multi-destination streams (`destinations`), an unresolvable hostname or unrea
 
 #### Tested Scope of IPv6 Support
 
-Tested IPv6 support in continuous integration covers bracketed IPv6 literals (`[::1]` and `[::]`) for UDP and TCP, all four transport conversions, cross-family forwarding (IPv4 to IPv6 and IPv6 to IPv4), multi-destination fan-out, and explicit `IPV6_V6ONLY` listener isolation. Scoped link-local addresses with zone identifiers (`[fe80::1%eth0]`) are reserved for roadmap milestone RER-F-024 and are not claimed at this milestone.
+Tested IPv6 support in continuous integration covers bracketed IPv6 literals (`[::1]` and `[::]`) and scoped IPv6 addresses with zone identifiers (`[fe80::1%eth0]:5000` and `[fe80::1%2]:5000`) for UDP and TCP, all four transport conversions, cross-family forwarding (IPv4 to IPv6 and IPv6 to IPv4), multi-destination fan-out, and explicit `IPV6_V6ONLY` listener isolation.
 
 ### Transport Conversion and TCP Framing Protocol
 
