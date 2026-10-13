@@ -19,8 +19,6 @@ fn pick_unused_port() -> u16 {
 
 #[derive(Debug, Clone)]
 struct MetricSample {
-    #[allow(dead_code)]
-    name: String,
     labels: BTreeMap<String, String>,
     value: f64,
 }
@@ -183,11 +181,7 @@ fn parse_openmetrics(text: &str) -> Result<ParsedOpenMetrics, String> {
                     samples: Vec::new(),
                 });
 
-            fam.samples.push(MetricSample {
-                name: raw_name.to_string(),
-                labels,
-                value: val,
-            });
+            fam.samples.push(MetricSample { labels, value: val });
         }
     }
 
