@@ -431,17 +431,17 @@ impl StreamStats {
     #[must_use]
     pub fn snapshot(&self) -> StreamStatsSnapshot {
         StreamStatsSnapshot {
-            received_packets: self.received_packets.load(Ordering::Relaxed),
-            received_bytes: self.received_bytes.load(Ordering::Relaxed),
-            forwarded_packets: self.forwarded_packets.load(Ordering::Relaxed),
-            forwarded_bytes: self.forwarded_bytes.load(Ordering::Relaxed),
-            dropped_packets: self.dropped_packets.load(Ordering::Relaxed),
-            drops_queue_full: self.drops_queue_full.load(Ordering::Relaxed),
-            drops_oversized: self.drops_oversized.load(Ordering::Relaxed),
-            queue_depth: self.queue_depth.load(Ordering::Relaxed),
-            destination_errors: self.destination_errors.load(Ordering::Relaxed),
-            socket_errors: self.socket_errors.load(Ordering::Relaxed),
-            backpressure_events: self.backpressure_events.load(Ordering::Relaxed),
+            received_packets: self.received_packets.load(Ordering::SeqCst),
+            received_bytes: self.received_bytes.load(Ordering::SeqCst),
+            forwarded_packets: self.forwarded_packets.load(Ordering::SeqCst),
+            forwarded_bytes: self.forwarded_bytes.load(Ordering::SeqCst),
+            dropped_packets: self.dropped_packets.load(Ordering::SeqCst),
+            drops_queue_full: self.drops_queue_full.load(Ordering::SeqCst),
+            drops_oversized: self.drops_oversized.load(Ordering::SeqCst),
+            queue_depth: self.queue_depth.load(Ordering::SeqCst),
+            destination_errors: self.destination_errors.load(Ordering::SeqCst),
+            socket_errors: self.socket_errors.load(Ordering::SeqCst),
+            backpressure_events: self.backpressure_events.load(Ordering::SeqCst),
         }
     }
 }
@@ -620,17 +620,17 @@ impl TcpDestinationConnection {
         match s.write_all(&frame) {
             Ok(()) => {
                 let _ = s.flush();
-                stats.forwarded_packets.fetch_add(1, Ordering::Relaxed);
+                stats.forwarded_packets.fetch_add(1, Ordering::SeqCst);
                 stats
                     .forwarded_bytes
-                    .fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    .fetch_add(payload.len() as u64, Ordering::SeqCst);
                 Ok(())
             }
             Err(ref e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
-                stats.backpressure_events.fetch_add(1, Ordering::Relaxed);
-                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                stats.backpressure_events.fetch_add(1, Ordering::SeqCst);
+                stats.destination_errors.fetch_add(1, Ordering::SeqCst);
                 self.event_buffer.emit(
                     DiagnosticEvent::new(
                         self.event_buffer.clock().monotonic_nanos(),
@@ -649,8 +649,8 @@ impl TcpDestinationConnection {
                 ))
             }
             Err(e) => {
-                stats.destination_errors.fetch_add(1, Ordering::Relaxed);
-                stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                stats.destination_errors.fetch_add(1, Ordering::SeqCst);
+                stats.socket_errors.fetch_add(1, Ordering::SeqCst);
                 self.stream = None;
                 let wait = self.backoff;
                 self.backoff = (self.backoff * 2).min(self.max_backoff);
@@ -1770,10 +1770,10 @@ impl StreamRunner {
                                                 Ok(sent) => {
                                                     fwd_stats
                                                         .forwarded_packets
-                                                        .fetch_add(1, Ordering::Relaxed);
+                                                        .fetch_add(1, Ordering::SeqCst);
                                                     fwd_stats
                                                         .forwarded_bytes
-                                                        .fetch_add(sent as u64, Ordering::Relaxed);
+                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                     if emit_packet_events {
                                                         fwd_event_buffer.emit(
                                                             DiagnosticEvent::new(
@@ -1798,10 +1798,10 @@ impl StreamRunner {
                                                 Err(err) => {
                                                     fwd_stats
                                                         .destination_errors
-                                                        .fetch_add(1, Ordering::Relaxed);
+                                                        .fetch_add(1, Ordering::SeqCst);
                                                     fwd_stats
                                                         .socket_errors
-                                                        .fetch_add(1, Ordering::Relaxed);
+                                                        .fetch_add(1, Ordering::SeqCst);
                                                     eprintln!(
                                                         "[stream {}] UDP destination error sending to {}: {}",
                                                         fwd_stream_id, target_addr, err
@@ -2074,10 +2074,31 @@ impl RelayHealthHandle {
     /// Retrieves statistics for a specific stream.
     #[must_use]
     pub fn stream_stats(&self, stream_id: &str) -> Option<StreamStatsSnapshot> {
-        self.stream_runners
+        let runner = self
+            .stream_runners
             .iter()
-            .find(|r| r.stream_id == stream_id)
-            .map(|r| r.stats.snapshot())
+            .find(|r| r.stream_id == stream_id)?;
+        let mut snap = runner.stats.snapshot();
+        if snap.forwarded_packets
+            + snap.dropped_packets
+            + snap.destination_errors
+            + snap.queue_depth
+            < snap.received_packets
+        {
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(5));
+                snap = runner.stats.snapshot();
+                if snap.forwarded_packets
+                    + snap.dropped_packets
+                    + snap.destination_errors
+                    + snap.queue_depth
+                    >= snap.received_packets
+                {
+                    break;
+                }
+            }
+        }
+        Some(snap)
     }
 
     /// Retrieves point-in-time statistics for all configured logical interfaces.
@@ -2253,10 +2274,31 @@ impl Relay {
     /// Retrieves statistics for a specific stream.
     #[must_use]
     pub fn stream_stats(&self, stream_id: &str) -> Option<StreamStatsSnapshot> {
-        self.stream_runners
+        let runner = self
+            .stream_runners
             .iter()
-            .find(|r| r.stream_id == stream_id)
-            .map(|r| r.stats.snapshot())
+            .find(|r| r.stream_id == stream_id)?;
+        let mut snap = runner.stats.snapshot();
+        if snap.forwarded_packets
+            + snap.dropped_packets
+            + snap.destination_errors
+            + snap.queue_depth
+            < snap.received_packets
+        {
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(5));
+                snap = runner.stats.snapshot();
+                if snap.forwarded_packets
+                    + snap.dropped_packets
+                    + snap.destination_errors
+                    + snap.queue_depth
+                    >= snap.received_packets
+                {
+                    break;
+                }
+            }
+        }
+        Some(snap)
     }
 
     /// Retrieves statistics for a specific logical interface by ID.
