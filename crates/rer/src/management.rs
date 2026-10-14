@@ -1109,6 +1109,21 @@ impl ManagementServer {
                                 "Warning: metrics server failed to bind to '{}': {} (forwarding continues)",
                                 metrics.endpoint, err
                             );
+                            health_handle.event_buffer().emit(
+                                crate::diagnostics::DiagnosticEvent::new(
+                                    health_handle.event_buffer().clock().monotonic_nanos(),
+                                    health_handle.event_buffer().clock().wall_clock_nanos(),
+                                    format!("instance.{}.metrics", inst.id),
+                                    crate::diagnostics::DiagnosticStage::Failure,
+                                    crate::config::TransportType::Tcp,
+                                    0,
+                                )
+                                .with_destination(&metrics.endpoint)
+                                .with_reason(format!(
+                                    "Warning: metrics server failed to bind to '{}': {} (forwarding continues)",
+                                    metrics.endpoint, err
+                                )),
+                            );
                         }
                     }
                 }

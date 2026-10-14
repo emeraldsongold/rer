@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    Config, ConnectionMode, DropPolicy, EndpointConfig, InstanceConfig, StreamConfig, TransportType,
+    Config, ConnectionMode, DropPolicy, EndpointConfig, InstanceConfig, OperationalMode,
+    StreamConfig, TransportType,
 };
+use crate::diagnostics::{DiagnosticBuffer, DiagnosticEvent, DiagnosticStage};
 use crate::framing;
 
 /// Default maximum queue size (packets) when not explicitly configured.
@@ -466,6 +468,8 @@ pub struct StreamStatsSnapshot {
 struct TcpDestinationConnection {
     address: String,
     config_path: String,
+    stream_id: String,
+    event_buffer: DiagnosticBuffer,
     stream: Option<TcpStream>,
     backoff: Duration,
     initial_backoff: Duration,
@@ -476,10 +480,17 @@ struct TcpDestinationConnection {
 }
 
 impl TcpDestinationConnection {
-    fn new(address: String, config_path: String) -> Self {
+    fn new(
+        address: String,
+        config_path: String,
+        stream_id: String,
+        event_buffer: DiagnosticBuffer,
+    ) -> Self {
         Self {
             address,
             config_path,
+            stream_id,
+            event_buffer,
             stream: None,
             initial_backoff: Duration::from_millis(50),
             max_backoff: Duration::from_millis(1000),
@@ -513,6 +524,23 @@ impl TcpDestinationConnection {
                         format_endpoint(&self.address),
                         e
                     );
+                    self.event_buffer.emit(
+                        DiagnosticEvent::new(
+                            self.event_buffer.clock().monotonic_nanos(),
+                            self.event_buffer.clock().wall_clock_nanos(),
+                            &self.stream_id,
+                            DiagnosticStage::Failure,
+                            TransportType::Tcp,
+                            0,
+                        )
+                        .with_destination(format_endpoint(&self.address))
+                        .with_reason(format!(
+                            "Address resolution error for '{}' ('{}'): {}",
+                            self.config_path,
+                            format_endpoint(&self.address),
+                            e
+                        )),
+                    );
                     return false;
                 }
             };
@@ -538,6 +566,23 @@ impl TcpDestinationConnection {
                     format_endpoint(&self.address),
                     wait,
                     e
+                );
+                self.event_buffer.emit(
+                    DiagnosticEvent::new(
+                        self.event_buffer.clock().monotonic_nanos(),
+                        self.event_buffer.clock().wall_clock_nanos(),
+                        &self.stream_id,
+                        DiagnosticStage::Failure,
+                        TransportType::Tcp,
+                        0,
+                    )
+                    .with_destination(format_endpoint(&self.address))
+                    .with_reason(format!(
+                        "Connect error to '{}' (backoff {:?}): {}",
+                        format_endpoint(&self.address),
+                        wait,
+                        e
+                    )),
                 );
                 false
             }
@@ -586,6 +631,18 @@ impl TcpDestinationConnection {
             {
                 stats.backpressure_events.fetch_add(1, Ordering::Relaxed);
                 stats.destination_errors.fetch_add(1, Ordering::Relaxed);
+                self.event_buffer.emit(
+                    DiagnosticEvent::new(
+                        self.event_buffer.clock().monotonic_nanos(),
+                        self.event_buffer.clock().wall_clock_nanos(),
+                        &self.stream_id,
+                        DiagnosticStage::Failure,
+                        TransportType::Tcp,
+                        payload.len() as u64,
+                    )
+                    .with_destination(format_endpoint(&self.address))
+                    .with_reason("tcp slow reader backpressure / write timeout"),
+                );
                 Err(io::Error::new(
                     e.kind(),
                     "tcp slow reader backpressure / write timeout",
@@ -598,6 +655,18 @@ impl TcpDestinationConnection {
                 let wait = self.backoff;
                 self.backoff = (self.backoff * 2).min(self.max_backoff);
                 self.next_connect_attempt = Some(Instant::now() + wait);
+                self.event_buffer.emit(
+                    DiagnosticEvent::new(
+                        self.event_buffer.clock().monotonic_nanos(),
+                        self.event_buffer.clock().wall_clock_nanos(),
+                        &self.stream_id,
+                        DiagnosticStage::Failure,
+                        TransportType::Tcp,
+                        payload.len() as u64,
+                    )
+                    .with_destination(format_endpoint(&self.address))
+                    .with_reason(format!("TCP write error: {e}")),
+                );
                 Err(e)
             }
         }
@@ -608,6 +677,9 @@ impl TcpDestinationConnection {
 pub struct StreamRunner {
     pub stream_id: String,
     pub stats: Arc<StreamStats>,
+    pub event_buffer: DiagnosticBuffer,
+    pub mode: OperationalMode,
+    pub source_transport: TransportType,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -638,9 +710,32 @@ impl StreamRunner {
         shutdown_flag: Arc<AtomicBool>,
         stream_prefix: &str,
     ) -> io::Result<Self> {
+        Self::start_with_buffer(
+            stream,
+            instance,
+            shutdown_flag,
+            stream_prefix,
+            DiagnosticBuffer::new(1024),
+        )
+    }
+
+    /// Starts forwarding for a single stream with a designated diagnostic event buffer.
+    ///
+    /// # Errors
+    /// Returns an error if the source socket cannot be bound or configured.
+    pub fn start_with_buffer(
+        stream: &StreamConfig,
+        instance: &InstanceConfig,
+        shutdown_flag: Arc<AtomicBool>,
+        stream_prefix: &str,
+        event_buffer: DiagnosticBuffer,
+    ) -> io::Result<Self> {
         let stream_id = stream.id.clone();
         let stats = Arc::new(StreamStats::default());
         let source_path = format!("{stream_prefix}.source.address");
+        let mode = instance.mode;
+        let emit_packet_events = mode == OperationalMode::Debug || mode == OperationalMode::Test;
+        let source_transport = stream.source.transport;
 
         // Resolve buffer limits (stream config overrides instance config overrides default)
         let max_queue_size = stream
@@ -678,6 +773,11 @@ impl StreamRunner {
             }
         }
 
+        let primary_dest = dest_specs
+            .first()
+            .map(|(d, _)| format_endpoint(&d.address))
+            .unwrap_or_default();
+
         // Shared bounded queue state
         let queue = Arc::new(Mutex::new(BoundedQueue::new(max_queue_size, drop_policy)));
         let condvar = Arc::new(Condvar::new());
@@ -701,6 +801,8 @@ impl StreamRunner {
                 let recv_queue = Arc::clone(&queue);
                 let recv_condvar = Arc::clone(&condvar);
                 let recv_done_flag = Arc::clone(&receiver_done);
+                let recv_event_buffer = event_buffer.clone();
+                let recv_primary_dest = primary_dest.clone();
 
                 let recv_handle = thread::spawn(move || {
                     let mut buf = vec![0u8; 65536];
@@ -713,6 +815,23 @@ impl StreamRunner {
                                     .received_bytes
                                     .fetch_add(n as u64, Ordering::Relaxed);
 
+                                let src_endpoint = src_addr.to_string();
+
+                                if emit_packet_events {
+                                    recv_event_buffer.emit(
+                                        DiagnosticEvent::new(
+                                            recv_event_buffer.clock().monotonic_nanos(),
+                                            recv_event_buffer.clock().wall_clock_nanos(),
+                                            &recv_stream_id,
+                                            DiagnosticStage::Received,
+                                            TransportType::Udp,
+                                            n as u64,
+                                        )
+                                        .with_source(&src_endpoint)
+                                        .with_destination(&recv_primary_dest),
+                                    );
+                                }
+
                                 if n > max_packet_size {
                                     recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
                                     recv_stats.drops_oversized.fetch_add(1, Ordering::Relaxed);
@@ -720,7 +839,40 @@ impl StreamRunner {
                                         "[stream {}] Dropped oversized datagram ({} bytes > max {})",
                                         recv_stream_id, n, max_packet_size
                                     );
+                                    recv_event_buffer.emit(
+                                        DiagnosticEvent::new(
+                                            recv_event_buffer.clock().monotonic_nanos(),
+                                            recv_event_buffer.clock().wall_clock_nanos(),
+                                            &recv_stream_id,
+                                            DiagnosticStage::Dropped,
+                                            TransportType::Udp,
+                                            n as u64,
+                                        )
+                                        .with_source(&src_endpoint)
+                                        .with_destination(&recv_primary_dest)
+                                        .with_reason(
+                                            format!(
+                                                "oversized datagram ({} bytes > max {})",
+                                                n, max_packet_size
+                                            ),
+                                        ),
+                                    );
                                     continue;
+                                }
+
+                                if emit_packet_events {
+                                    recv_event_buffer.emit(
+                                        DiagnosticEvent::new(
+                                            recv_event_buffer.clock().monotonic_nanos(),
+                                            recv_event_buffer.clock().wall_clock_nanos(),
+                                            &recv_stream_id,
+                                            DiagnosticStage::Accepted,
+                                            TransportType::Udp,
+                                            n as u64,
+                                        )
+                                        .with_source(&src_endpoint)
+                                        .with_destination(&recv_primary_dest),
+                                    );
                                 }
 
                                 let datagram = Datagram {
@@ -739,13 +891,41 @@ impl StreamRunner {
                                 };
 
                                 match push_result {
-                                    PushResult::Enqueued => {}
+                                    PushResult::Enqueued => {
+                                        if emit_packet_events {
+                                            recv_event_buffer.emit(
+                                                DiagnosticEvent::new(
+                                                    recv_event_buffer.clock().monotonic_nanos(),
+                                                    recv_event_buffer.clock().wall_clock_nanos(),
+                                                    &recv_stream_id,
+                                                    DiagnosticStage::RoutedOrQueued,
+                                                    TransportType::Udp,
+                                                    n as u64,
+                                                )
+                                                .with_source(&src_endpoint)
+                                                .with_destination(&recv_primary_dest),
+                                            );
+                                        }
+                                    }
                                     PushResult::DroppedOldest => {
                                         recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
                                         recv_stats.drops_queue_full.fetch_add(1, Ordering::Relaxed);
                                         recv_stats
                                             .backpressure_events
                                             .fetch_add(1, Ordering::Relaxed);
+                                        recv_event_buffer.emit(
+                                            DiagnosticEvent::new(
+                                                recv_event_buffer.clock().monotonic_nanos(),
+                                                recv_event_buffer.clock().wall_clock_nanos(),
+                                                &recv_stream_id,
+                                                DiagnosticStage::Dropped,
+                                                TransportType::Udp,
+                                                n as u64,
+                                            )
+                                            .with_source(&src_endpoint)
+                                            .with_destination(&recv_primary_dest)
+                                            .with_reason("queue full: drop_oldest policy"),
+                                        );
                                     }
                                     PushResult::DroppedNewest => {
                                         recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -753,6 +933,19 @@ impl StreamRunner {
                                         recv_stats
                                             .backpressure_events
                                             .fetch_add(1, Ordering::Relaxed);
+                                        recv_event_buffer.emit(
+                                            DiagnosticEvent::new(
+                                                recv_event_buffer.clock().monotonic_nanos(),
+                                                recv_event_buffer.clock().wall_clock_nanos(),
+                                                &recv_stream_id,
+                                                DiagnosticStage::Dropped,
+                                                TransportType::Udp,
+                                                n as u64,
+                                            )
+                                            .with_source(&src_endpoint)
+                                            .with_destination(&recv_primary_dest)
+                                            .with_reason("queue full: drop_newest policy"),
+                                        );
                                     }
                                     PushResult::Rejected => {
                                         recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -760,6 +953,19 @@ impl StreamRunner {
                                         recv_stats
                                             .backpressure_events
                                             .fetch_add(1, Ordering::Relaxed);
+                                        recv_event_buffer.emit(
+                                            DiagnosticEvent::new(
+                                                recv_event_buffer.clock().monotonic_nanos(),
+                                                recv_event_buffer.clock().wall_clock_nanos(),
+                                                &recv_stream_id,
+                                                DiagnosticStage::Dropped,
+                                                TransportType::Udp,
+                                                n as u64,
+                                            )
+                                            .with_source(&src_endpoint)
+                                            .with_destination(&recv_primary_dest)
+                                            .with_reason("queue full: reject policy"),
+                                        );
                                     }
                                 }
                             }
@@ -775,6 +981,17 @@ impl StreamRunner {
                                     "[stream {}] Socket receive error: {}",
                                     recv_stream_id, e
                                 );
+                                recv_event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        recv_event_buffer.clock().monotonic_nanos(),
+                                        recv_event_buffer.clock().wall_clock_nanos(),
+                                        &recv_stream_id,
+                                        DiagnosticStage::Failure,
+                                        TransportType::Udp,
+                                        0,
+                                    )
+                                    .with_reason(format!("Socket receive error: {e}")),
+                                );
                             }
                         }
                     }
@@ -785,15 +1002,17 @@ impl StreamRunner {
                 runner_threads.push(recv_handle);
             }
             TransportType::Tcp => {
-                let mode = stream.source.mode.unwrap_or(ConnectionMode::Listen);
+                let mode_con = stream.source.mode.unwrap_or(ConnectionMode::Listen);
                 let recv_stream_id = stream_id.clone();
                 let recv_stats = Arc::clone(&stats);
                 let recv_shutdown = Arc::clone(&shutdown_flag);
                 let recv_queue = Arc::clone(&queue);
                 let recv_condvar = Arc::clone(&condvar);
                 let recv_done_flag = Arc::clone(&receiver_done);
+                let recv_event_buffer = event_buffer.clone();
+                let recv_primary_dest = primary_dest.clone();
 
-                match mode {
+                match mode_con {
                     ConnectionMode::Listen => {
                         let bind_addr = resolve_endpoint_with_context(
                             &stream.source.address,
@@ -816,8 +1035,12 @@ impl StreamRunner {
                                         let cl_shutdown = Arc::clone(&recv_shutdown);
                                         let cl_queue = Arc::clone(&recv_queue);
                                         let cl_condvar = Arc::clone(&recv_condvar);
+                                        let cl_event_buffer = recv_event_buffer.clone();
+                                        let cl_stream_id = recv_stream_id.clone();
+                                        let cl_primary_dest = recv_primary_dest.clone();
 
                                         let client_h = thread::spawn(move || {
+                                            let src_endpoint = client_addr.to_string();
                                             while !cl_shutdown.load(Ordering::Relaxed) {
                                                 match framing::read_frame(
                                                     &mut client_stream,
@@ -832,6 +1055,41 @@ impl StreamRunner {
                                                         cl_stats
                                                             .received_bytes
                                                             .fetch_add(n as u64, Ordering::Relaxed);
+
+                                                        if emit_packet_events {
+                                                            cl_event_buffer.emit(
+                                                                DiagnosticEvent::new(
+                                                                    cl_event_buffer
+                                                                        .clock()
+                                                                        .monotonic_nanos(),
+                                                                    cl_event_buffer
+                                                                        .clock()
+                                                                        .wall_clock_nanos(),
+                                                                    &cl_stream_id,
+                                                                    DiagnosticStage::Received,
+                                                                    TransportType::Tcp,
+                                                                    n as u64,
+                                                                )
+                                                                .with_source(&src_endpoint)
+                                                                .with_destination(&cl_primary_dest),
+                                                            );
+                                                            cl_event_buffer.emit(
+                                                                DiagnosticEvent::new(
+                                                                    cl_event_buffer
+                                                                        .clock()
+                                                                        .monotonic_nanos(),
+                                                                    cl_event_buffer
+                                                                        .clock()
+                                                                        .wall_clock_nanos(),
+                                                                    &cl_stream_id,
+                                                                    DiagnosticStage::Accepted,
+                                                                    TransportType::Tcp,
+                                                                    n as u64,
+                                                                )
+                                                                .with_source(&src_endpoint)
+                                                                .with_destination(&cl_primary_dest),
+                                                            );
+                                                        }
 
                                                         let datagram = Datagram {
                                                             payload,
@@ -850,10 +1108,23 @@ impl StreamRunner {
                                                         };
 
                                                         match push_res {
-                                                            PushResult::Enqueued => {}
-                                                            PushResult::DroppedOldest
-                                                            | PushResult::DroppedNewest
-                                                            | PushResult::Rejected => {
+                                                            PushResult::Enqueued => {
+                                                                if emit_packet_events {
+                                                                    cl_event_buffer.emit(
+                                                                        DiagnosticEvent::new(
+                                                                            cl_event_buffer.clock().monotonic_nanos(),
+                                                                            cl_event_buffer.clock().wall_clock_nanos(),
+                                                                            &cl_stream_id,
+                                                                            DiagnosticStage::RoutedOrQueued,
+                                                                            TransportType::Tcp,
+                                                                            n as u64,
+                                                                        )
+                                                                        .with_source(&src_endpoint)
+                                                                        .with_destination(&cl_primary_dest),
+                                                                    );
+                                                                }
+                                                            }
+                                                            PushResult::DroppedOldest => {
                                                                 cl_stats.dropped_packets.fetch_add(
                                                                     1,
                                                                     Ordering::Relaxed,
@@ -870,6 +1141,89 @@ impl StreamRunner {
                                                                         1,
                                                                         Ordering::Relaxed,
                                                                     );
+                                                                cl_event_buffer.emit(
+                                                                    DiagnosticEvent::new(
+                                                                        cl_event_buffer.clock().monotonic_nanos(),
+                                                                        cl_event_buffer.clock().wall_clock_nanos(),
+                                                                        &cl_stream_id,
+                                                                        DiagnosticStage::Dropped,
+                                                                        TransportType::Tcp,
+                                                                        n as u64,
+                                                                    )
+                                                                    .with_source(&src_endpoint)
+                                                                    .with_destination(&cl_primary_dest)
+                                                                    .with_reason("queue full: drop_oldest policy"),
+                                                                );
+                                                            }
+                                                            PushResult::DroppedNewest => {
+                                                                cl_stats.dropped_packets.fetch_add(
+                                                                    1,
+                                                                    Ordering::Relaxed,
+                                                                );
+                                                                cl_stats
+                                                                    .drops_queue_full
+                                                                    .fetch_add(
+                                                                        1,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                cl_stats
+                                                                    .backpressure_events
+                                                                    .fetch_add(
+                                                                        1,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                cl_event_buffer.emit(
+                                                                    DiagnosticEvent::new(
+                                                                        cl_event_buffer.clock().monotonic_nanos(),
+                                                                        cl_event_buffer.clock().wall_clock_nanos(),
+                                                                        &cl_stream_id,
+                                                                        DiagnosticStage::Dropped,
+                                                                        TransportType::Tcp,
+                                                                        n as u64,
+                                                                    )
+                                                                    .with_source(&src_endpoint)
+                                                                    .with_destination(&cl_primary_dest)
+                                                                    .with_reason("queue full: drop_newest policy"),
+                                                                );
+                                                            }
+                                                            PushResult::Rejected => {
+                                                                cl_stats.dropped_packets.fetch_add(
+                                                                    1,
+                                                                    Ordering::Relaxed,
+                                                                );
+                                                                cl_stats
+                                                                    .drops_queue_full
+                                                                    .fetch_add(
+                                                                        1,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                cl_stats
+                                                                    .backpressure_events
+                                                                    .fetch_add(
+                                                                        1,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                cl_event_buffer.emit(
+                                                                    DiagnosticEvent::new(
+                                                                        cl_event_buffer
+                                                                            .clock()
+                                                                            .monotonic_nanos(),
+                                                                        cl_event_buffer
+                                                                            .clock()
+                                                                            .wall_clock_nanos(),
+                                                                        &cl_stream_id,
+                                                                        DiagnosticStage::Dropped,
+                                                                        TransportType::Tcp,
+                                                                        n as u64,
+                                                                    )
+                                                                    .with_source(&src_endpoint)
+                                                                    .with_destination(
+                                                                        &cl_primary_dest,
+                                                                    )
+                                                                    .with_reason(
+                                                                        "queue full: reject policy",
+                                                                    ),
+                                                                );
                                                             }
                                                         }
                                                     }
@@ -884,12 +1238,45 @@ impl StreamRunner {
                                                         cl_stats
                                                             .drops_oversized
                                                             .fetch_add(1, Ordering::Relaxed);
+                                                        cl_event_buffer.emit(
+                                                            DiagnosticEvent::new(
+                                                                cl_event_buffer.clock().monotonic_nanos(),
+                                                                cl_event_buffer.clock().wall_clock_nanos(),
+                                                                &cl_stream_id,
+                                                                DiagnosticStage::Dropped,
+                                                                TransportType::Tcp,
+                                                                0,
+                                                            )
+                                                            .with_source(&src_endpoint)
+                                                            .with_destination(&cl_primary_dest)
+                                                            .with_reason(format!(
+                                                                "Dropped oversized frame (> max {max_packet_size})"
+                                                            )),
+                                                        );
                                                         break;
                                                     }
-                                                    Err(_) => {
+                                                    Err(e) => {
                                                         cl_stats
                                                             .socket_errors
                                                             .fetch_add(1, Ordering::Relaxed);
+                                                        cl_event_buffer.emit(
+                                                            DiagnosticEvent::new(
+                                                                cl_event_buffer
+                                                                    .clock()
+                                                                    .monotonic_nanos(),
+                                                                cl_event_buffer
+                                                                    .clock()
+                                                                    .wall_clock_nanos(),
+                                                                &cl_stream_id,
+                                                                DiagnosticStage::Failure,
+                                                                TransportType::Tcp,
+                                                                0,
+                                                            )
+                                                            .with_source(&src_endpoint)
+                                                            .with_reason(format!(
+                                                                "TCP frame read error: {e}"
+                                                            )),
+                                                        );
                                                         break;
                                                     }
                                                 }
@@ -906,6 +1293,17 @@ impl StreamRunner {
                                         eprintln!(
                                             "[stream {}] TCP accept error: {}",
                                             recv_stream_id, e
+                                        );
+                                        recv_event_buffer.emit(
+                                            DiagnosticEvent::new(
+                                                recv_event_buffer.clock().monotonic_nanos(),
+                                                recv_event_buffer.clock().wall_clock_nanos(),
+                                                &recv_stream_id,
+                                                DiagnosticStage::Failure,
+                                                TransportType::Tcp,
+                                                0,
+                                            )
+                                            .with_reason(format!("TCP accept error: {e}")),
                                         );
                                     }
                                 }
@@ -939,8 +1337,22 @@ impl StreamRunner {
                                     Some(&target_source_path),
                                 ) {
                                     Ok(a) => a,
-                                    Err(_) => {
+                                    Err(e) => {
                                         recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                                        recv_event_buffer.emit(
+                                            DiagnosticEvent::new(
+                                                recv_event_buffer.clock().monotonic_nanos(),
+                                                recv_event_buffer.clock().wall_clock_nanos(),
+                                                &recv_stream_id,
+                                                DiagnosticStage::Failure,
+                                                TransportType::Tcp,
+                                                0,
+                                            )
+                                            .with_destination(&target_addr_str)
+                                            .with_reason(format!(
+                                                "Address resolution error for TCP source '{target_source_path}' ('{target_addr_str}'): {e}"
+                                            )),
+                                        );
                                         thread::sleep(backoff);
                                         continue;
                                     }
@@ -955,6 +1367,7 @@ impl StreamRunner {
                                             .set_read_timeout(Some(Duration::from_millis(100)));
                                         let _ = stream.set_nodelay(true);
                                         backoff = Duration::from_millis(50);
+                                        let src_endpoint = target_addr.to_string();
 
                                         while !recv_shutdown.load(Ordering::Relaxed) {
                                             match framing::read_frame(
@@ -970,6 +1383,41 @@ impl StreamRunner {
                                                     recv_stats
                                                         .received_bytes
                                                         .fetch_add(n as u64, Ordering::Relaxed);
+
+                                                    if emit_packet_events {
+                                                        recv_event_buffer.emit(
+                                                            DiagnosticEvent::new(
+                                                                recv_event_buffer
+                                                                    .clock()
+                                                                    .monotonic_nanos(),
+                                                                recv_event_buffer
+                                                                    .clock()
+                                                                    .wall_clock_nanos(),
+                                                                &recv_stream_id,
+                                                                DiagnosticStage::Received,
+                                                                TransportType::Tcp,
+                                                                n as u64,
+                                                            )
+                                                            .with_source(&src_endpoint)
+                                                            .with_destination(&recv_primary_dest),
+                                                        );
+                                                        recv_event_buffer.emit(
+                                                            DiagnosticEvent::new(
+                                                                recv_event_buffer
+                                                                    .clock()
+                                                                    .monotonic_nanos(),
+                                                                recv_event_buffer
+                                                                    .clock()
+                                                                    .wall_clock_nanos(),
+                                                                &recv_stream_id,
+                                                                DiagnosticStage::Accepted,
+                                                                TransportType::Tcp,
+                                                                n as u64,
+                                                            )
+                                                            .with_source(&src_endpoint)
+                                                            .with_destination(&recv_primary_dest),
+                                                        );
+                                                    }
 
                                                     let datagram = Datagram {
                                                         payload,
@@ -988,10 +1436,23 @@ impl StreamRunner {
                                                     };
 
                                                     match push_res {
-                                                        PushResult::Enqueued => {}
-                                                        PushResult::DroppedOldest
-                                                        | PushResult::DroppedNewest
-                                                        | PushResult::Rejected => {
+                                                        PushResult::Enqueued => {
+                                                            if emit_packet_events {
+                                                                recv_event_buffer.emit(
+                                                                    DiagnosticEvent::new(
+                                                                        recv_event_buffer.clock().monotonic_nanos(),
+                                                                        recv_event_buffer.clock().wall_clock_nanos(),
+                                                                        &recv_stream_id,
+                                                                        DiagnosticStage::RoutedOrQueued,
+                                                                        TransportType::Tcp,
+                                                                        n as u64,
+                                                                    )
+                                                                    .with_source(&src_endpoint)
+                                                                    .with_destination(&recv_primary_dest),
+                                                                );
+                                                            }
+                                                        }
+                                                        PushResult::DroppedOldest => {
                                                             recv_stats
                                                                 .dropped_packets
                                                                 .fetch_add(1, Ordering::Relaxed);
@@ -1001,6 +1462,75 @@ impl StreamRunner {
                                                             recv_stats
                                                                 .backpressure_events
                                                                 .fetch_add(1, Ordering::Relaxed);
+                                                            recv_event_buffer.emit(
+                                                                DiagnosticEvent::new(
+                                                                    recv_event_buffer.clock().monotonic_nanos(),
+                                                                    recv_event_buffer.clock().wall_clock_nanos(),
+                                                                    &recv_stream_id,
+                                                                    DiagnosticStage::Dropped,
+                                                                    TransportType::Tcp,
+                                                                    n as u64,
+                                                                )
+                                                                .with_source(&src_endpoint)
+                                                                .with_destination(&recv_primary_dest)
+                                                                .with_reason("queue full: drop_oldest policy"),
+                                                            );
+                                                        }
+                                                        PushResult::DroppedNewest => {
+                                                            recv_stats
+                                                                .dropped_packets
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_stats
+                                                                .drops_queue_full
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_stats
+                                                                .backpressure_events
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_event_buffer.emit(
+                                                                DiagnosticEvent::new(
+                                                                    recv_event_buffer.clock().monotonic_nanos(),
+                                                                    recv_event_buffer.clock().wall_clock_nanos(),
+                                                                    &recv_stream_id,
+                                                                    DiagnosticStage::Dropped,
+                                                                    TransportType::Tcp,
+                                                                    n as u64,
+                                                                )
+                                                                .with_source(&src_endpoint)
+                                                                .with_destination(&recv_primary_dest)
+                                                                .with_reason("queue full: drop_newest policy"),
+                                                            );
+                                                        }
+                                                        PushResult::Rejected => {
+                                                            recv_stats
+                                                                .dropped_packets
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_stats
+                                                                .drops_queue_full
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_stats
+                                                                .backpressure_events
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            recv_event_buffer.emit(
+                                                                DiagnosticEvent::new(
+                                                                    recv_event_buffer
+                                                                        .clock()
+                                                                        .monotonic_nanos(),
+                                                                    recv_event_buffer
+                                                                        .clock()
+                                                                        .wall_clock_nanos(),
+                                                                    &recv_stream_id,
+                                                                    DiagnosticStage::Dropped,
+                                                                    TransportType::Tcp,
+                                                                    n as u64,
+                                                                )
+                                                                .with_source(&src_endpoint)
+                                                                .with_destination(
+                                                                    &recv_primary_dest,
+                                                                )
+                                                                .with_reason(
+                                                                    "queue full: reject policy",
+                                                                ),
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -1014,19 +1544,66 @@ impl StreamRunner {
                                                     recv_stats
                                                         .drops_oversized
                                                         .fetch_add(1, Ordering::Relaxed);
+                                                    recv_event_buffer.emit(
+                                                        DiagnosticEvent::new(
+                                                            recv_event_buffer.clock().monotonic_nanos(),
+                                                            recv_event_buffer.clock().wall_clock_nanos(),
+                                                            &recv_stream_id,
+                                                            DiagnosticStage::Dropped,
+                                                            TransportType::Tcp,
+                                                            0,
+                                                        )
+                                                        .with_source(&src_endpoint)
+                                                        .with_destination(&recv_primary_dest)
+                                                        .with_reason(format!(
+                                                            "Dropped oversized frame (> max {max_packet_size})"
+                                                        )),
+                                                    );
                                                     break;
                                                 }
-                                                Err(_) => {
+                                                Err(e) => {
                                                     recv_stats
                                                         .socket_errors
                                                         .fetch_add(1, Ordering::Relaxed);
+                                                    recv_event_buffer.emit(
+                                                        DiagnosticEvent::new(
+                                                            recv_event_buffer
+                                                                .clock()
+                                                                .monotonic_nanos(),
+                                                            recv_event_buffer
+                                                                .clock()
+                                                                .wall_clock_nanos(),
+                                                            &recv_stream_id,
+                                                            DiagnosticStage::Failure,
+                                                            TransportType::Tcp,
+                                                            0,
+                                                        )
+                                                        .with_source(&src_endpoint)
+                                                        .with_reason(format!(
+                                                            "TCP frame read error: {e}"
+                                                        )),
+                                                    );
                                                     break;
                                                 }
                                             }
                                         }
                                     }
-                                    Err(_) => {
+                                    Err(e) => {
                                         recv_stats.socket_errors.fetch_add(1, Ordering::Relaxed);
+                                        recv_event_buffer.emit(
+                                            DiagnosticEvent::new(
+                                                recv_event_buffer.clock().monotonic_nanos(),
+                                                recv_event_buffer.clock().wall_clock_nanos(),
+                                                &recv_stream_id,
+                                                DiagnosticStage::Failure,
+                                                TransportType::Tcp,
+                                                0,
+                                            )
+                                            .with_destination(target_addr.to_string())
+                                            .with_reason(format!(
+                                                "Connect error to TCP source {target_addr}: {e}"
+                                            )),
+                                        );
                                         let sleep_dur = backoff;
                                         backoff = (backoff * 2).min(max_backoff);
                                         let start = Instant::now();
@@ -1057,6 +1634,7 @@ impl StreamRunner {
         let fwd_queue = Arc::clone(&queue);
         let fwd_condvar = Arc::clone(&condvar);
         let fwd_done_flag = Arc::clone(&receiver_done);
+        let fwd_event_buffer = event_buffer.clone();
         let is_active = Arc::new(AtomicBool::new(true));
         let fwd_is_active = Arc::clone(&is_active);
 
@@ -1072,6 +1650,8 @@ impl StreamRunner {
                         Some(TcpDestinationConnection::new(
                             d.address.clone(),
                             path.clone(),
+                            fwd_stream_id.clone(),
+                            fwd_event_buffer.clone(),
                         ))
                     } else {
                         None
@@ -1133,8 +1713,27 @@ impl StreamRunner {
                 match held_datagram.take() {
                     Some(datagram) => {
                         let mut all_succeeded = true;
+                        let src_addr_str = datagram.source_addr.to_string();
+                        let payload_len = datagram.payload.len() as u64;
 
                         for (idx, (dest, dest_path)) in dest_specs.iter().enumerate() {
+                            let dest_addr_str = format_endpoint(&dest.address);
+
+                            if emit_packet_events {
+                                fwd_event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        fwd_event_buffer.clock().monotonic_nanos(),
+                                        fwd_event_buffer.clock().wall_clock_nanos(),
+                                        &fwd_stream_id,
+                                        DiagnosticStage::SendAttempted,
+                                        dest.transport,
+                                        payload_len,
+                                    )
+                                    .with_source(&src_addr_str)
+                                    .with_destination(&dest_addr_str),
+                                );
+                            }
+
                             match dest.transport {
                                 TransportType::Udp => {
                                     match resolve_endpoint_with_context(
@@ -1175,6 +1774,26 @@ impl StreamRunner {
                                                     fwd_stats
                                                         .forwarded_bytes
                                                         .fetch_add(sent as u64, Ordering::Relaxed);
+                                                    if emit_packet_events {
+                                                        fwd_event_buffer.emit(
+                                                            DiagnosticEvent::new(
+                                                                fwd_event_buffer
+                                                                    .clock()
+                                                                    .monotonic_nanos(),
+                                                                fwd_event_buffer
+                                                                    .clock()
+                                                                    .wall_clock_nanos(),
+                                                                &fwd_stream_id,
+                                                                DiagnosticStage::SendSucceeded,
+                                                                TransportType::Udp,
+                                                                sent as u64,
+                                                            )
+                                                            .with_source(&src_addr_str)
+                                                            .with_destination(
+                                                                target_addr.to_string(),
+                                                            ),
+                                                        );
+                                                    }
                                                 }
                                                 Err(err) => {
                                                     fwd_stats
@@ -1186,6 +1805,21 @@ impl StreamRunner {
                                                     eprintln!(
                                                         "[stream {}] UDP destination error sending to {}: {}",
                                                         fwd_stream_id, target_addr, err
+                                                    );
+                                                    fwd_event_buffer.emit(
+                                                        DiagnosticEvent::new(
+                                                            fwd_event_buffer.clock().monotonic_nanos(),
+                                                            fwd_event_buffer.clock().wall_clock_nanos(),
+                                                            &fwd_stream_id,
+                                                            DiagnosticStage::Failure,
+                                                            TransportType::Udp,
+                                                            payload_len,
+                                                        )
+                                                        .with_source(&src_addr_str)
+                                                        .with_destination(target_addr.to_string())
+                                                        .with_reason(format!(
+                                                            "UDP destination error sending to {target_addr}: {err}"
+                                                        )),
                                                     );
                                                 }
                                             }
@@ -1202,6 +1836,24 @@ impl StreamRunner {
                                                 format_endpoint(&dest.address),
                                                 err
                                             );
+                                            fwd_event_buffer.emit(
+                                                DiagnosticEvent::new(
+                                                    fwd_event_buffer.clock().monotonic_nanos(),
+                                                    fwd_event_buffer.clock().wall_clock_nanos(),
+                                                    &fwd_stream_id,
+                                                    DiagnosticStage::Failure,
+                                                    TransportType::Udp,
+                                                    payload_len,
+                                                )
+                                                .with_source(&src_addr_str)
+                                                .with_destination(&dest_addr_str)
+                                                .with_reason(format!(
+                                                    "Destination resolution error for '{}' ('{}'): {}",
+                                                    dest_path,
+                                                    format_endpoint(&dest.address),
+                                                    err
+                                                )),
+                                            );
                                         }
                                     }
                                 }
@@ -1212,6 +1864,19 @@ impl StreamRunner {
                                             eprintln!(
                                                 "[stream {}] TCP destination error sending to {}: {}",
                                                 fwd_stream_id, format_endpoint(&dest.address), e
+                                            );
+                                        } else if emit_packet_events {
+                                            fwd_event_buffer.emit(
+                                                DiagnosticEvent::new(
+                                                    fwd_event_buffer.clock().monotonic_nanos(),
+                                                    fwd_event_buffer.clock().wall_clock_nanos(),
+                                                    &fwd_stream_id,
+                                                    DiagnosticStage::SendSucceeded,
+                                                    TransportType::Tcp,
+                                                    payload_len,
+                                                )
+                                                .with_source(&src_addr_str)
+                                                .with_destination(&dest_addr_str),
                                             );
                                         }
                                     }
@@ -1243,10 +1908,43 @@ impl StreamRunner {
         Ok(Self {
             stream_id,
             stats,
+            event_buffer,
+            mode,
+            source_transport,
             is_active,
             shutdown_flag,
             threads: runner_threads,
         })
+    }
+
+    /// Returns a reference to the stream runner's diagnostic event buffer.
+    #[must_use]
+    pub fn event_buffer(&self) -> &DiagnosticBuffer {
+        &self.event_buffer
+    }
+
+    /// Returns the operational mode of this stream runner.
+    #[must_use]
+    pub fn mode(&self) -> OperationalMode {
+        self.mode
+    }
+
+    /// Emits a stream health state transition event with a descriptive reason.
+    pub fn emit_health_transition(&self, healthy: bool, reason: impl Into<String>) {
+        let state_str = if healthy { "healthy" } else { "unhealthy" };
+        let reason_str = reason.into();
+        self.is_active.store(healthy, Ordering::SeqCst);
+        self.event_buffer.emit(
+            DiagnosticEvent::new(
+                self.event_buffer.clock().monotonic_nanos(),
+                self.event_buffer.clock().wall_clock_nanos(),
+                &self.stream_id,
+                DiagnosticStage::HealthTransition,
+                self.source_transport,
+                0,
+            )
+            .with_reason(format!("{state_str}: {reason_str}")),
+        );
     }
 
     /// Returns true if this runner's threads are active and not in shutdown.
@@ -1311,6 +2009,7 @@ pub struct RelayHealthHandle {
     logical_interfaces: Arc<Vec<LogicalInterfaceInfo>>,
     shutdown_flag: Arc<AtomicBool>,
     start_time: std::time::Instant,
+    event_buffer: DiagnosticBuffer,
 }
 
 #[derive(Clone)]
@@ -1322,6 +2021,12 @@ struct StreamRunnerHandle {
 }
 
 impl RelayHealthHandle {
+    /// Returns a reference to the diagnostic event buffer.
+    #[must_use]
+    pub fn event_buffer(&self) -> &DiagnosticBuffer {
+        &self.event_buffer
+    }
+
     /// Returns true if the relay is running and all stream runners are healthy.
     #[must_use]
     pub fn is_healthy(&self) -> bool {
@@ -1408,6 +2113,7 @@ pub struct Relay {
     logical_interfaces: Vec<LogicalInterfaceInfo>,
     shutdown_flag: Arc<AtomicBool>,
     start_time: std::time::Instant,
+    event_buffer: DiagnosticBuffer,
 }
 
 impl Relay {
@@ -1416,6 +2122,14 @@ impl Relay {
     /// # Errors
     /// Returns an error if any stream fails to bind its listening socket.
     pub fn start(config: &Config) -> io::Result<Self> {
+        Self::start_with_buffer(config, DiagnosticBuffer::new(1024))
+    }
+
+    /// Starts all forwarding streams with a designated diagnostic event buffer.
+    ///
+    /// # Errors
+    /// Returns an error if any stream fails to bind its listening socket.
+    pub fn start_with_buffer(config: &Config, event_buffer: DiagnosticBuffer) -> io::Result<Self> {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let mut stream_runners = Vec::new();
         let mut logical_interfaces = Vec::new();
@@ -1431,11 +2145,12 @@ impl Relay {
             };
             for (s_idx, stream) in inst.streams.iter().enumerate() {
                 let stream_prefix = format!("{inst_prefix}.streams[{s_idx}]");
-                let runner = StreamRunner::start_with_path(
+                let runner = StreamRunner::start_with_buffer(
                     stream,
                     inst,
                     Arc::clone(&shutdown_flag),
                     &stream_prefix,
+                    event_buffer.clone(),
                 )?;
                 stream_runners.push(runner);
             }
@@ -1455,7 +2170,47 @@ impl Relay {
             logical_interfaces,
             shutdown_flag,
             start_time: std::time::Instant::now(),
+            event_buffer,
         })
+    }
+
+    /// Returns a reference to the diagnostic event buffer.
+    #[must_use]
+    pub fn event_buffer(&self) -> &DiagnosticBuffer {
+        &self.event_buffer
+    }
+
+    /// Returns a reference to all stream runners.
+    #[must_use]
+    pub fn stream_runners(&self) -> &[StreamRunner] {
+        &self.stream_runners
+    }
+
+    /// Retrieves a specific stream runner by ID.
+    #[must_use]
+    pub fn stream_runner(&self, stream_id: &str) -> Option<&StreamRunner> {
+        self.stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)
+    }
+
+    /// Emits a stream health state transition event on the designated stream.
+    pub fn emit_health_transition(
+        &self,
+        stream_id: &str,
+        healthy: bool,
+        reason: impl Into<String>,
+    ) -> bool {
+        if let Some(runner) = self
+            .stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)
+        {
+            runner.emit_health_transition(healthy, reason);
+            true
+        } else {
+            false
+        }
     }
 
     /// Creates a lightweight health query handle.
@@ -1476,6 +2231,7 @@ impl Relay {
             logical_interfaces: Arc::new(self.logical_interfaces.clone()),
             shutdown_flag: Arc::clone(&self.shutdown_flag),
             start_time: self.start_time,
+            event_buffer: self.event_buffer.clone(),
         }
     }
 
