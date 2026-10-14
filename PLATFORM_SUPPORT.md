@@ -132,23 +132,29 @@ Testing evaluated packaged artifacts built with the release packaging tooling (`
 | **RHEL 7 / CentOS 7** | 7.9 | 2.17 | **Failed** (`GLIBC_2.18` missing) | Limited (Kernel 3.10) | Degraded (systemd 219) | End of Life (June 2024) | **Unsupported** |
 
 
-## 4. IPv6 Support and Tested Verification Matrix (Milestone RER-F-023)
+## 4. IPv6 Support and Tested Verification Matrix (Milestones RER-F-023, RER-F-024)
 
 RER provides native IPv6 support across UDP and TCP relay endpoints and remote management listeners.
 
 ### Tested Capabilities in Continuous Integration
 On Tier 1 platform (`x86_64-unknown-linux-gnu` on Ubuntu hosted runner):
 - **Endpoint Transports**: Bracketed IPv6 literals (`[::1]:port` and `[::]:port`) for UDP and TCP in all four transport conversions (UDP-to-UDP, UDP-to-TCP, TCP-to-UDP, and TCP-to-TCP).
+- **Scoped IPv6 Addresses with Zone Identifiers**: Bracketed scoped IPv6 addresses (`[fe80::1%eth0]:port` and numeric form `[fe80::1%2]:port`) for UDP and TCP sources and destinations. Interface names are resolved to network interface indexes via POSIX `if_nametoindex` and applied as the socket address scope ID (`scope_id`).
+- **Source Startup Validation**: Unknown network interface names in source endpoint addresses are detected and reported at startup with the exact configuration path and interface name, preventing silent failures.
+- **Destination Error Accounting**: Destination endpoints with unknown interface names increment `destination_errors` and log detailed diagnostic errors with the configuration path and interface name without interrupting forwarding to healthy destinations.
+- **Scope Preservation on Non-Link-Local Addresses**: Zone identifiers on addresses that do not strictly require them (such as loopback or global unicast) are passed to the operating system, and any kernel refusal is reported rather than hidden.
+- **Round-Trip Formatting & Diagnostics**: Parsing and formatting round-trip zone identifiers unchanged, and CLI diagnostic output and the management API preserve zone identifiers verbatim.
+- **Offline Unit Testing**: Offline unit tests cover bracketed syntax, numeric scope identifiers, interface name resolution via `libc::if_nametoindex`, error reporting, and destination error accounting.
+- **Loopback Integration Testing**: A loopback integration test exercises scoped socket communication when permitted by the platform kernel and skips with a visible diagnostic reason when the platform kernel disallows it.
 - **Bidirectional Forwarding**: IPv4-to-IPv6 and IPv6-to-IPv4 forwarding preserving datagram boundaries and payload bytes.
 - **Mixed-Family Fan-Out**: Concurrent egress fan-out to mixed combinations of IPv4 and IPv6 UDP/TCP destinations.
 - **Listener Isolation (`IPV6_V6ONLY`)**: Explicit configuration of the `IPV6_V6ONLY` socket option using the `socket2` crate on all IPv6 listeners, ensuring `[::]` accepts IPv6 only and `0.0.0.0` accepts IPv4 only.
 - **Address Family Selection Rule**: Deterministic selection when a hostname resolves to multiple address families, selecting the first IPv4 address if present, and falling back to IPv6.
-- **Destination Error Accounting**: Destination resolution errors or unreachable endpoints are accounted under `destination_errors` without halting forwarding to other healthy destinations.
 - **Bracketed Formatting**: Diagnostic output and management APIs present IPv6 endpoints in bracketed form (`[::1]:port`).
 
 ### Platform Limitations and Untested Capabilities
 - **Environments Without IPv6 Loopback**: In container sandboxes where `::1` cannot be bound (such as restricted container execution environments without IPv6 loopback), IPv6 loopback integration tests skip with a visible diagnostic message (`SKIPPED: IPv6 loopback ([::1]) is unavailable...`) and never pass silently.
-- **Scoped Link-Local Addresses**: Scoped IPv6 addresses with zone identifiers (`[fe80::1%eth0]`) belong to roadmap milestone RER-F-024 and are not claimed at milestone RER-F-023. Nothing beyond the above tested baseline is claimed.
+- **Link-Local Addresses on Real Network Interfaces**: Link-local addresses (`fe80::/10`) on real network interfaces are not covered by continuous integration because GitHub-hosted CI runners lack physical multi-interface network topologies. Scoped address behavior is tested offline via unit tests and loopback integration tests where the platform allows it.
 
 ## 5. Explicitly Out of Scope for Initial Baseline
 
