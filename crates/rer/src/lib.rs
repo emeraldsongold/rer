@@ -5,6 +5,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod framing;
 pub mod health;
 pub mod management;
@@ -16,6 +17,10 @@ pub mod sim;
 pub use config::{
     Config, DropPolicy, InstanceConfig, LogicalInterfaceConfig, MetricsConfig, StreamConfig,
     ValidationError, ValidationReport,
+};
+pub use diagnostics::{
+    Clock, DiagnosticBuffer, DiagnosticBufferBuilder, DiagnosticEvent, DiagnosticSnapshot,
+    DiagnosticStage, ManualClock, RateLimiter, Stage, SystemClock,
 };
 pub use framing::{encode_frame, read_frame, write_frame};
 pub use health::{

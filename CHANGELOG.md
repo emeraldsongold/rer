@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-026 (Diagnostic event model with bounded, non-blocking event buffer)
+- **Diagnostic Event Model**: Implemented structured, serializable `DiagnosticEvent` recording monotonic and wall-clock timestamps, stream ID, stage, optional endpoints, transport type, payload length, optional correlation ID, and optional reason without holding payload bytes (SPEC §8, §10).
+- **Stage Lifecycle Enumeration**: Codified `DiagnosticStage` naming packet receipt, classification/acceptance, routing/queuing, send-attempted, send-succeeded (SPEC §8 stages 2–6), drops, failures, and health transitions with stable snake_case serialization.
+- **Bounded Non-Blocking Event Buffer**: Implemented `DiagnosticBuffer` with configurable capacity, ring-buffer overwrite semantics for oldest events, non-blocking `try_lock` emissions that never stall the packet forwarding plane, and snapshot retrieval in arrival order with dropped event counters.
+- **Injected Clock & Rate Limiting**: Added `Clock` trait, `SystemClock`, and deterministic `ManualClock` enabling per-second rate limiting and testing across second boundaries without sleeping or wall-clock dependencies.
+
 ### Fixed - Milestone RER-F-025 (Traffic receiver unique packet accounting)
 - **Unique Packet Completion Condition**: Updated `listen_udp` and `listen_tcp` stop conditions to complete when every expected sequence number has been received once or when the idle timeout elapses, rather than stopping when total datagrams read reached `expected_count`.
 - **Duplicate Loss Masking Prevention**: Duplicated packets arriving before the last original packet in a stream no longer prematurely terminate receiver reads or hide subsequent originals as lost.
