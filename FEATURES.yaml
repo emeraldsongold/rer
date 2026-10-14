@@ -142,7 +142,10 @@ items:
     title: Structured diagnostic events and production, debug and test modes
     priority: P2
     risk: medium
-    autonomy: ready-auto
+    autonomy: deferred
+    notes: >-
+      Superseded by RER-F-026, RER-F-027 and RER-F-028 (2026-10-14). Four attempts at the whole task all timed out at the 60
+      minute limit; the criteria below are now spread over those three smaller tasks. Nothing depends on this item any more.
     depends_on: [RER-F-007]
     spec_refs: ["§8", "§10"]
     test_profile: standard
@@ -161,7 +164,7 @@ items:
     priority: P2
     risk: medium
     autonomy: ready-auto
-    depends_on: [RER-F-008]
+    depends_on: [RER-F-027]
     spec_refs: ["§8"]
     test_profile: standard
     acceptance:
@@ -178,7 +181,7 @@ items:
     priority: P2
     risk: medium
     autonomy: ready-auto
-    depends_on: [RER-F-004, RER-F-006, RER-F-007, RER-F-008]
+    depends_on: [RER-F-004, RER-F-006, RER-F-007, RER-F-028]
     spec_refs: ["§11", "§13"]
     test_profile: full
     acceptance:
@@ -196,7 +199,7 @@ items:
     risk: high
     autonomy: needs-design-approval
     approvals_required: [design]
-    depends_on: [RER-F-004, RER-F-008]
+    depends_on: [RER-F-004, RER-F-028]
     spec_refs: ["§12", "§17"]
     test_profile: full
     acceptance:
@@ -328,7 +331,7 @@ items:
     priority: P3
     risk: medium
     autonomy: investigate-only
-    depends_on: [RER-F-006, RER-F-008, RER-F-010]
+    depends_on: [RER-F-006, RER-F-028, RER-F-010]
     spec_refs: ["§14"]
     test_profile: fast
     acceptance:
@@ -344,7 +347,7 @@ items:
     priority: P3
     risk: medium
     autonomy: investigate-only
-    depends_on: [RER-F-006, RER-F-008, RER-F-010]
+    depends_on: [RER-F-006, RER-F-028, RER-F-010]
     spec_refs: ["§14"]
     test_profile: fast
     acceptance:
@@ -458,6 +461,78 @@ items:
       - The harness duplicate scenario (duplication rate 10%, 1000 packets, fixed seed) reports lost_count 0 and a duplicate_count above 0, and a test asserts both.
       - The report fields and the meaning of pass are unchanged for streams without duplicates, shown by the existing receiver tests passing unmodified.
       - CHANGELOG.md records the fix and KNOWN_ISSUES.md lists no loss-accounting caveat that this removes.
+
+  - id: RER-F-026
+    order: 26
+    phase: Diagnostics
+    title: Diagnostic event model with a bounded, non-blocking event buffer
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-007]
+    spec_refs: ["§8", "§10"]
+    test_profile: standard
+    notes: >-
+      First of three slices that replace RER-F-008 (RER-F-026, RER-F-027, RER-F-028). A self-contained library module with unit
+      tests and no change to the relay, the CLI or the management API. Add crates/rer/src/diagnostics.rs and export it from
+      lib.rs. Tests must not sleep or read the wall clock: inject the clock. Build with CARGO_PROFILE_DEV_DEBUG=0 and
+      CARGO_INCREMENTAL=0, and run the workspace tests once.
+    acceptance:
+      - A new module crates/rer/src/diagnostics.rs defines a serializable event carrying a monotonic timestamp, a wall-clock timestamp, the stream ID, a stage, an optional source and destination endpoint, the transport, the payload length, an optional correlation ID and an optional reason. The event type has no field that can hold payload bytes.
+      - The stage enum names the received, accepted, routed-or-queued, send-attempted and send-succeeded stages of §8 (stages 2 to 6) and also dropped, failure and health-transition events, and serializes to stable snake_case strings that a test pins.
+      - The event buffer has a configured capacity. When it is full the oldest event is overwritten and a dropped-event counter increases. A snapshot returns the events in arrival order together with the dropped count.
+      - Emitting never blocks. When another thread holds the buffer, the emit call returns at once, the event is counted as dropped, and a test shows this with a thread that holds the buffer.
+      - A per-second rate limit with an injected clock counts the events it rejects as dropped, and a test crosses a second boundary without sleeping.
+      - Existing tests pass unmodified, no other module changes behaviour, and CHANGELOG.md records the new module.
+
+  - id: RER-F-027
+    order: 27
+    phase: Diagnostics
+    title: Production and debug modes emit diagnostic events from the forwarding path
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-026]
+    spec_refs: ["§8", "§10"]
+    test_profile: standard
+    notes: >-
+      Second slice of the RER-F-008 split. Use the event buffer from RER-F-026 and the existing OperationalMode (production,
+      debug, test). Test mode is RER-F-028: here it behaves like debug. The relay already prints failures with eprintln in
+      crates/rer/src/relay.rs and management.rs: keep those lines (production must still report failures) and add the
+      matching events beside them. Do not change the forwarding logic itself.
+    acceptance:
+      - In debug mode the stream runner emits one event per packet for each of the received, accepted, routed-or-queued, send-attempted and send-succeeded stages, with the stream ID, endpoints, transport and payload length.
+      - In production mode no per-packet event and no per-packet log line is produced, and a test asserts the buffer holds none after traffic has been forwarded.
+      - In every mode a destination error, socket error, queue drop and stream health transition produces an event with a reason, and the existing stderr lines are unchanged.
+      - No event or log line contains payload bytes, shown by a test that forwards a distinctive payload and searches the serialized events for it.
+      - Diagnostics never block forwarding, shown by a test that forwards a flood of packets through a buffer of capacity 8, delivers every packet, and reports a dropped-event count above zero.
+      - Existing relay and management tests pass unmodified, and KNOWN_ISSUES.md no longer lists packet diagnostics as missing for the stages implemented here.
+
+  - id: RER-F-028
+    order: 28
+    phase: Diagnostics
+    title: Test mode with correlation IDs, and recent events through the management API
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: ready-auto
+    depends_on: [RER-F-027]
+    spec_refs: ["§9", "§10"]
+    test_profile: standard
+    notes: >-
+      Third slice of the RER-F-008 split. Mode and expiry come from configuration; changing the mode at runtime is out of
+      scope. Add the read-only operation beside the existing ones in management.rs and classify it as read-only like the
+      other status operations. Leave the "rer diagnose is not yet implemented" message alone. If a criterion cannot be met,
+      report it as unmet rather than weakening the test.
+    acceptance:
+      - Test mode records events for a bounded run, and every event of the run carries the run's correlation ID taken from configuration.
+      - A test-mode run ends at its configured expiry and the instance returns to the diagnostic level it had before, shown with an injected clock and no sleeping.
+      - A run is bounded in events and in duration, both with documented maximums, and a run that reaches a bound ends and records why.
+      - The management API has a read-only operation that returns the most recent events (a bounded limit, newest last), the dropped-event count and the current mode with its expiry.
+      - The new operation appears in the operation classification as read-only, and a test shows an unauthorized caller is refused as for the other operations.
+      - Existing management tests pass unmodified, and docs and KNOWN_ISSUES.md describe the three modes as implemented.
 
   - id: RER-T-001
     kind: track
