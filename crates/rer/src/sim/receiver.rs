@@ -243,8 +243,22 @@ impl TrafficReceiver {
         }
     }
 
+    /// Returns true if an expected packet count was configured and every expected sequence
+    /// number from 0 up to `expected_count - 1` has been received at least once.
+    pub fn all_expected_received(&self) -> bool {
+        match self.expected_count {
+            Some(exp) => {
+                if (self.seen_sequences.len() as u64) < exp {
+                    return false;
+                }
+                (0..exp).all(|seq| self.seen_sequences.contains(&seq))
+            }
+            None => false,
+        }
+    }
+
     /// Listens on `socket` for datagrams until `timeout` has elapsed without receiving a packet,
-    /// or until the expected number of packets has been received.
+    /// or until every expected sequence number has been received.
     pub fn listen_udp(
         &mut self,
         socket: &UdpSocket,
@@ -257,10 +271,8 @@ impl TrafficReceiver {
             match socket.recv_from(&mut buf) {
                 Ok((len, _addr)) => {
                     let _ = self.record_bytes(&buf[..len]);
-                    if let Some(exp) = self.expected_count {
-                        if self.total_received >= exp {
-                            break;
-                        }
+                    if self.all_expected_received() {
+                        break;
                     }
                 }
                 Err(ref e)
@@ -277,8 +289,8 @@ impl TrafficReceiver {
     }
 
     /// Listens on `listener` for incoming TCP connection(s) and reads framed packets until
-    /// `timeout` has elapsed without receiving a packet, or until the expected number
-    /// of packets has been received.
+    /// `timeout` has elapsed without receiving a packet, or until every expected sequence
+    /// number has been received.
     pub fn listen_tcp(
         &mut self,
         listener: &TcpListener,
@@ -316,10 +328,8 @@ impl TrafficReceiver {
                 Ok(Some(frame_bytes)) => {
                     let _ = self.record_bytes(&frame_bytes);
                     last_packet_time = Instant::now();
-                    if let Some(exp) = self.expected_count {
-                        if self.total_received >= exp {
-                            break;
-                        }
+                    if self.all_expected_received() {
+                        break;
                     }
                 }
                 Ok(None) => {
@@ -407,5 +417,185 @@ mod tests {
 
         let deserialized = ReceiverReport::from_json(&json).expect("parse json");
         assert_eq!(report, deserialized);
+    }
+
+    #[test]
+    fn test_receiver_duplicates_do_not_hide_last_originals() {
+        let mut receiver = TrafficReceiver::new(Some(5), None);
+        // Originals: 0, 1, 2, 3, 4
+        // Duplicates of 0, 1, 3 arrive before the last original 4
+        let p0 = Packet::new("p0".into(), 0, 0, b"data0".to_vec());
+        let p1 = Packet::new("p1".into(), 1, 0, b"data1".to_vec());
+        let p0_dup = Packet::new("p0".into(), 0, 0, b"data0".to_vec());
+        let p2 = Packet::new("p2".into(), 2, 0, b"data2".to_vec());
+        let p1_dup = Packet::new("p1".into(), 1, 0, b"data1".to_vec());
+        let p3 = Packet::new("p3".into(), 3, 0, b"data3".to_vec());
+        let p3_dup = Packet::new("p3".into(), 3, 0, b"data3".to_vec());
+        let p4 = Packet::new("p4".into(), 4, 0, b"data4".to_vec());
+
+        receiver.record_packet(&p0);
+        receiver.record_packet(&p1);
+        receiver.record_packet(&p0_dup);
+        receiver.record_packet(&p2);
+        receiver.record_packet(&p1_dup);
+        receiver.record_packet(&p3);
+        receiver.record_packet(&p3_dup);
+        receiver.record_packet(&p4);
+
+        let report = receiver.report();
+        assert!(!report.pass, "duplicates must result in pass = false");
+        assert_eq!(report.expected_count, Some(5));
+        assert_eq!(report.received_count, 8);
+        assert_eq!(report.unique_received_count, 5);
+        assert_eq!(report.lost_count, 0);
+        assert!(report.lost_sequences.is_empty());
+        assert_eq!(report.duplicate_count, 3);
+        assert_eq!(report.duplicate_sequences, vec![0, 1, 3]);
+        assert!(receiver.all_expected_received());
+    }
+
+    #[test]
+    fn test_receiver_genuinely_missing_sequence() {
+        let mut receiver = TrafficReceiver::new(Some(4), None);
+        // Originals: 0, 1, 3 (sequence 2 is missing)
+        let p0 = Packet::new("p0".into(), 0, 0, b"data0".to_vec());
+        let p1 = Packet::new("p1".into(), 1, 0, b"data1".to_vec());
+        let p1_dup = Packet::new("p1".into(), 1, 0, b"data1".to_vec());
+        let p3 = Packet::new("p3".into(), 3, 0, b"data3".to_vec());
+
+        receiver.record_packet(&p0);
+        receiver.record_packet(&p1);
+        receiver.record_packet(&p1_dup);
+        receiver.record_packet(&p3);
+
+        let report = receiver.report();
+        assert!(!report.pass);
+        assert_eq!(report.lost_count, 1);
+        assert_eq!(report.lost_sequences, vec![2]);
+        assert_eq!(report.unique_received_count, 3);
+        assert_eq!(report.duplicate_count, 1);
+        assert!(!receiver.all_expected_received());
+    }
+
+    #[test]
+    fn test_udp_receiver_stops_on_all_expected_with_duplicates() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        let port = socket.local_addr().expect("port").port();
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        sender
+            .connect(format!("127.0.0.1:{}", port))
+            .expect("connect");
+
+        let p0 = Packet::new("p0".into(), 0, 0, b"d0".to_vec());
+        let p1 = Packet::new("p1".into(), 1, 0, b"d1".to_vec());
+        let p2 = Packet::new("p2".into(), 2, 0, b"d2".to_vec());
+
+        // Send: 0, 0 (dup), 1, 1 (dup), 2
+        // Total datagrams: 5, expected unique: 3
+        sender.send(&p0.to_bytes()).unwrap();
+        sender.send(&p0.to_bytes()).unwrap();
+        sender.send(&p1.to_bytes()).unwrap();
+        sender.send(&p1.to_bytes()).unwrap();
+        sender.send(&p2.to_bytes()).unwrap();
+
+        let mut receiver = TrafficReceiver::new(Some(3), None);
+        let report = receiver
+            .listen_udp(&socket, Duration::from_secs(5))
+            .expect("listen_udp");
+
+        assert_eq!(report.lost_count, 0);
+        assert_eq!(report.unique_received_count, 3);
+        assert_eq!(report.received_count, 5);
+        assert_eq!(report.duplicate_count, 2);
+    }
+
+    #[test]
+    fn test_udp_receiver_missing_sequence_ends_at_timeout() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        let port = socket.local_addr().expect("port").port();
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        sender
+            .connect(format!("127.0.0.1:{}", port))
+            .expect("connect");
+
+        let p0 = Packet::new("p0".into(), 0, 0, b"d0".to_vec());
+        let p2 = Packet::new("p2".into(), 2, 0, b"d2".to_vec());
+
+        // Send: 0, 2 (sequence 1 missing)
+        sender.send(&p0.to_bytes()).unwrap();
+        sender.send(&p2.to_bytes()).unwrap();
+
+        let mut receiver = TrafficReceiver::new(Some(3), None);
+        let report = receiver
+            .listen_udp(&socket, Duration::from_millis(50))
+            .expect("listen_udp");
+
+        assert_eq!(report.lost_count, 1);
+        assert_eq!(report.lost_sequences, vec![1]);
+        assert_eq!(report.unique_received_count, 2);
+        assert_eq!(report.received_count, 2);
+    }
+
+    #[test]
+    fn test_tcp_receiver_stops_on_all_expected_with_duplicates() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("port").port();
+
+        let p0 = Packet::new("p0".into(), 0, 0, b"d0".to_vec());
+        let p1 = Packet::new("p1".into(), 1, 0, b"d1".to_vec());
+        let p2 = Packet::new("p2".into(), 2, 0, b"d2".to_vec());
+
+        let t = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            let b0 = p0.to_bytes();
+            let b1 = p1.to_bytes();
+            let b2 = p2.to_bytes();
+
+            crate::framing::write_frame(&mut stream, &b0).unwrap();
+            crate::framing::write_frame(&mut stream, &b0).unwrap();
+            crate::framing::write_frame(&mut stream, &b1).unwrap();
+            crate::framing::write_frame(&mut stream, &b2).unwrap();
+        });
+
+        let mut receiver = TrafficReceiver::new(Some(3), None);
+        let report = receiver
+            .listen_tcp(&listener, Duration::from_secs(5))
+            .expect("listen_tcp");
+
+        t.join().unwrap();
+
+        assert_eq!(report.lost_count, 0);
+        assert_eq!(report.unique_received_count, 3);
+        assert_eq!(report.received_count, 4);
+        assert_eq!(report.duplicate_count, 1);
+    }
+
+    #[test]
+    fn test_tcp_receiver_missing_sequence_ends_at_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().expect("port").port();
+
+        let p0 = Packet::new("p0".into(), 0, 0, b"d0".to_vec());
+        let p2 = Packet::new("p2".into(), 2, 0, b"d2".to_vec());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            crate::framing::write_frame(&mut stream, &p0.to_bytes()).unwrap();
+            crate::framing::write_frame(&mut stream, &p2.to_bytes()).unwrap();
+            let _ = rx.recv();
+        });
+
+        let mut receiver = TrafficReceiver::new(Some(3), None);
+        let report = receiver
+            .listen_tcp(&listener, Duration::from_millis(150))
+            .expect("listen_tcp");
+
+        let _ = tx.send(());
+        t.join().unwrap();
+
+        assert_eq!(report.lost_count, 1);
+        assert_eq!(report.lost_sequences, vec![1]);
+        assert_eq!(report.unique_received_count, 2);
     }
 }
