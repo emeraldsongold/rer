@@ -15,23 +15,25 @@ pub mod signals;
 pub mod sim;
 
 pub use config::{
-    Config, DropPolicy, InstanceConfig, LogicalInterfaceConfig, MetricsConfig, StreamConfig,
-    TestModeConfig, ValidationError, ValidationReport,
+    ByteOrder, Config, DropPolicy, InspectionConfig, InstanceConfig, LogicalInterfaceConfig,
+    MetricsConfig, SequenceConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
-    Clock, DiagnosticBuffer, DiagnosticBufferBuilder, DiagnosticEvent, DiagnosticSnapshot,
-    DiagnosticStage, DiagnosticTestState, ManualClock, RateLimiter, Stage, SystemClock,
+    format_ascii_preview, format_hex_preview, Clock, DiagnosticBuffer, DiagnosticBufferBuilder,
+    DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, ManualClock,
+    RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent, Stage, SystemClock,
 };
 pub use framing::{encode_frame, read_frame, write_frame};
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
 };
 pub use management::{
-    generate_prometheus_text, query_events, query_metrics, query_recent_events, query_status,
-    query_streams, query_version, AggregateCounters, DiagnosticEventsReport, ManagementError,
-    ManagementRequest, ManagementResponse, ManagementServer, MetricsReport, MetricsServer,
-    OperationType, StatusReport, StreamStatusReport, StreamsManagementReport, VersionReport,
-    DEFAULT_MANAGEMENT_SOCKET, MGMT_API_VERSION,
+    generate_inspect_report, generate_prometheus_text, query_events, query_inspect, query_metrics,
+    query_recent_events, query_status, query_streams, query_version, AggregateCounters,
+    DiagnosticEventsReport, InspectReport, ManagementError, ManagementRequest, ManagementResponse,
+    ManagementServer, MetricsReport, MetricsServer, OperationType, StatusReport,
+    StreamStatusReport, StreamsManagementReport, VersionReport, DEFAULT_MANAGEMENT_SOCKET,
+    MGMT_API_VERSION,
 };
 pub use relay::{
     bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,

@@ -36,6 +36,12 @@ pub struct ReceiverReport {
     pub duplicate_count: u64,
     /// Number of packets received out of sequential order
     pub reordered_count: u64,
+    /// Number of sequence rollovers detected
+    #[serde(default)]
+    pub rollover_count: u64,
+    /// Number of sequence gaps detected (equivalent to lost_count)
+    #[serde(default)]
+    pub gap_count: u64,
     /// Number of packets whose payload hash did not match their payload
     pub corrupted_count: u64,
     /// Packet loss rate as a fraction between 0.0 and 1.0
@@ -52,6 +58,9 @@ pub struct ReceiverReport {
     pub duplicate_sequences: Vec<u64>,
     /// List of packets that arrived out of order
     pub reordered_sequences: Vec<ReorderedPacket>,
+    /// List of sequence numbers that arrived as rollovers
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollover_sequences: Vec<u64>,
     /// Duration of the test in milliseconds
     pub duration_ms: u64,
     /// Whether the test met all verification criteria without flaws
@@ -86,6 +95,10 @@ pub struct TrafficReceiver {
     highest_seq_seen: Option<u64>,
     duplicates: Vec<u64>,
     reordered: Vec<ReorderedPacket>,
+    rollover_sequences: Vec<u64>,
+    rollover_count: u64,
+    rollover_threshold: Option<u64>,
+    sequence_tracker: Option<crate::diagnostics::SequenceTracker>,
     corrupted: Vec<u64>,
     total_received: u64,
     start_time: Option<Instant>,
@@ -104,6 +117,10 @@ impl TrafficReceiver {
             highest_seq_seen: None,
             duplicates: Vec::new(),
             reordered: Vec::new(),
+            rollover_sequences: Vec::new(),
+            rollover_count: 0,
+            rollover_threshold: None,
+            sequence_tracker: None,
             corrupted: Vec::new(),
             total_received: 0,
             start_time: None,
@@ -114,6 +131,28 @@ impl TrafficReceiver {
     /// Sets an identifier for this test run.
     pub fn set_test_id(&mut self, test_id: String) {
         self.test_id = Some(test_id);
+    }
+
+    /// Sets the expected sequence rollover threshold.
+    pub fn set_rollover_threshold(&mut self, threshold: u64) {
+        self.rollover_threshold = Some(threshold);
+    }
+
+    /// Configures sequence tracking on this receiver.
+    pub fn set_sequence_config(&mut self, config: crate::config::SequenceConfig) {
+        if let Some(t) = config.rollover_threshold {
+            self.rollover_threshold = Some(t);
+        }
+        self.sequence_tracker = Some(crate::diagnostics::SequenceTracker::new(
+            "receiver",
+            Some(&config),
+            None,
+        ));
+    }
+
+    /// Returns the number of sequence rollovers detected.
+    pub fn rollover_count(&self) -> u64 {
+        self.rollover_count
     }
 
     /// Records an incoming packet and checks its payload hash, sequence ordering, and duplication.
@@ -131,6 +170,30 @@ impl TrafficReceiver {
             self.corrupted.push(packet.sequence);
         }
 
+        // Check for rollover first so wrapped sequences are not falsely marked as duplicates
+        let is_rollover = if let Some(highest) = self.highest_seq_seen {
+            if packet.sequence < highest {
+                if let Some(thresh) = self.rollover_threshold {
+                    let dist_rollover =
+                        (packet.sequence as u128 + thresh as u128) - highest as u128;
+                    dist_rollover < (thresh as u128) / 2
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if is_rollover {
+            self.rollover_count += 1;
+            self.rollover_sequences.push(packet.sequence);
+            self.highest_seq_seen = Some(packet.sequence);
+            self.seen_sequences.clear();
+        }
+
         // Check for duplication
         if self.seen_sequences.contains(&packet.sequence) {
             self.duplicates.push(packet.sequence);
@@ -142,24 +205,31 @@ impl TrafficReceiver {
             });
         }
 
-        // Check for reordering
-        if let Some(highest) = self.highest_seq_seen {
-            if packet.sequence < highest {
-                self.reordered.push(ReorderedPacket {
-                    sequence: packet.sequence,
-                    received_index: idx,
-                    previous_highest_seq: highest,
-                });
+        // Check for reordering if not a rollover
+        if !is_rollover {
+            if let Some(highest) = self.highest_seq_seen {
+                if packet.sequence < highest {
+                    self.reordered.push(ReorderedPacket {
+                        sequence: packet.sequence,
+                        received_index: idx,
+                        previous_highest_seq: highest,
+                    });
+                } else {
+                    self.highest_seq_seen = Some(packet.sequence);
+                }
             } else {
                 self.highest_seq_seen = Some(packet.sequence);
             }
-        } else {
-            self.highest_seq_seen = Some(packet.sequence);
         }
     }
 
     /// Decodes raw packet bytes and records the packet.
     pub fn record_bytes(&mut self, bytes: &[u8]) -> Result<(), PacketError> {
+        if let Some(ref mut tracker) = self.sequence_tracker {
+            if tracker.is_enabled() {
+                let _ = tracker.process_packet(bytes);
+            }
+        }
         let pkt = Packet::from_bytes(bytes)?;
         self.record_packet(&pkt);
         Ok(())
@@ -228,8 +298,10 @@ impl TrafficReceiver {
             received_count: self.total_received,
             unique_received_count: self.seen_sequences.len() as u64,
             lost_count,
+            gap_count: lost_count,
             duplicate_count: self.duplicates.len() as u64,
             reordered_count: self.reordered.len() as u64,
+            rollover_count: self.rollover_count,
             corrupted_count: self.corrupted.len() as u64,
             loss_rate,
             payload_hashes_verified,
@@ -238,6 +310,7 @@ impl TrafficReceiver {
             lost_sequences,
             duplicate_sequences: self.duplicates.clone(),
             reordered_sequences: self.reordered.clone(),
+            rollover_sequences: self.rollover_sequences.clone(),
             duration_ms,
             pass,
         }

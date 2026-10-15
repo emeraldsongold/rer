@@ -4,7 +4,7 @@
 //! for deterministic testing, rate limiting, and a non-blocking ring buffer that never
 //! stalls packet forwarding threads.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{OperationalMode, TransportType};
+use crate::config::{ByteOrder, InspectionConfig, OperationalMode, SequenceConfig, TransportType};
 
 /// Stage in packet lifecycle or diagnostic event category (SPEC §8, stages 2–6, drops, failures, and health).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -130,6 +130,18 @@ pub struct DiagnosticEvent {
     /// Optional reason or failure diagnostic description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+
+    /// Extracted sequence number when sequence tracking is configured (SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+
+    /// Opt-in hexadecimal preview of payload bytes (SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hex_preview: Option<String>,
+
+    /// Opt-in ASCII preview of payload bytes (SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_preview: Option<String>,
 }
 
 impl DiagnosticEvent {
@@ -154,6 +166,9 @@ impl DiagnosticEvent {
             payload_length,
             correlation_id: None,
             reason: None,
+            sequence_number: None,
+            hex_preview: None,
+            ascii_preview: None,
         }
     }
 
@@ -182,6 +197,27 @@ impl DiagnosticEvent {
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
+        self
+    }
+
+    /// Sets the extracted sequence number.
+    #[must_use]
+    pub fn with_sequence_number(mut self, seq: u64) -> Self {
+        self.sequence_number = Some(seq);
+        self
+    }
+
+    /// Sets the hex preview.
+    #[must_use]
+    pub fn with_hex_preview(mut self, hex: impl Into<String>) -> Self {
+        self.hex_preview = Some(hex.into());
+        self
+    }
+
+    /// Sets the ASCII preview.
+    #[must_use]
+    pub fn with_ascii_preview(mut self, ascii: impl Into<String>) -> Self {
+        self.ascii_preview = Some(ascii.into());
         self
     }
 }
@@ -933,6 +969,376 @@ impl DiagnosticBufferBuilder {
             clock,
             self.rate_limit_per_second,
         )
+    }
+}
+
+/// Formats a length-bounded hexadecimal preview of packet payload bytes (SPEC §8).
+#[must_use]
+pub fn format_hex_preview(bytes: &[u8], max_bytes: usize) -> String {
+    let bound = bytes.len().min(max_bytes.min(1024));
+    let slice = &bytes[..bound];
+    let mut hex = String::with_capacity(slice.len() * 2);
+    for b in slice {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    hex
+}
+
+/// Formats a length-bounded ASCII preview of packet payload bytes (SPEC §8).
+/// Non-printable characters are replaced with '.'.
+#[must_use]
+pub fn format_ascii_preview(bytes: &[u8], max_bytes: usize) -> String {
+    let bound = bytes.len().min(max_bytes.min(1024));
+    let slice = &bytes[..bound];
+    slice
+        .iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
+/// Point-in-time sequence tracking and continuity state for a stream (SPEC §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequenceState {
+    pub stream_id: String,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_order: Option<ByteOrder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollover_threshold: Option<u64>,
+    pub packets_evaluated: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highest_sequence: Option<u64>,
+    pub gap_count: u64,
+    pub duplicate_count: u64,
+    pub out_of_order_count: u64,
+    pub rollover_count: u64,
+    pub hex_preview_enabled: bool,
+    pub ascii_preview_enabled: bool,
+    pub max_preview_bytes: usize,
+}
+
+/// Outcome of evaluating an individual packet sequence number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequenceTrackingEvent {
+    Initial {
+        sequence: u64,
+    },
+    InOrder {
+        sequence: u64,
+    },
+    Gap {
+        expected: u64,
+        actual: u64,
+        missing_count: u64,
+    },
+    Duplicate {
+        sequence: u64,
+    },
+    OutOfOrder {
+        sequence: u64,
+        previous_highest: u64,
+    },
+    Rollover {
+        sequence: u64,
+        missing_count: u64,
+    },
+}
+
+fn default_modulus_for_width(width: usize) -> u128 {
+    match width {
+        1 => 256,
+        2 => 65536,
+        4 => 4_294_967_296,
+        8 => u64::MAX as u128 + 1,
+        _ => 4_294_967_296,
+    }
+}
+
+/// Stateful sequence extractor and continuity tracker for an individual stream.
+#[derive(Debug, Clone)]
+pub struct SequenceTracker {
+    stream_id: String,
+    enabled: bool,
+    offset: usize,
+    width: usize,
+    byte_order: ByteOrder,
+    rollover_threshold: Option<u64>,
+    hex_preview_enabled: bool,
+    ascii_preview_enabled: bool,
+    max_preview_bytes: usize,
+    packets_evaluated: u64,
+    last_sequence: Option<u64>,
+    highest_sequence: Option<u64>,
+    gap_count: u64,
+    duplicate_count: u64,
+    out_of_order_count: u64,
+    rollover_count: u64,
+    recent_seen_queue: VecDeque<u64>,
+    recent_seen_set: HashSet<u64>,
+}
+
+impl SequenceTracker {
+    /// Creates a new sequence tracker from optional sequence and inspection configurations.
+    #[must_use]
+    pub fn new(
+        stream_id: impl Into<String>,
+        seq_cfg: Option<&SequenceConfig>,
+        insp_cfg: Option<&InspectionConfig>,
+    ) -> Self {
+        let stream_id = stream_id.into();
+        let enabled = seq_cfg.map(|c| c.enabled).unwrap_or(false);
+        let offset = seq_cfg.map(|c| c.offset).unwrap_or(0);
+        let width = seq_cfg.map(|c| c.width).unwrap_or(4);
+        let byte_order = seq_cfg.map(|c| c.byte_order).unwrap_or_default();
+        let rollover_threshold = seq_cfg.and_then(|c| c.rollover_threshold);
+
+        let hex_preview_enabled = insp_cfg.map(|i| i.hex_preview).unwrap_or(false)
+            || seq_cfg.and_then(|c| c.hex_preview).unwrap_or(false);
+        let ascii_preview_enabled = insp_cfg.map(|i| i.ascii_preview).unwrap_or(false)
+            || seq_cfg.and_then(|c| c.ascii_preview).unwrap_or(false);
+        let max_preview_bytes = insp_cfg
+            .map(|i| i.max_preview_bytes)
+            .or_else(|| seq_cfg.and_then(|c| c.max_preview_bytes))
+            .unwrap_or(64);
+
+        Self {
+            stream_id,
+            enabled,
+            offset,
+            width,
+            byte_order,
+            rollover_threshold,
+            hex_preview_enabled,
+            ascii_preview_enabled,
+            max_preview_bytes,
+            packets_evaluated: 0,
+            last_sequence: None,
+            highest_sequence: None,
+            gap_count: 0,
+            duplicate_count: 0,
+            out_of_order_count: 0,
+            rollover_count: 0,
+            recent_seen_queue: VecDeque::with_capacity(1024),
+            recent_seen_set: HashSet::with_capacity(1024),
+        }
+    }
+
+    /// Creates a disabled sequence tracker.
+    #[must_use]
+    pub fn disabled(stream_id: impl Into<String>) -> Self {
+        Self::new(stream_id, None, None)
+    }
+
+    /// Returns whether sequence extraction is enabled.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the last sequence number processed, if any.
+    #[must_use]
+    pub fn last_sequence(&self) -> Option<u64> {
+        self.last_sequence
+    }
+
+    /// Extracts the raw sequence number from a packet payload slice according to configured offset, width, and byte order.
+    #[must_use]
+    pub fn extract_sequence(&self, payload: &[u8]) -> Option<u64> {
+        if !self.enabled {
+            return None;
+        }
+        if payload.len() < self.offset + self.width {
+            return None;
+        }
+        let slice = &payload[self.offset..self.offset + self.width];
+        let val = match self.width {
+            1 => slice[0] as u64,
+            2 => match self.byte_order {
+                ByteOrder::BigEndian => u16::from_be_bytes(slice.try_into().ok()?) as u64,
+                ByteOrder::LittleEndian => u16::from_le_bytes(slice.try_into().ok()?) as u64,
+            },
+            4 => match self.byte_order {
+                ByteOrder::BigEndian => u32::from_be_bytes(slice.try_into().ok()?) as u64,
+                ByteOrder::LittleEndian => u32::from_le_bytes(slice.try_into().ok()?) as u64,
+            },
+            8 => match self.byte_order {
+                ByteOrder::BigEndian => u64::from_be_bytes(slice.try_into().ok()?),
+                ByteOrder::LittleEndian => u64::from_le_bytes(slice.try_into().ok()?),
+            },
+            _ => return None,
+        };
+        Some(val)
+    }
+
+    /// Formats hex and ASCII previews if configured.
+    #[must_use]
+    pub fn format_previews(&self, payload: &[u8]) -> (Option<String>, Option<String>) {
+        let hex = if self.hex_preview_enabled {
+            Some(format_hex_preview(payload, self.max_preview_bytes))
+        } else {
+            None
+        };
+        let ascii = if self.ascii_preview_enabled {
+            Some(format_ascii_preview(payload, self.max_preview_bytes))
+        } else {
+            None
+        };
+        (hex, ascii)
+    }
+
+    /// Extracts and records the sequence number from a payload slice.
+    pub fn process_packet(&mut self, payload: &[u8]) -> Option<SequenceTrackingEvent> {
+        if !self.enabled {
+            return None;
+        }
+        let seq = self.extract_sequence(payload)?;
+        Some(self.record_sequence(seq))
+    }
+
+    /// Evaluates an extracted sequence number and updates continuity counters.
+    pub fn record_sequence(&mut self, seq: u64) -> SequenceTrackingEvent {
+        self.packets_evaluated += 1;
+        let last = match self.last_sequence {
+            None => {
+                self.last_sequence = Some(seq);
+                self.highest_sequence = Some(seq);
+                self.remember_seen(seq);
+                return SequenceTrackingEvent::Initial { sequence: seq };
+            }
+            Some(l) => l,
+        };
+
+        let modulus = self
+            .rollover_threshold
+            .map(|t| t as u128)
+            .unwrap_or_else(|| default_modulus_for_width(self.width));
+
+        let seq_u = seq as u128;
+        let last_u = last as u128;
+
+        if seq == last || self.recent_seen_set.contains(&seq) {
+            self.duplicate_count += 1;
+            return SequenceTrackingEvent::Duplicate { sequence: seq };
+        }
+
+        self.remember_seen(seq);
+
+        if seq > last {
+            let dist_forward = seq_u - last_u;
+            if dist_forward < modulus / 2 {
+                self.last_sequence = Some(seq);
+                if seq > self.highest_sequence.unwrap_or(0) {
+                    self.highest_sequence = Some(seq);
+                }
+                if dist_forward == 1 {
+                    SequenceTrackingEvent::InOrder { sequence: seq }
+                } else {
+                    let missing = (dist_forward - 1) as u64;
+                    self.gap_count += missing;
+                    let expected = ((last_u + 1) % modulus) as u64;
+                    SequenceTrackingEvent::Gap {
+                        expected,
+                        actual: seq,
+                        missing_count: missing,
+                    }
+                }
+            } else {
+                self.out_of_order_count += 1;
+                SequenceTrackingEvent::OutOfOrder {
+                    sequence: seq,
+                    previous_highest: self.highest_sequence.unwrap_or(last),
+                }
+            }
+        } else {
+            // seq < last
+            let dist_backward = last_u - seq_u;
+            let dist_rollover = (seq_u + modulus) - last_u;
+
+            if dist_rollover < modulus / 2 {
+                self.rollover_count += 1;
+                self.last_sequence = Some(seq);
+                self.highest_sequence = Some(seq);
+                if dist_rollover == 1 {
+                    SequenceTrackingEvent::Rollover {
+                        sequence: seq,
+                        missing_count: 0,
+                    }
+                } else {
+                    let missing = (dist_rollover - 1) as u64;
+                    self.gap_count += missing;
+                    SequenceTrackingEvent::Rollover {
+                        sequence: seq,
+                        missing_count: missing,
+                    }
+                }
+            } else {
+                let _ = dist_backward;
+                self.out_of_order_count += 1;
+                SequenceTrackingEvent::OutOfOrder {
+                    sequence: seq,
+                    previous_highest: self.highest_sequence.unwrap_or(last),
+                }
+            }
+        }
+    }
+
+    fn remember_seen(&mut self, seq: u64) {
+        if self.recent_seen_queue.len() >= 10_000 {
+            if let Some(old) = self.recent_seen_queue.pop_front() {
+                self.recent_seen_set.remove(&old);
+            }
+        }
+        self.recent_seen_queue.push_back(seq);
+        self.recent_seen_set.insert(seq);
+    }
+
+    /// Captures a point-in-time snapshot of the sequence state.
+    #[must_use]
+    pub fn snapshot(&self) -> SequenceState {
+        SequenceState {
+            stream_id: self.stream_id.clone(),
+            enabled: self.enabled,
+            offset: if self.enabled {
+                Some(self.offset)
+            } else {
+                None
+            },
+            width: if self.enabled { Some(self.width) } else { None },
+            byte_order: if self.enabled {
+                Some(self.byte_order)
+            } else {
+                None
+            },
+            rollover_threshold: if self.enabled {
+                self.rollover_threshold
+                    .or_else(|| Some(default_modulus_for_width(self.width) as u64))
+            } else {
+                None
+            },
+            packets_evaluated: self.packets_evaluated,
+            last_sequence: self.last_sequence,
+            highest_sequence: self.highest_sequence,
+            gap_count: self.gap_count,
+            duplicate_count: self.duplicate_count,
+            out_of_order_count: self.out_of_order_count,
+            rollover_count: self.rollover_count,
+            hex_preview_enabled: self.hex_preview_enabled,
+            ascii_preview_enabled: self.ascii_preview_enabled,
+            max_preview_bytes: self.max_preview_bytes,
+        }
     }
 }
 

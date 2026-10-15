@@ -274,6 +274,125 @@ pub struct StreamConfig {
     /// Optional stream-level buffer and queue limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
+
+    /// Optional sequence extraction and tracking configuration (SPEC §8). Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<SequenceConfig>,
+
+    /// Optional packet inspection and preview configuration (SPEC §8). Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "preview")]
+    pub inspection: Option<InspectionConfig>,
+}
+
+/// Supported byte orders for binary sequence extraction (SPEC §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ByteOrder {
+    #[default]
+    #[serde(alias = "big", alias = "be", alias = "network")]
+    BigEndian,
+    #[serde(alias = "little", alias = "le")]
+    LittleEndian,
+}
+
+impl fmt::Display for ByteOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BigEndian => write!(f, "big_endian"),
+            Self::LittleEndian => write!(f, "little_endian"),
+        }
+    }
+}
+
+/// Configuration for packet sequence extraction and continuity tracking (SPEC §8).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceConfig {
+    /// Whether sequence tracking is enabled. Defaults to true when this section is present.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Byte offset of the sequence number in packet payload (0-indexed). Defaults to 0.
+    #[serde(default)]
+    pub offset: usize,
+
+    /// Width of the sequence field in bytes (1, 2, 4, or 8). Defaults to 4.
+    #[serde(default = "default_sequence_width")]
+    pub width: usize,
+
+    /// Byte order of the sequence number field. Defaults to big-endian (network byte order).
+    #[serde(default)]
+    pub byte_order: ByteOrder,
+
+    /// Optional sequence rollover / modulus value (e.g. 65536 for 16-bit). Defaults to 2^(8*width).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollover_threshold: Option<u64>,
+
+    /// Opt-in hexadecimal preview of payload bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hex_preview: Option<bool>,
+
+    /// Opt-in ASCII preview of payload bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_preview: Option<bool>,
+
+    /// Maximum length in bytes for previews (length-bounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_preview_bytes: Option<usize>,
+}
+
+pub fn default_sequence_width() -> usize {
+    4
+}
+
+/// Opt-in packet inspection and payload preview configuration (SPEC §8).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InspectionConfig {
+    /// Whether hexadecimal payload previews are enabled. Defaults to false (opt-in).
+    #[serde(default, alias = "hex")]
+    pub hex_preview: bool,
+
+    /// Whether ASCII payload previews are enabled. Defaults to false (opt-in).
+    #[serde(default, alias = "ascii")]
+    pub ascii_preview: bool,
+
+    /// Maximum length in bytes for previews (length-bounded). Defaults to 64 bytes.
+    #[serde(
+        default = "default_max_preview_bytes",
+        alias = "max_bytes",
+        alias = "max_length"
+    )]
+    pub max_preview_bytes: usize,
+}
+
+pub fn default_max_preview_bytes() -> usize {
+    64
+}
+
+impl Default for SequenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            offset: 0,
+            width: 4,
+            byte_order: ByteOrder::BigEndian,
+            rollover_threshold: None,
+            hex_preview: None,
+            ascii_preview: None,
+            max_preview_bytes: None,
+        }
+    }
+}
+
+impl Default for InspectionConfig {
+    fn default() -> Self {
+        Self {
+            hex_preview: false,
+            ascii_preview: false,
+            max_preview_bytes: 64,
+        }
+    }
 }
 
 /// Network endpoint configuration.
@@ -660,6 +779,46 @@ impl Config {
                 // Validate stream buffer
                 if let Some(buf) = &stream.buffer {
                     validate_buffer(buf, &format!("{}.buffer", stream_prefix), &mut errors);
+                }
+
+                // Validate sequence tracking configuration
+                if let Some(ref seq) = stream.sequence {
+                    if seq.width != 1 && seq.width != 2 && seq.width != 4 && seq.width != 8 {
+                        errors.push(ValidationError {
+                            path: format!("{}.sequence.width", stream_prefix),
+                            reason: format!(
+                                "sequence width {} is invalid; must be 1, 2, 4, or 8 bytes",
+                                seq.width
+                            ),
+                        });
+                    }
+                    if let Some(thresh) = seq.rollover_threshold {
+                        if thresh == 0 {
+                            errors.push(ValidationError {
+                                path: format!("{}.sequence.rollover_threshold", stream_prefix),
+                                reason: "sequence rollover_threshold must be greater than 0"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                    if let Some(max_bytes) = seq.max_preview_bytes {
+                        if max_bytes == 0 {
+                            errors.push(ValidationError {
+                                path: format!("{}.sequence.max_preview_bytes", stream_prefix),
+                                reason: "max_preview_bytes must be greater than 0".to_string(),
+                            });
+                        }
+                    }
+                }
+
+                // Validate packet inspection configuration
+                if let Some(ref insp) = stream.inspection {
+                    if insp.max_preview_bytes == 0 {
+                        errors.push(ValidationError {
+                            path: format!("{}.inspection.max_preview_bytes", stream_prefix),
+                            reason: "max_preview_bytes must be greater than 0".to_string(),
+                        });
+                    }
                 }
             }
 

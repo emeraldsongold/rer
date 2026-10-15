@@ -87,7 +87,9 @@ impl ManagementRequest {
     pub fn operation_type(&self) -> Option<OperationType> {
         match self.action.as_str() {
             "status" | "health" | "streams" | "metrics" | "version" | "inspect_config"
-            | "events" | "recent_events" | "diagnostics" => Some(OperationType::ReadOnly),
+            | "inspect" | "events" | "recent_events" | "diagnostics" => {
+                Some(OperationType::ReadOnly)
+            }
             "set_log_level" | "trigger_test" => Some(OperationType::BehaviorChanging),
             _ => None,
         }
@@ -141,6 +143,8 @@ pub struct StreamStatusReport {
     pub destination_errors: u64,
     pub socket_errors: u64,
     pub backpressure_events: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<crate::diagnostics::SequenceState>,
 }
 
 /// Status payload returned by `status` action.
@@ -163,6 +167,12 @@ pub struct StreamsManagementReport {
     pub uptime_seconds: u64,
     pub streams: Vec<StreamStatusReport>,
     pub logical_interfaces: Vec<LogicalInterfaceStats>,
+}
+
+/// Stream inspection report containing per-stream sequence and preview states (SPEC §8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InspectReport {
+    pub streams: Vec<crate::diagnostics::SequenceState>,
 }
 
 /// Metrics payload returned by `metrics` action.
@@ -263,6 +273,7 @@ pub fn convert_stream_reports(
             destination_errors: s.stats.destination_errors,
             socket_errors: s.stats.socket_errors,
             backpressure_events: s.stats.backpressure_events,
+            sequence: None,
         })
         .collect()
 }
@@ -510,6 +521,14 @@ pub fn generate_streams_report(handle: &RelayHealthHandle) -> StreamsManagementR
         uptime_seconds: handle.uptime_seconds(),
         streams,
         logical_interfaces,
+    }
+}
+
+/// Generates an inspect report with per-stream sequence tracking and preview states (SPEC §8).
+#[must_use]
+pub fn generate_inspect_report(handle: &RelayHealthHandle) -> InspectReport {
+    InspectReport {
+        streams: handle.sequence_states(),
     }
 }
 
@@ -802,6 +821,18 @@ pub fn process_management_request(
                 })),
                 error: None,
                 uptime_seconds: None,
+                streams: None,
+            }
+        }
+        "inspect" => {
+            let rep = generate_inspect_report(health_handle);
+            ManagementResponse {
+                version: MGMT_API_VERSION.to_string(),
+                status: "ok".to_string(),
+                action: Some("inspect".to_string()),
+                data: serde_json::to_value(&rep).ok(),
+                error: None,
+                uptime_seconds: Some(health_handle.uptime_seconds()),
                 streams: None,
             }
         }
@@ -1494,6 +1525,43 @@ pub fn query_streams(
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("failed to decode StreamsManagementReport: {e}"),
+        )
+    })
+}
+
+/// Queries stream inspection and sequence continuity state via management API (SPEC §8).
+pub fn query_inspect(
+    endpoint: &str,
+    timeout: Duration,
+    auth_token: Option<&str>,
+) -> io::Result<InspectReport> {
+    let req = ManagementRequest {
+        version: MGMT_API_VERSION.to_string(),
+        action: "inspect".to_string(),
+        auth_token: auth_token.map(String::from),
+        role: None,
+        params: None,
+    };
+    let resp = query_management_raw(endpoint, &req, timeout)?;
+    if resp.status != "ok" {
+        let msg = resp
+            .error
+            .map(|e| e.message)
+            .unwrap_or_else(|| "unknown error".to_string());
+        return Err(io::Error::other(msg));
+    }
+
+    let data = resp.data.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing 'data' field in inspect response",
+        )
+    })?;
+
+    serde_json::from_value::<InspectReport>(data).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to decode InspectReport: {e}"),
         )
     })
 }

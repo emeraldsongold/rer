@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-009 (Sequence tracking and packet inspection)
+- **Configurable Sequence Extraction**: Added `SequenceConfig` supporting configurable byte offset, field width (1, 2, 4, 8 bytes), and byte order (big-endian, little-endian), disabled by default on streams (SPEC §8).
+- **Sequence Continuity & Rollover Tracking**: Implemented `SequenceTracker` detecting missing packets (gaps), duplicates, out-of-order packets, and configurable sequence rollovers across forwarding streams and simulation test harness.
+- **Opt-in Length-Bounded Previews**: Added `InspectionConfig` with opt-in hexadecimal and ASCII packet previews bounded to configurable lengths.
+- **Per-Stream Sequence Inspection**: Enhanced `rer inspect` command and management API (`inspect` action) to display live and configuration sequence tracking states in formatted text and structured JSON.
+
 ### Added - Milestone RER-F-026 (Diagnostic event model with bounded, non-blocking event buffer)
 - **Diagnostic Event Model**: Implemented structured, serializable `DiagnosticEvent` recording monotonic and wall-clock timestamps, stream ID, stage, optional endpoints, transport type, payload length, optional correlation ID, and optional reason without holding payload bytes (SPEC §8, §10).
 - **Stage Lifecycle Enumeration**: Codified `DiagnosticStage` naming packet receipt, classification/acceptance, routing/queuing, send-attempted, send-succeeded (SPEC §8 stages 2–6), drops, failures, and health transitions with stable snake_case serialization.

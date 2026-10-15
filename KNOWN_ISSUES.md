@@ -15,7 +15,7 @@ RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone 
   - **Debug mode**: Emits detailed per-packet lifecycle events (received, accepted, routed-or-queued, send-attempted, and send-succeeded) with stream IDs, timestamps, endpoints, and packet lengths.
   - **Test mode**: Executes a bounded diagnostic run with documented maximums (up to 86,400 seconds duration and up to 1,000,000 events); stamps every event with the configured correlation ID; ends upon reaching expiry or event limits, records the termination reason, and automatically returns the instance to its prior diagnostic level.
   - **Management API diagnostics query**: Read-only `events` / `recent_events` operation exposes bounded recent diagnostic events (newest last), dropped-event count, current mode, and expiry.
-  Runtime mode modification is out of scope (mode and bounds are established via configuration). Sequence gap detection and hex preview facilities remain scheduled in roadmap milestone RER-F-009.
+  Runtime mode modification is out of scope (mode and bounds are established via configuration). Sequence extraction (offset, width, byte order), sequence continuity tracking (gap, duplicate, out-of-order, rollover detection), opt-in length-bounded hex/ASCII previews, and per-stream sequence inspection via `rer inspect` (text and JSON) are implemented (RER-F-009).
 
 ## 3. Tooling and CI Tracking
 
