@@ -294,3 +294,59 @@ fn test_cli_streams_missing_file_error() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("missing configuration file argument"));
 }
+
+#[test]
+fn test_cli_inspect_text_format() {
+    let example = repo_root().join("examples").join("minimal.yaml");
+    let output = Command::new(rer_bin())
+        .arg("inspect")
+        .arg(&example)
+        .arg("--format")
+        .arg("text")
+        .output()
+        .expect("failed to execute rer inspect --format text");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Per-Stream Sequence Tracking and Inspection:"));
+    assert!(stdout.contains("udp-forwarder"));
+    assert!(stdout.contains("Sequence tracking: disabled (off by default)"));
+}
+
+#[test]
+fn test_cli_inspect_json_format() {
+    let example = repo_root().join("examples").join("minimal.yaml");
+    let output = Command::new(rer_bin())
+        .arg("inspect")
+        .arg(&example)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("failed to execute rer inspect --format json");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON expected");
+    let streams = val["streams"].as_array().expect("streams array");
+    assert!(!streams.is_empty());
+    assert_eq!(streams[0]["stream_id"], "udp-forwarder");
+    assert_eq!(streams[0]["enabled"], false);
+}
+
+#[test]
+fn test_cli_inspect_json_flag() {
+    let example = repo_root().join("examples").join("minimal.yaml");
+    let output = Command::new(rer_bin())
+        .arg("inspect")
+        .arg(&example)
+        .arg("--json")
+        .output()
+        .expect("failed to execute rer inspect --json");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON expected");
+    let streams = val["streams"].as_array().expect("streams array");
+    assert!(!streams.is_empty());
+    assert_eq!(streams[0]["stream_id"], "udp-forwarder");
+}

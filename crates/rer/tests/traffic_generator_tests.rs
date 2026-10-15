@@ -418,3 +418,184 @@ fn test_simulation_harness_duplicate_scenario() {
     );
     assert_eq!(report.unique_received_count, 1000);
 }
+
+// ---------------------------------------------------------------------------
+// RER-F-009: Sequence tracking and packet inspection tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sequence_extraction_configurable_widths_and_endianness() {
+    use rer::{ByteOrder, SequenceConfig, SequenceTracker};
+
+    // 1-byte sequence
+    let seq_cfg_1 = SequenceConfig {
+        enabled: true,
+        offset: 0,
+        width: 1,
+        byte_order: ByteOrder::BigEndian,
+        rollover_threshold: Some(256),
+        ..Default::default()
+    };
+    let mut tracker1 = SequenceTracker::new("s1", Some(&seq_cfg_1), None);
+    assert_eq!(tracker1.extract_sequence(&[42, 0, 0]), Some(42));
+    let _ = tracker1.process_packet(&[42, 0, 0]);
+    assert_eq!(tracker1.last_sequence(), Some(42));
+
+    // 2-byte little-endian sequence at offset 2
+    let seq_cfg_2 = SequenceConfig {
+        enabled: true,
+        offset: 2,
+        width: 2,
+        byte_order: ByteOrder::LittleEndian,
+        rollover_threshold: Some(65536),
+        ..Default::default()
+    };
+    let mut tracker2 = SequenceTracker::new("s2", Some(&seq_cfg_2), None);
+    let pkt2 = [0xAA, 0xBB, 0x34, 0x12]; // 0x1234 = 4660
+    assert_eq!(tracker2.extract_sequence(&pkt2), Some(4660));
+    let _ = tracker2.process_packet(&pkt2);
+    assert_eq!(tracker2.last_sequence(), Some(4660));
+
+    // 4-byte big-endian sequence at offset 0
+    let seq_cfg_4 = SequenceConfig {
+        enabled: true,
+        offset: 0,
+        width: 4,
+        byte_order: ByteOrder::BigEndian,
+        rollover_threshold: None,
+        ..Default::default()
+    };
+    let mut tracker4 = SequenceTracker::new("s4", Some(&seq_cfg_4), None);
+    let pkt4 = [0x00, 0x01, 0x00, 0x00]; // 65536
+    assert_eq!(tracker4.extract_sequence(&pkt4), Some(65536));
+    let _ = tracker4.process_packet(&pkt4);
+    assert_eq!(tracker4.last_sequence(), Some(65536));
+
+    // 8-byte little-endian sequence at offset 1
+    let seq_cfg_8 = SequenceConfig {
+        enabled: true,
+        offset: 1,
+        width: 8,
+        byte_order: ByteOrder::LittleEndian,
+        rollover_threshold: None,
+        ..Default::default()
+    };
+    let mut tracker8 = SequenceTracker::new("s8", Some(&seq_cfg_8), None);
+    let mut pkt8 = vec![0xFF];
+    pkt8.extend_from_slice(&123456789012345u64.to_le_bytes());
+    assert_eq!(tracker8.extract_sequence(&pkt8), Some(123456789012345));
+    let _ = tracker8.process_packet(&pkt8);
+    assert_eq!(tracker8.last_sequence(), Some(123456789012345));
+
+    // Off by default
+    let tracker_def = SequenceTracker::new("s_def", None, None);
+    assert!(!tracker_def.is_enabled());
+    assert_eq!(tracker_def.extract_sequence(&[1, 2, 3, 4]), None);
+}
+
+#[test]
+fn test_harness_gaps_duplicates_out_of_order_and_rollover_detected() {
+    let mut receiver = TrafficReceiver::new(Some(10), None);
+    receiver.set_rollover_threshold(100);
+
+    // Sequence 0
+    let p0 = Packet::new("p0".into(), 0, 0, vec![1, 2, 3]);
+    receiver.record_packet(&p0);
+    // Gap: sequence 1 missing, sequence 2 arrives
+    let p2 = Packet::new("p2".into(), 2, 0, vec![4, 5, 6]);
+    receiver.record_packet(&p2);
+    // Duplicate: sequence 2 arrives again
+    receiver.record_packet(&p2);
+    // Out of order: sequence 1 arrives later
+    let p1 = Packet::new("p1".into(), 1, 0, vec![7, 8, 9]);
+    receiver.record_packet(&p1);
+    // Sequence 99 arrives
+    let p99 = Packet::new("p99".into(), 99, 0, vec![10]);
+    receiver.record_packet(&p99);
+    // Rollover: sequence 0 arrives after 99 (threshold 100)
+    let p0_roll = Packet::new("p0_roll".into(), 0, 0, vec![11]);
+    receiver.record_packet(&p0_roll);
+
+    let report = receiver.report();
+    assert_eq!(report.duplicate_count, 1, "must detect 1 duplicate");
+    assert_eq!(report.reordered_count, 1, "must detect 1 out-of-order");
+    assert_eq!(report.rollover_count, 1, "must detect 1 rollover");
+    assert_eq!(receiver.rollover_count(), 1);
+}
+
+#[test]
+fn test_simulation_harness_with_sequence_and_rollover_tracking() {
+    use rer::{ByteOrder, SequenceConfig};
+
+    let harness_config = HarnessConfig {
+        test_id: Some("harness-sequence-tracking-test".into()),
+        generator: GeneratorConfig {
+            seed: 777,
+            packet_size: 128,
+            rate: None,
+            burst: None,
+            duration: None,
+            count: Some(25),
+        },
+        impairments: None,
+        use_relay: true,
+        relay_queue_capacity: None,
+        relay_drop_policy: None,
+        sequence: Some(SequenceConfig {
+            enabled: true,
+            offset: 0,
+            width: 4,
+            byte_order: ByteOrder::BigEndian,
+            rollover_threshold: Some(1000),
+            ..Default::default()
+        }),
+        rollover_threshold: Some(1000),
+        ..Default::default()
+    };
+
+    let report = SimulationHarness::run(harness_config).expect("run harness with sequence config");
+    assert!(report.pass);
+    assert_eq!(report.received_count, 25);
+    assert_eq!(report.lost_count, 0);
+    assert_eq!(report.gap_count, 0);
+    assert_eq!(report.duplicate_count, 0);
+    assert_eq!(report.reordered_count, 0);
+    assert_eq!(report.rollover_count, 0);
+}
+
+#[test]
+fn test_previews_opt_in_and_length_bounded() {
+    use rer::{format_ascii_preview, format_hex_preview, Config};
+
+    // Previews opt-in: default minimal config has inspection = None
+    let minimal_yaml = r#"
+version: "1"
+instance:
+  id: "test-preview-defaults"
+  streams:
+    - id: "stream-no-preview"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:8001"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:8002"
+"#;
+    let config = Config::from_yaml_str(minimal_yaml).expect("parse minimal");
+    let stream = &config.all_instances()[0].streams[0];
+    assert!(stream.sequence.is_none(), "sequence is off by default");
+    assert!(stream.inspection.is_none(), "inspection is off by default");
+
+    // Length bounded previews
+    let sample = b"Hello, World! 0123456789\x00\xFF\x1B[31m";
+    let hex_bounded = format_hex_preview(sample, 5);
+    assert_eq!(hex_bounded, "48656c6c6f"); // exactly 5 bytes hex
+
+    let ascii_bounded = format_ascii_preview(sample, 5);
+    assert_eq!(ascii_bounded, "Hello"); // exactly 5 bytes ascii
+
+    let ascii_printable = format_ascii_preview(sample, sample.len());
+    // Non-printable replaced with '.'
+    assert!(ascii_printable.starts_with("Hello, World! 0123456789"));
+    assert!(ascii_printable.contains("..[31m"));
+}

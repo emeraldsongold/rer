@@ -68,6 +68,14 @@
       },
       "additionalProperties": false
     },
+    "ByteOrder": {
+      "description": "Supported byte orders for binary sequence extraction (SPEC §8).",
+      "type": "string",
+      "enum": [
+        "big_endian",
+        "little_endian"
+      ]
+    },
     "ConnectionMode": {
       "description": "Connection modes for endpoints.",
       "type": "string",
@@ -115,6 +123,30 @@
               "$ref": "#/definitions/TransportType"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "InspectionConfig": {
+      "description": "Opt-in packet inspection and payload preview configuration (SPEC §8).",
+      "type": "object",
+      "properties": {
+        "ascii_preview": {
+          "description": "Whether ASCII payload previews are enabled. Defaults to false (opt-in).",
+          "default": false,
+          "type": "boolean"
+        },
+        "hex_preview": {
+          "description": "Whether hexadecimal payload previews are enabled. Defaults to false (opt-in).",
+          "default": false,
+          "type": "boolean"
+        },
+        "max_preview_bytes": {
+          "description": "Maximum length in bytes for previews (length-bounded). Defaults to 64 bytes.",
+          "default": 64,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false
@@ -308,6 +340,73 @@
       "writeOnly": true,
       "type": "string"
     },
+    "SequenceConfig": {
+      "description": "Configuration for packet sequence extraction and continuity tracking (SPEC §8).",
+      "type": "object",
+      "properties": {
+        "ascii_preview": {
+          "description": "Opt-in ASCII preview of payload bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "byte_order": {
+          "description": "Byte order of the sequence number field. Defaults to big-endian (network byte order).",
+          "default": "big_endian",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ByteOrder"
+            }
+          ]
+        },
+        "enabled": {
+          "description": "Whether sequence tracking is enabled. Defaults to true when this section is present.",
+          "default": true,
+          "type": "boolean"
+        },
+        "hex_preview": {
+          "description": "Opt-in hexadecimal preview of payload bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_preview_bytes": {
+          "description": "Maximum length in bytes for previews (length-bounded).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "offset": {
+          "description": "Byte offset of the sequence number in packet payload (0-indexed). Defaults to 0.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "rollover_threshold": {
+          "description": "Optional sequence rollover / modulus value (e.g. 65536 for 16-bit). Defaults to 2^(8*width).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "width": {
+          "description": "Width of the sequence field in bytes (1, 2, 4, or 8). Defaults to 4.",
+          "default": 4,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "StreamConfig": {
       "description": "Configuration for a forwarding stream (SPEC §5).",
       "type": "object",
@@ -358,6 +457,28 @@
         "id": {
           "description": "Unique identity of the stream.",
           "type": "string"
+        },
+        "inspection": {
+          "description": "Optional packet inspection and preview configuration (SPEC §8). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InspectionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sequence": {
+          "description": "Optional sequence extraction and tracking configuration (SPEC §8). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SequenceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "source": {
           "description": "Stream forwarding source.",
