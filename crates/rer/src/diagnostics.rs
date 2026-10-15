@@ -7,13 +7,13 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ByteOrder, InspectionConfig, SequenceConfig, TransportType};
+use crate::config::{ByteOrder, InspectionConfig, OperationalMode, SequenceConfig, TransportType};
 
 /// Stage in packet lifecycle or diagnostic event category (SPEC §8, stages 2–6, drops, failures, and health).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -343,6 +343,196 @@ impl Clock for ManualClock {
     }
 }
 
+/// Thread-safe manager for operational diagnostic profiles, bounded test runs,
+/// correlation IDs, expiry, and reversion to prior diagnostic levels (SPEC §10).
+#[derive(Debug)]
+pub struct DiagnosticTestState {
+    instance_id: String,
+    configured_mode: OperationalMode,
+    prior_mode: OperationalMode,
+    correlation_id: Option<String>,
+    duration_nanos: Option<u64>,
+    expiry_seconds: Option<u64>,
+    max_events: Option<u64>,
+    start_monotonic_ns: u64,
+    recorded_events: AtomicU64,
+    ended: AtomicBool,
+    end_reason: Mutex<Option<String>>,
+    pending_end_event: Mutex<Option<DiagnosticEvent>>,
+    clock: Arc<dyn Clock>,
+}
+
+impl DiagnosticTestState {
+    /// Creates a new operational mode and test state manager.
+    #[must_use]
+    pub fn new(
+        instance_id: impl Into<String>,
+        mode: OperationalMode,
+        correlation_id: Option<String>,
+        expiry_seconds: Option<u64>,
+        max_events: Option<u64>,
+        prior_mode: Option<OperationalMode>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let duration_nanos = expiry_seconds.map(|s| s.saturating_mul(1_000_000_000));
+        let start_monotonic_ns = clock.monotonic_nanos();
+        let prior_mode = prior_mode.unwrap_or(OperationalMode::Production);
+        Self {
+            instance_id: instance_id.into(),
+            configured_mode: mode,
+            prior_mode,
+            correlation_id,
+            duration_nanos,
+            expiry_seconds,
+            max_events,
+            start_monotonic_ns,
+            recorded_events: AtomicU64::new(0),
+            ended: AtomicBool::new(false),
+            end_reason: Mutex::new(None),
+            pending_end_event: Mutex::new(None),
+            clock,
+        }
+    }
+
+    /// Returns the current operational mode, checking bounds/expiry and reverting to prior_mode if ended.
+    pub fn current_mode(&self) -> OperationalMode {
+        if self.configured_mode != OperationalMode::Test {
+            return self.configured_mode;
+        }
+
+        if self.ended.load(Ordering::SeqCst) {
+            return self.prior_mode;
+        }
+
+        // Check duration bound / expiry
+        if let Some(dur_ns) = self.duration_nanos {
+            let now_ns = self.clock.monotonic_nanos();
+            if now_ns.saturating_sub(self.start_monotonic_ns) >= dur_ns {
+                self.end_run(format!(
+                    "test run ended: reached duration bound (configured expiry of {}s)",
+                    self.expiry_seconds.unwrap_or(0)
+                ));
+                return self.prior_mode;
+            }
+        }
+
+        // Check event count bound
+        if let Some(max) = self.max_events {
+            if self.recorded_events.load(Ordering::SeqCst) >= max {
+                self.end_run(format!(
+                    "test run ended: reached event bound (maximum {} events recorded)",
+                    max
+                ));
+                return self.prior_mode;
+            }
+        }
+
+        OperationalMode::Test
+    }
+
+    /// Ends the test run with the given reason, recording an end event and switching mode to prior_mode.
+    pub fn end_run(&self, reason: impl Into<String>) {
+        if !self.ended.swap(true, Ordering::SeqCst) {
+            let r = reason.into();
+            if let Ok(mut lock) = self.end_reason.lock() {
+                *lock = Some(r.clone());
+            }
+            let mut event = DiagnosticEvent::new(
+                self.clock.monotonic_nanos(),
+                self.clock.wall_clock_nanos(),
+                self.instance_id.clone(),
+                DiagnosticStage::HealthTransition,
+                TransportType::Udp,
+                0,
+            )
+            .with_reason(r);
+            if let Some(ref cid) = self.correlation_id {
+                event = event.with_correlation_id(cid.clone());
+            }
+            if let Ok(mut lock) = self.pending_end_event.lock() {
+                *lock = Some(event);
+            }
+        }
+    }
+
+    /// Whether packet-level diagnostic events should currently be emitted.
+    #[must_use]
+    pub fn should_emit_packet_events(&self) -> bool {
+        match self.current_mode() {
+            OperationalMode::Debug | OperationalMode::Test => true,
+            OperationalMode::Production => false,
+        }
+    }
+
+    /// Configured correlation identifier if currently active in test run.
+    #[must_use]
+    pub fn active_correlation_id(&self) -> Option<String> {
+        if self.current_mode() == OperationalMode::Test {
+            self.correlation_id.clone()
+        } else {
+            None
+        }
+    }
+
+    /// Configured expiry seconds if currently active in test mode.
+    #[must_use]
+    pub fn current_expiry_seconds(&self) -> Option<u64> {
+        if self.current_mode() == OperationalMode::Test {
+            self.expiry_seconds
+        } else {
+            None
+        }
+    }
+
+    /// Configured correlation identifier regardless of active state.
+    #[must_use]
+    pub fn configured_correlation_id(&self) -> Option<String> {
+        self.correlation_id.clone()
+    }
+
+    /// Reason why the test run ended (if ended).
+    #[must_use]
+    pub fn end_reason(&self) -> Option<String> {
+        self.end_reason.lock().ok().and_then(|r| r.clone())
+    }
+
+    /// Total events recorded during the test run.
+    #[must_use]
+    pub fn recorded_events(&self) -> u64 {
+        self.recorded_events.load(Ordering::SeqCst)
+    }
+
+    /// Takes any pending diagnostic end event.
+    pub fn take_pending_end_event(&self) -> Option<DiagnosticEvent> {
+        self.pending_end_event
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
+    }
+
+    /// Records an event in the test run, returning the correlation ID to attach (if active).
+    /// If the recorded count reaches the event bound, the test run is ended.
+    pub fn on_event_recorded(&self) -> Option<String> {
+        if self.current_mode() != OperationalMode::Test {
+            return None;
+        }
+
+        let count = self.recorded_events.fetch_add(1, Ordering::SeqCst) + 1;
+        let corr = self.correlation_id.clone();
+
+        if let Some(max) = self.max_events {
+            if count >= max {
+                self.end_run(format!(
+                    "test run ended: reached event bound (maximum {} events recorded)",
+                    max
+                ));
+            }
+        }
+
+        corr
+    }
+}
+
 /// Per-second rate limiter for diagnostic events.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
@@ -454,6 +644,7 @@ pub struct DiagnosticBuffer {
     inner: Arc<Mutex<DiagnosticBufferInner>>,
     dropped_count: Arc<AtomicU64>,
     clock: Arc<dyn Clock>,
+    test_state: Arc<Mutex<Option<Arc<DiagnosticTestState>>>>,
 }
 
 impl DiagnosticBuffer {
@@ -505,6 +696,7 @@ impl DiagnosticBuffer {
             })),
             dropped_count: Arc::new(AtomicU64::new(0)),
             clock,
+            test_state: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -512,6 +704,56 @@ impl DiagnosticBuffer {
     #[must_use]
     pub fn builder(capacity: usize) -> DiagnosticBufferBuilder {
         DiagnosticBufferBuilder::new(capacity)
+    }
+
+    /// Returns the active test state manager, if configured.
+    #[must_use]
+    pub fn test_state(&self) -> Option<Arc<DiagnosticTestState>> {
+        self.test_state.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Sets or replaces the operational test state manager.
+    pub fn set_test_state(&self, state: Arc<DiagnosticTestState>) {
+        if let Ok(mut g) = self.test_state.lock() {
+            *g = Some(state);
+        }
+    }
+
+    /// Returns the current operational mode (checking test expiry/bounds).
+    #[must_use]
+    pub fn current_mode(&self) -> OperationalMode {
+        self.test_state()
+            .map(|ts| ts.current_mode())
+            .unwrap_or(OperationalMode::Production)
+    }
+
+    /// Returns whether packet-level diagnostic events should currently be emitted.
+    #[must_use]
+    pub fn should_emit_packet_events(&self) -> bool {
+        self.test_state()
+            .map(|ts| ts.should_emit_packet_events())
+            .unwrap_or(false)
+    }
+
+    /// Returns configured expiry seconds if currently in test mode.
+    #[must_use]
+    pub fn current_expiry(&self) -> Option<u64> {
+        self.test_state().and_then(|ts| ts.current_expiry_seconds())
+    }
+
+    /// Returns the active test run correlation ID.
+    #[must_use]
+    pub fn correlation_id(&self) -> Option<String> {
+        self.test_state().and_then(|ts| {
+            ts.active_correlation_id()
+                .or_else(|| ts.configured_correlation_id())
+        })
+    }
+
+    /// Returns the reason why the test run ended (if ended).
+    #[must_use]
+    pub fn test_end_reason(&self) -> Option<String> {
+        self.test_state().and_then(|ts| ts.end_reason())
     }
 
     /// Total number of diagnostic events dropped (full capacity, contention, or rate limit).
@@ -554,19 +796,7 @@ impl DiagnosticBuffer {
         self.hold_lock()
     }
 
-    /// Emits a diagnostic event.
-    ///
-    /// This method is strictly non-blocking. If another thread holds the buffer,
-    /// it returns immediately with `false`, and increments the dropped count.
-    /// If a per-second rate limit is exceeded, it returns immediately with `false`
-    /// and increments the dropped count.
-    /// If the buffer is full, the oldest event is overwritten and the dropped count is incremented.
-    pub fn emit(&self, event: DiagnosticEvent) -> bool {
-        let Ok(mut inner) = self.inner.try_lock() else {
-            self.dropped_count.fetch_add(1, Ordering::SeqCst);
-            return false;
-        };
-
+    fn push_event_locked(&self, inner: &mut DiagnosticBufferInner, event: DiagnosticEvent) -> bool {
         // Check rate limit if configured
         if let Some(ref mut limiter) = inner.rate_limiter {
             let now_ns = self.clock.monotonic_nanos();
@@ -589,6 +819,40 @@ impl DiagnosticBuffer {
 
         inner.events.push_back(event);
         true
+    }
+
+    /// Emits a diagnostic event.
+    ///
+    /// This method is strictly non-blocking. If another thread holds the buffer,
+    /// it returns immediately with `false`, and increments the dropped count.
+    /// If a per-second rate limit is exceeded, it returns immediately with `false`
+    /// and increments the dropped count.
+    /// If the buffer is full, the oldest event is overwritten and the dropped count is incremented.
+    pub fn emit(&self, mut event: DiagnosticEvent) -> bool {
+        let mut pending_event = None;
+        if let Some(ts) = self.test_state() {
+            if ts.current_mode() == OperationalMode::Test {
+                if let Some(corr) = ts.on_event_recorded() {
+                    if event.correlation_id.is_none() {
+                        event.correlation_id = Some(corr);
+                    }
+                }
+            }
+            pending_event = ts.take_pending_end_event();
+        }
+
+        let Ok(mut inner) = self.inner.try_lock() else {
+            self.dropped_count.fetch_add(1, Ordering::SeqCst);
+            return false;
+        };
+
+        let res = self.push_event_locked(&mut inner, event);
+
+        if let Some(end_ev) = pending_event {
+            self.push_event_locked(&mut inner, end_ev);
+        }
+
+        res
     }
 
     /// Creates a diagnostic event using the buffer's injected clock timestamps.
@@ -624,6 +888,15 @@ impl DiagnosticBuffer {
 
     /// Returns a snapshot of events in arrival order along with dropped event counter.
     pub fn snapshot(&self) -> DiagnosticSnapshot {
+        if let Some(ts) = self.test_state() {
+            let _ = ts.current_mode();
+            if let Some(end_ev) = ts.take_pending_end_event() {
+                if let Ok(mut inner) = self.inner.lock() {
+                    self.push_event_locked(&mut inner, end_ev);
+                }
+            }
+        }
+
         let events = self
             .inner
             .lock()

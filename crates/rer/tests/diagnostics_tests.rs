@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
-use rer::config::TransportType;
+use rer::config::{OperationalMode, TransportType};
 use rer::diagnostics::{DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, ManualClock};
 
 #[test]
@@ -211,7 +211,7 @@ fn test_rate_limiting_across_second_boundary_without_sleeping() {
 // RER-F-027 Integration Tests: Forwarding Path Diagnostic Events
 // ---------------------------------------------------------------------------
 
-use rer::config::{Config, OperationalMode};
+use rer::config::Config;
 use rer::relay::Relay;
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -757,6 +757,298 @@ instances:
         assert!(ev.source_endpoint.is_some());
         assert!(ev.destination_endpoint.is_some());
     }
+
+    relay.stop();
+}
+
+#[test]
+fn test_test_mode_carries_correlation_id_on_every_event() {
+    let src_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let src_port = src_sock.local_addr().unwrap().port();
+    drop(src_sock);
+
+    let dst_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let dst_port = dst_sock.local_addr().unwrap().port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "inst-test-mode"
+  mode: "test"
+  test_mode:
+    correlation_id: "corr-run-xyz-42"
+    duration_seconds: 120
+    max_events: 1000
+    prior_mode: "production"
+  streams:
+    - id: "s-test-corr"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:{src_port}"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:{dst_port}"
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("parse config");
+    assert!(config.validate().is_empty());
+
+    let buffer = DiagnosticBuffer::new(1024);
+    let relay = rer::relay::Relay::start_with_buffer(&config, buffer).expect("start relay");
+
+    assert_eq!(relay.current_mode(), OperationalMode::Test);
+    assert_eq!(relay.correlation_id().as_deref(), Some("corr-run-xyz-42"));
+
+    // Send packet from client
+    let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("client bind");
+    let payload = b"test-correlation-datagram-payload";
+    client
+        .send_to(payload, format!("127.0.0.1:{src_port}"))
+        .expect("send");
+
+    let mut buf = [0u8; 128];
+    dst_sock
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .expect("timeout");
+    let (n, _) = dst_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], payload);
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let snap = relay.event_buffer().snapshot();
+    let stream_events: Vec<&DiagnosticEvent> = snap
+        .events
+        .iter()
+        .filter(|e| e.stream_id == "s-test-corr")
+        .collect();
+
+    assert!(
+        !stream_events.is_empty(),
+        "Diagnostic events should be emitted in test mode"
+    );
+
+    // Verify every single event in the run carries the correlation ID
+    for ev in &stream_events {
+        assert_eq!(
+            ev.correlation_id.as_deref(),
+            Some("corr-run-xyz-42"),
+            "Every event in test mode run must carry configured correlation ID"
+        );
+    }
+
+    // Trigger health transition and verify it carries the correlation ID too
+    relay.emit_health_transition("s-test-corr", false, "injected test failure");
+    let snap2 = relay.event_buffer().snapshot();
+    let health_events: Vec<&DiagnosticEvent> = snap2
+        .events
+        .iter()
+        .filter(|e| e.stage == DiagnosticStage::HealthTransition)
+        .collect();
+    assert!(!health_events.is_empty());
+    assert_eq!(
+        health_events.last().unwrap().correlation_id.as_deref(),
+        Some("corr-run-xyz-42")
+    );
+
+    relay.stop();
+}
+
+#[test]
+fn test_test_mode_reverts_to_prior_level_on_expiry_with_injected_clock_no_sleeping() {
+    let src_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let src_port = src_sock.local_addr().unwrap().port();
+    drop(src_sock);
+
+    let dst_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let dst_port = dst_sock.local_addr().unwrap().port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "inst-test-expire"
+  mode: "test"
+  test_mode:
+    correlation_id: "corr-expire-run"
+    duration_seconds: 60
+    prior_mode: "production"
+  streams:
+    - id: "s-expire"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:{src_port}"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:{dst_port}"
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("parse config");
+    assert!(config.validate().is_empty());
+
+    // Injected manual clock starting at t=1,000,000 ns
+    let clock = Arc::new(ManualClock::new(1_000_000, 1_000_000));
+    let buffer = DiagnosticBuffer::with_clock(1024, clock.clone());
+    let relay = rer::relay::Relay::start_with_buffer(&config, buffer).expect("start relay");
+
+    // Initially in test mode
+    assert_eq!(relay.current_mode(), OperationalMode::Test);
+    assert_eq!(relay.current_expiry(), Some(60));
+    assert_eq!(relay.correlation_id().as_deref(), Some("corr-expire-run"));
+
+    let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    dst_sock
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .expect("timeout");
+
+    // Forward packet 1 during active test run
+    client
+        .send_to(b"packet-1", format!("127.0.0.1:{src_port}"))
+        .expect("send");
+    let mut buf = [0u8; 128];
+    let (n1, _) = dst_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n1], b"packet-1");
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let snap1 = relay.event_buffer().snapshot();
+    let packet1_events: Vec<&DiagnosticEvent> = snap1
+        .events
+        .iter()
+        .filter(|e| e.stream_id == "s-expire")
+        .collect();
+    assert!(
+        !packet1_events.is_empty(),
+        "Events should be recorded during active test run"
+    );
+    for ev in &packet1_events {
+        assert_eq!(ev.correlation_id.as_deref(), Some("corr-expire-run"));
+    }
+
+    // Now advance clock past expiry by 61 seconds WITHOUT sleeping
+    clock.advance_secs(61);
+
+    // Verify instance returns to prior diagnostic level (production mode)
+    assert_eq!(
+        relay.current_mode(),
+        OperationalMode::Production,
+        "Instance must return to prior diagnostic level (production) upon expiry"
+    );
+    assert_eq!(
+        relay.current_expiry(),
+        None,
+        "Expiry must be None once test run has completed"
+    );
+
+    // Forward packet 2 after expiry with a different payload length
+    client
+        .send_to(b"packet-after-expiry", format!("127.0.0.1:{src_port}"))
+        .expect("send");
+    let (n2, _) = dst_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n2], b"packet-after-expiry");
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    // Verify that NO per-packet events were recorded for packet 2 (quiet production mode)
+    let snap2 = relay.event_buffer().snapshot();
+    let packet2_events: Vec<&DiagnosticEvent> = snap2
+        .events
+        .iter()
+        .filter(|e| {
+            e.stream_id == "s-expire" && e.payload_length == b"packet-after-expiry".len() as u64
+        })
+        .collect();
+    assert_eq!(
+        packet2_events.len(),
+        0,
+        "Production mode must not emit per-packet events after test expiry"
+    );
+
+    // Verify end event was recorded explaining duration bound reached
+    let end_events: Vec<&DiagnosticEvent> = snap2
+        .events
+        .iter()
+        .filter(|e| {
+            e.reason
+                .as_deref()
+                .is_some_and(|r| r.contains("duration bound"))
+        })
+        .collect();
+    assert!(
+        !end_events.is_empty(),
+        "Relay must record an event when reaching duration bound"
+    );
+
+    relay.stop();
+}
+
+#[test]
+fn test_test_mode_run_bounded_in_events_and_duration_records_why() {
+    let src_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let src_port = src_sock.local_addr().unwrap().port();
+    drop(src_sock);
+
+    let dst_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let dst_port = dst_sock.local_addr().unwrap().port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "inst-event-bound"
+  mode: "test"
+  test_mode:
+    correlation_id: "corr-event-bound"
+    max_events: 5
+    duration_seconds: 300
+    prior_mode: "production"
+  streams:
+    - id: "s-bounded"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:{src_port}"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:{dst_port}"
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("parse config");
+    let clock = Arc::new(ManualClock::new(0, 0));
+    let buffer = DiagnosticBuffer::with_clock(1024, clock.clone());
+    let relay = rer::relay::Relay::start_with_buffer(&config, buffer).expect("start relay");
+
+    assert_eq!(relay.current_mode(), OperationalMode::Test);
+
+    // Forward packet (1 packet generates 5 lifecycle events: Received, Accepted, Routed, Attempted, Succeeded)
+    let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    dst_sock
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .expect("timeout");
+    client
+        .send_to(b"reach-bound", format!("127.0.0.1:{src_port}"))
+        .expect("send");
+    let mut buf = [0u8; 128];
+    let (n, _) = dst_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], b"reach-bound");
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // After 5 events, event bound of 5 should have been reached and ended the run
+    assert_eq!(
+        relay.current_mode(),
+        OperationalMode::Production,
+        "Run must revert to prior mode when reaching event bound"
+    );
+
+    let reason = relay.test_end_reason();
+    assert!(reason.is_some(), "Run must record reason why it ended");
+    assert!(
+        reason.unwrap().contains("event bound"),
+        "Recorded reason must describe event bound"
+    );
 
     relay.stop();
 }

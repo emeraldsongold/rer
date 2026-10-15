@@ -169,6 +169,22 @@
             }
           ]
         },
+        "correlation_id": {
+          "description": "Direct correlation ID on instance (alternative to test_mode.correlation_id).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiry_seconds": {
+          "description": "Direct expiry in seconds on instance (alternative to test_mode.expiry_seconds).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "id": {
           "description": "Unique identity of the instance.",
           "type": "string"
@@ -190,6 +206,15 @@
               "type": "null"
             }
           ]
+        },
+        "max_events": {
+          "description": "Direct max events on instance (alternative to test_mode.max_events).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
         },
         "metrics": {
           "description": "Prometheus/OpenMetrics metrics endpoint configuration (SPEC §15).",
@@ -218,12 +243,34 @@
             "null"
           ]
         },
+        "prior_mode": {
+          "description": "Direct prior mode on instance (alternative to test_mode.prior_mode).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationalMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "streams": {
           "description": "Forwarding streams configured on this instance.",
           "type": "array",
           "items": {
             "$ref": "#/definitions/StreamConfig"
           }
+        },
+        "test_mode": {
+          "description": "Test mode configuration (correlation ID, expiry, bounds, prior mode) (SPEC §10).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestModeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -485,6 +532,49 @@
           "allOf": [
             {
               "$ref": "#/definitions/EndpointConfig"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TestModeConfig": {
+      "description": "Test mode configuration parameters (SPEC §10).",
+      "type": "object",
+      "properties": {
+        "correlation_id": {
+          "description": "Correlation identifier spanning multiple relays.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiry_seconds": {
+          "description": "Configured test run expiry / duration in seconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_events": {
+          "description": "Configured event limit for the test run before reaching bound.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "prior_mode": {
+          "description": "Diagnostic profile to revert to upon expiry or reaching bounds (defaults to production).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationalMode"
+            },
+            {
+              "type": "null"
             }
           ]
         }

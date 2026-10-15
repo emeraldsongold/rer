@@ -56,6 +56,31 @@ pub struct InstanceConfig {
     /// Instance-level bounded buffer and queue limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
+
+    /// Test mode configuration (correlation ID, expiry, bounds, prior mode) (SPEC §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_mode: Option<TestModeConfig>,
+
+    /// Direct correlation ID on instance (alternative to test_mode.correlation_id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+
+    /// Direct expiry in seconds on instance (alternative to test_mode.expiry_seconds).
+    #[serde(
+        default,
+        alias = "expiry",
+        alias = "duration_seconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expiry_seconds: Option<u64>,
+
+    /// Direct max events on instance (alternative to test_mode.max_events).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_events: Option<u64>,
+
+    /// Direct prior mode on instance (alternative to test_mode.prior_mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_mode: Option<OperationalMode>,
 }
 
 /// Prometheus and OpenMetrics metrics endpoint configuration (SPEC §15).
@@ -95,6 +120,98 @@ pub enum OperationalMode {
 
 fn default_operational_mode() -> OperationalMode {
     OperationalMode::Production
+}
+
+/// Documented maximum test run duration in seconds (24 hours = 86,400s).
+pub const MAX_TEST_DURATION_SECONDS: u64 = 86_400;
+
+/// Default test run duration in seconds if not specified (5 minutes = 300s).
+pub const DEFAULT_TEST_DURATION_SECONDS: u64 = 300;
+
+/// Documented maximum events recorded in a test run before reaching bound (1,000,000 events).
+pub const MAX_TEST_EVENTS: u64 = 1_000_000;
+
+/// Default maximum events recorded in a test run (10,000 events).
+pub const DEFAULT_TEST_MAX_EVENTS: u64 = 10_000;
+
+/// Test mode configuration parameters (SPEC §10).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TestModeConfig {
+    /// Correlation identifier spanning multiple relays.
+    #[serde(
+        default,
+        alias = "correlation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub correlation_id: Option<String>,
+
+    /// Configured test run expiry / duration in seconds.
+    #[serde(
+        default,
+        alias = "expiry",
+        alias = "duration",
+        alias = "duration_seconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expiry_seconds: Option<u64>,
+
+    /// Configured event limit for the test run before reaching bound.
+    #[serde(
+        default,
+        alias = "events_bound",
+        alias = "event_limit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_events: Option<u64>,
+
+    /// Diagnostic profile to revert to upon expiry or reaching bounds (defaults to production).
+    #[serde(
+        default,
+        alias = "revert_to",
+        alias = "prior_level",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prior_mode: Option<OperationalMode>,
+}
+
+impl InstanceConfig {
+    /// Resolved correlation identifier for test mode.
+    #[must_use]
+    pub fn resolved_correlation_id(&self) -> Option<&str> {
+        self.test_mode
+            .as_ref()
+            .and_then(|t| t.correlation_id.as_deref())
+            .or(self.correlation_id.as_deref())
+    }
+
+    /// Resolved expiry in seconds for test mode.
+    #[must_use]
+    pub fn resolved_expiry_seconds(&self) -> Option<u64> {
+        self.test_mode
+            .as_ref()
+            .and_then(|t| t.expiry_seconds)
+            .or(self.expiry_seconds)
+    }
+
+    /// Resolved max events bound for test mode.
+    #[must_use]
+    pub fn resolved_max_events(&self) -> Option<u64> {
+        self.test_mode
+            .as_ref()
+            .and_then(|t| t.max_events)
+            .or(self.max_events)
+    }
+
+    /// Resolved prior operational mode to return to upon test expiry.
+    #[must_use]
+    pub fn resolved_prior_mode(&self) -> OperationalMode {
+        self.test_mode
+            .as_ref()
+            .and_then(|t| t.prior_mode)
+            .or(self.prior_mode)
+            .unwrap_or(OperationalMode::Production)
+    }
 }
 
 /// Management plane configuration (SPEC §9).
@@ -543,6 +660,46 @@ impl Config {
             // Check instance buffer
             if let Some(buf) = &inst.buffer {
                 validate_buffer(buf, &format!("{}.buffer", inst_prefix), &mut errors);
+            }
+
+            // Check test mode bounds
+            if inst.mode == OperationalMode::Test {
+                if let Some(dur) = inst.resolved_expiry_seconds() {
+                    if dur > MAX_TEST_DURATION_SECONDS {
+                        errors.push(ValidationError {
+                            path: format!("{}.test_mode.expiry_seconds", inst_prefix),
+                            reason: format!(
+                                "configured test mode duration ({}s) exceeds maximum allowed duration ({}s)",
+                                dur, MAX_TEST_DURATION_SECONDS
+                            ),
+                        });
+                    }
+                    if dur == 0 {
+                        errors.push(ValidationError {
+                            path: format!("{}.test_mode.expiry_seconds", inst_prefix),
+                            reason: "configured test mode duration must be greater than 0"
+                                .to_string(),
+                        });
+                    }
+                }
+                if let Some(evs) = inst.resolved_max_events() {
+                    if evs > MAX_TEST_EVENTS {
+                        errors.push(ValidationError {
+                            path: format!("{}.test_mode.max_events", inst_prefix),
+                            reason: format!(
+                                "configured test mode max_events ({}) exceeds maximum allowed ({})",
+                                evs, MAX_TEST_EVENTS
+                            ),
+                        });
+                    }
+                    if evs == 0 {
+                        errors.push(ValidationError {
+                            path: format!("{}.test_mode.max_events", inst_prefix),
+                            reason: "configured test mode max_events must be greater than 0"
+                                .to_string(),
+                        });
+                    }
+                }
             }
 
             // Check streams
