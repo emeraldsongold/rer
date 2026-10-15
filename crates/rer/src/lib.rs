@@ -44,11 +44,14 @@ pub use relay::{
 
 pub use secret::SecretString;
 pub use sim::{
-    correlate_topology_hops, CorrelationSummary, DivergencePoint, DivergenceType, GeneratorConfig,
-    GeneratorStats, HarnessConfig, HopObservation, HopType, ImpairmentConfig, Packet,
-    ReceiverReport, RelayHopConfig, ReorderedPacket, SimulatedChannel, SimulationHarness,
-    TestController, TestOutcome, TestReceiver, TopologyConfig, TopologyHarness, TopologyReport,
-    TrafficGenerator,
+    correlate_topology_hops, current_rss_bytes, default_benchmark_suite, BaselineComparison,
+    BenchmarkDefinition, BenchmarkResult, BenchmarkRunner, CorrelationSummary, DivergencePoint,
+    DivergenceType, EnvironmentInfo, FaultInjectionRunner, FaultScenarioResult, FaultType,
+    GeneratorConfig, GeneratorStats, HarnessConfig, HopObservation, HopType, ImpairmentConfig,
+    LongDurationConfig, LongDurationReport, LongDurationRunner, MemoryStabilityReport, Packet,
+    QueueStabilityReport, ReceiverReport, RelayHopConfig, ReorderedPacket, SimulatedChannel,
+    SimulationHarness, StabilitySample, TestController, TestOutcome, TestReceiver, TopologyConfig,
+    TopologyHarness, TopologyReport, TrafficGenerator,
 };
 
 /// Returns the current version of RER.

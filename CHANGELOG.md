@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-017 (Long-duration, adversarial, fault-injection and performance testing)
+- **Repeatable Benchmark Definitions & Environment-Labelled Baselines**: Codified deterministic benchmark definitions (`udp_forward_64b`, `udp_forward_512b`, `udp_forward_1400b`, `tcp_forward_64b`, `tcp_forward_512b`, `tcp_forward_1400b`, and `bounded_queue_ops`) with recorded baselines labelled by environment (`linux-x86_64-runner`) in `docs/BENCHMARKS.md` and `benchmarks/baselines.json` (SPEC §13, §21).
+- **Zero-Unmeasured-Performance-Claims Enforcement**: Strictly enforced requirement that no throughput, latency, CPU, or memory claims are made without empirical before-and-after measured data; verified comparative results across unoptimized debug and optimized release builds.
+- **Segregated Adversarial Fault-Injection Suite**: Implemented deterministic software simulation for all eight fault scenarios (packet loss, fixed transmission delay, variable latency jitter, packet reordering, destination disconnection/reconnection, slow reader backpressure, buffer queue saturation, and relay restart/recovery) running outside the unprivileged CI suite (`cargo test --test fault_injection_tests -- --ignored`).
+- **Long-Duration Stability & Memory Reporting**: Added `LongDurationRunner` tracking process resident set size (RSS) via `/proc/self/statm` / `getrusage` and queue depth over sustained workloads, verifying bounded memory usage, no memory leaks, and strictly enforced queue limits.
+- **CLI Benchmark and Fault-Injection Commands**: Added `rer test benchmark`, `rer test fault-injection`, and `rer test long-duration` with human-readable formatted tables and machine-readable JSON reports.
+
 ### Added - Milestone RER-F-010 (Multi-instance topology simulation and distributed test correlation)
 - **Multi-Instance Topology Simulation**: Implemented `TestController`, `TopologyConfig`, and `TopologyHarness` coordinating multi-relay chains and topologies in CI across UDP and TCP with deterministic PRNG seeds (SPEC §11, §13).
 - **Per-Hop Distributed Observation & Evidence Correlation**: Collected per-hop ingress, classification, routing, local send success, and downstream delivery observations across traffic generator, intermediate relays, and destination receiver, tagged with unique test run correlation IDs.

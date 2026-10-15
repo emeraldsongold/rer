@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ConnectionMode, ValidationError, ValidationReport};
 use crate::sim::{
-    GeneratorConfig, HarnessConfig, ImpairmentConfig, SimulationHarness, TrafficGenerator,
+    BenchmarkRunner, FaultInjectionRunner, FaultType, GeneratorConfig, HarnessConfig,
+    ImpairmentConfig, LongDurationConfig, LongDurationRunner, SimulationHarness, TrafficGenerator,
     TrafficReceiver,
 };
 
@@ -367,6 +368,53 @@ pub enum TestSubcommand {
     Generate(GenerateArgs),
     /// Run traffic receiver standalone
     Receive(ReceiveArgs),
+    /// Run adversarial fault-injection scenarios outside unprivileged suite
+    FaultInjection(FaultInjectionArgs),
+    /// Run repeatable performance benchmarks and report baselines
+    Benchmark(BenchmarkArgs),
+    /// Run long-duration stability tests reporting memory and queue metrics
+    LongDuration(LongDurationArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct FaultInjectionArgs {
+    /// Specific scenario to run (loss, delay, jitter, reorder, disconnect, slow-reader, saturation, restart, all)
+    #[arg(short, long, default_value = "all")]
+    pub scenario: String,
+
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct BenchmarkArgs {
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct LongDurationArgs {
+    /// Test duration in seconds
+    #[arg(short = 'd', long, default_value = "3")]
+    pub duration: f64,
+
+    /// Packet rate (pps, 0 for unthrottled)
+    #[arg(short = 'r', long, default_value = "1000")]
+    pub rate: f64,
+
+    /// Packet payload size in bytes
+    #[arg(short = 's', long, default_value = "256")]
+    pub size: usize,
+
+    /// Relay queue capacity limit
+    #[arg(short = 'q', long, default_value = "128")]
+    pub queue_capacity: usize,
+
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1121,6 +1169,9 @@ fn execute_test(args: TestArgs) -> ExitCode {
         Some(TestSubcommand::Harness(h_args)) => run_harness_cli(h_args),
         Some(TestSubcommand::Generate(g_args)) => run_generate_cli(g_args),
         Some(TestSubcommand::Receive(r_args)) => run_receive_cli(r_args),
+        Some(TestSubcommand::FaultInjection(f_args)) => run_fault_injection_cli(f_args),
+        Some(TestSubcommand::Benchmark(b_args)) => run_benchmark_cli(b_args),
+        Some(TestSubcommand::LongDuration(l_args)) => run_long_duration_cli(l_args),
         None => {
             let h_args = HarnessArgs {
                 count: args.count,
@@ -1273,6 +1324,173 @@ fn run_receive_cli(args: ReceiveArgs) -> ExitCode {
         }
         Err(err) => {
             eprintln!("Traffic receiver failed: {}", err);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_fault_injection_cli(args: FaultInjectionArgs) -> ExitCode {
+    let mut scenarios = Vec::new();
+    match args.scenario.to_lowercase().as_str() {
+        "all" => scenarios.extend_from_slice(FaultType::all()),
+        "loss" => scenarios.push(FaultType::Loss),
+        "delay" => scenarios.push(FaultType::Delay),
+        "jitter" => scenarios.push(FaultType::Jitter),
+        "reorder" => scenarios.push(FaultType::Reorder),
+        "disconnect" => scenarios.push(FaultType::Disconnect),
+        "slow-reader" | "slow_reader" => scenarios.push(FaultType::SlowReader),
+        "saturation" => scenarios.push(FaultType::Saturation),
+        "restart" => scenarios.push(FaultType::Restart),
+        other => {
+            eprintln!("Unknown fault scenario '{}'. Valid scenarios: loss, delay, jitter, reorder, disconnect, slow-reader, saturation, restart, all", other);
+            return ExitCode::from(1);
+        }
+    }
+
+    let mut results = Vec::new();
+    let mut all_passed = true;
+
+    for &scen in &scenarios {
+        match FaultInjectionRunner::run(scen) {
+            Ok(res) => {
+                if !res.passed {
+                    all_passed = false;
+                }
+                results.push(res);
+            }
+            Err(e) => {
+                eprintln!("Scenario {:?} encountered I/O error: {}", scen, e);
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results).unwrap());
+    } else {
+        println!("\n=== RER Adversarial Fault-Injection Suite Results ===");
+        println!(
+            "{:<14} {:<8} {:<10} {:<10} {:<8} Details",
+            "Scenario", "Status", "Sent", "Recv", "Events"
+        );
+        println!("{}", "-".repeat(84));
+        for r in &results {
+            let status = if r.passed { "PASS" } else { "FAIL" };
+            println!(
+                "{:<14} {:<8} {:<10} {:<10} {:<8} {}",
+                r.scenario.as_str(),
+                status,
+                r.packets_sent,
+                r.packets_received,
+                r.fault_events_count,
+                r.details
+            );
+        }
+        println!(
+            "\nResult: {}/{} scenarios passed.",
+            results.iter().filter(|r| r.passed).count(),
+            results.len()
+        );
+    }
+
+    if all_passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn run_benchmark_cli(args: BenchmarkArgs) -> ExitCode {
+    match BenchmarkRunner::run_all() {
+        Ok(results) => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&results).unwrap());
+            } else {
+                println!("\n=== RER Benchmark Suite (Repeatable Baseline Measurements) ===");
+                println!(
+                    "{:<24} {:<12} {:<12} {:<12} {:<12} {:<10}",
+                    "Benchmark", "Packets/s", "MB/s", "p50 (µs)", "p99 (µs)", "RSS (MB)"
+                );
+                println!("{}", "-".repeat(84));
+                for r in &results {
+                    println!(
+                        "{:<24} {:<12.1} {:<12.2} {:<12.1} {:<12.1} {:<10.2}",
+                        r.benchmark_id,
+                        r.throughput_pps,
+                        r.throughput_mbps,
+                        r.p50_latency_us,
+                        r.p99_latency_us,
+                        r.rss_memory_mb
+                    );
+                }
+                if let Some(first) = results.first() {
+                    println!("\nEnvironment: {}", first.environment.label);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Benchmark suite failed: {}", e);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_long_duration_cli(args: LongDurationArgs) -> ExitCode {
+    let config = LongDurationConfig {
+        duration: Duration::from_secs_f64(args.duration),
+        packet_rate: args.rate,
+        packet_size: args.size,
+        queue_capacity: args.queue_capacity,
+        sample_interval: Duration::from_millis(200),
+        seed: 1337,
+    };
+
+    match LongDurationRunner::run(config) {
+        Ok(report) => {
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("\n=== RER Long-Duration Stability Report ===");
+                println!(
+                    "Duration:           {:.2}s",
+                    report.duration_ms as f64 / 1000.0
+                );
+                println!("Packets Sent:       {}", report.total_packets_sent);
+                println!("Packets Received:   {}", report.total_packets_received);
+                println!("Throughput:         {:.1} pps", report.throughput_pps);
+                println!(
+                    "Memory RSS Initial: {:.2} MB",
+                    report.memory.initial_rss_bytes as f64 / (1024.0 * 1024.0)
+                );
+                println!(
+                    "Memory RSS Peak:    {:.2} MB",
+                    report.memory.peak_rss_bytes as f64 / (1024.0 * 1024.0)
+                );
+                println!(
+                    "Memory RSS Final:   {:.2} MB",
+                    report.memory.final_rss_bytes as f64 / (1024.0 * 1024.0)
+                );
+                println!("Memory Stable:      {}", report.memory.stable);
+                println!("Queue Capacity:     {}", report.queue.queue_capacity);
+                println!("Queue Max Depth:    {}", report.queue.max_observed_depth);
+                println!("Queue Final Depth:  {}", report.queue.final_queue_depth);
+                println!("Queue Full Drops:   {}", report.queue.drops_queue_full);
+                println!("Queue Strictly Bounded: {}", report.queue.strictly_bounded);
+                println!("Queue Stable:       {}", report.queue.stable);
+                println!(
+                    "Overall Stability:  {}",
+                    if report.pass { "PASSED" } else { "FAILED" }
+                );
+            }
+            if report.pass {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("Long duration test failed: {}", e);
             ExitCode::from(1)
         }
     }

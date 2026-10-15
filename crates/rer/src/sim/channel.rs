@@ -169,6 +169,9 @@ impl SimulatedChannel {
                     if e.kind() == io::ErrorKind::WouldBlock
                         || e.kind() == io::ErrorKind::TimedOut =>
                 {
+                    if let Some(held) = held_buf.take() {
+                        let _ = sender.send_to(&held, forward_addr);
+                    }
                     continue;
                 }
                 Err(e) => return Err(e),

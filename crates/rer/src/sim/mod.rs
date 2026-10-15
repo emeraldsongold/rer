@@ -3,22 +3,35 @@
 //! Provides deterministic traffic generation with unique packet IDs and sequence numbers,
 //! configurable payload size, rate, burst, duration and seed; test receiver verifying expected
 //! counts and SHA-256 payload hashes and reporting loss, duplication, and reordering as JSON;
-//! and an unprivileged simulation harness suitable for ordinary CI.
+//! repeatable benchmark definitions with recorded baselines labelled by environment;
+//! fault-injection scenarios running outside the unprivileged suite; and long-duration stability runs.
 
+pub mod benchmarks;
 pub mod channel;
+pub mod fault;
 pub mod generator;
 pub mod harness;
 pub mod packet;
 pub mod receiver;
 pub mod sha256;
+pub mod stability;
 pub mod topology;
 
+pub use benchmarks::{
+    default_benchmark_suite, BaselineComparison, BenchmarkDefinition, BenchmarkResult,
+    BenchmarkRunner, EnvironmentInfo,
+};
 pub use channel::{ImpairmentConfig, SimulatedChannel};
+pub use fault::{FaultInjectionRunner, FaultScenarioResult, FaultType};
 pub use generator::{GeneratorConfig, GeneratorStats, SplitMix64, TrafficGenerator};
 pub use harness::{HarnessConfig, SimulationHarness};
 pub use packet::{Packet, PacketError};
 pub use receiver::{ReceiverReport, ReorderedPacket, TrafficReceiver};
 pub use sha256::{sha256_bytes, sha256_hex};
+pub use stability::{
+    current_rss_bytes, LongDurationConfig, LongDurationReport, LongDurationRunner,
+    MemoryStabilityReport, QueueStabilityReport, StabilitySample,
+};
 pub use topology::{
     correlate_topology_hops, CorrelationSummary, DivergencePoint, DivergenceType, HopObservation,
     HopType, RelayHopConfig, TestController, TestOutcome, TopologyConfig, TopologyHarness,
