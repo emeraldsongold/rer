@@ -12,7 +12,9 @@ use crate::config::{
     Config, ConnectionMode, DropPolicy, EndpointConfig, InstanceConfig, OperationalMode,
     StreamConfig, TransportType,
 };
-use crate::diagnostics::{DiagnosticBuffer, DiagnosticEvent, DiagnosticStage};
+use crate::diagnostics::{
+    DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, SequenceState, SequenceTracker,
+};
 use crate::framing;
 
 /// Default maximum queue size (packets) when not explicitly configured.
@@ -680,6 +682,7 @@ pub struct StreamRunner {
     pub event_buffer: DiagnosticBuffer,
     pub mode: OperationalMode,
     pub source_transport: TransportType,
+    pub sequence_tracker: Arc<Mutex<SequenceTracker>>,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -783,6 +786,12 @@ impl StreamRunner {
         let condvar = Arc::new(Condvar::new());
         let receiver_done = Arc::new(AtomicBool::new(false));
 
+        let seq_tracker = Arc::new(Mutex::new(SequenceTracker::new(
+            &stream_id,
+            stream.sequence.as_ref(),
+            stream.inspection.as_ref(),
+        )));
+
         let mut runner_threads = Vec::new();
 
         // -------------------------------------------------------------------
@@ -803,6 +812,7 @@ impl StreamRunner {
                 let recv_done_flag = Arc::clone(&receiver_done);
                 let recv_event_buffer = event_buffer.clone();
                 let recv_primary_dest = primary_dest.clone();
+                let recv_seq_tracker = Arc::clone(&seq_tracker);
 
                 let recv_handle = thread::spawn(move || {
                     let mut buf = vec![0u8; 65536];
@@ -816,9 +826,36 @@ impl StreamRunner {
                                     .fetch_add(n as u64, Ordering::Relaxed);
 
                                 let src_endpoint = src_addr.to_string();
+                                let payload_slice = &buf[..n];
+
+                                let (extracted_seq, hex_prev, ascii_prev) = {
+                                    let mut tracker = recv_seq_tracker.lock().unwrap();
+                                    if tracker.is_enabled() {
+                                        let _ = tracker.process_packet(payload_slice);
+                                        let seq = tracker.extract_sequence(payload_slice);
+                                        let (hex, ascii) = tracker.format_previews(payload_slice);
+                                        (seq, hex, ascii)
+                                    } else {
+                                        let (hex, ascii) = tracker.format_previews(payload_slice);
+                                        (None, hex, ascii)
+                                    }
+                                };
+
+                                let attach_diag = |mut ev: DiagnosticEvent| -> DiagnosticEvent {
+                                    if let Some(s) = extracted_seq {
+                                        ev = ev.with_sequence_number(s);
+                                    }
+                                    if let Some(ref h) = hex_prev {
+                                        ev = ev.with_hex_preview(h);
+                                    }
+                                    if let Some(ref a) = ascii_prev {
+                                        ev = ev.with_ascii_preview(a);
+                                    }
+                                    ev
+                                };
 
                                 if emit_packet_events {
-                                    recv_event_buffer.emit(
+                                    recv_event_buffer.emit(attach_diag(
                                         DiagnosticEvent::new(
                                             recv_event_buffer.clock().monotonic_nanos(),
                                             recv_event_buffer.clock().wall_clock_nanos(),
@@ -829,7 +866,7 @@ impl StreamRunner {
                                         )
                                         .with_source(&src_endpoint)
                                         .with_destination(&recv_primary_dest),
-                                    );
+                                    ));
                                 }
 
                                 if n > max_packet_size {
@@ -861,7 +898,7 @@ impl StreamRunner {
                                 }
 
                                 if emit_packet_events {
-                                    recv_event_buffer.emit(
+                                    recv_event_buffer.emit(attach_diag(
                                         DiagnosticEvent::new(
                                             recv_event_buffer.clock().monotonic_nanos(),
                                             recv_event_buffer.clock().wall_clock_nanos(),
@@ -872,7 +909,7 @@ impl StreamRunner {
                                         )
                                         .with_source(&src_endpoint)
                                         .with_destination(&recv_primary_dest),
-                                    );
+                                    ));
                                 }
 
                                 let datagram = Datagram {
@@ -1012,6 +1049,8 @@ impl StreamRunner {
                 let recv_event_buffer = event_buffer.clone();
                 let recv_primary_dest = primary_dest.clone();
 
+                let recv_seq_tracker = Arc::clone(&seq_tracker);
+
                 match mode_con {
                     ConnectionMode::Listen => {
                         let bind_addr = resolve_endpoint_with_context(
@@ -1038,6 +1077,7 @@ impl StreamRunner {
                                         let cl_event_buffer = recv_event_buffer.clone();
                                         let cl_stream_id = recv_stream_id.clone();
                                         let cl_primary_dest = recv_primary_dest.clone();
+                                        let cl_seq_tracker = Arc::clone(&recv_seq_tracker);
 
                                         let client_h = thread::spawn(move || {
                                             let src_endpoint = client_addr.to_string();
@@ -1056,8 +1096,39 @@ impl StreamRunner {
                                                             .received_bytes
                                                             .fetch_add(n as u64, Ordering::Relaxed);
 
+                                                        let (extracted_seq, hex_prev, ascii_prev) = {
+                                                            let mut tracker =
+                                                                cl_seq_tracker.lock().unwrap();
+                                                            if tracker.is_enabled() {
+                                                                let _ = tracker
+                                                                    .process_packet(&payload);
+                                                                let seq = tracker
+                                                                    .extract_sequence(&payload);
+                                                                let (hex, ascii) = tracker
+                                                                    .format_previews(&payload);
+                                                                (seq, hex, ascii)
+                                                            } else {
+                                                                let (hex, ascii) = tracker
+                                                                    .format_previews(&payload);
+                                                                (None, hex, ascii)
+                                                            }
+                                                        };
+
+                                                        let attach_diag = |mut ev: DiagnosticEvent| -> DiagnosticEvent {
+                                                            if let Some(s) = extracted_seq {
+                                                                ev = ev.with_sequence_number(s);
+                                                            }
+                                                            if let Some(ref h) = hex_prev {
+                                                                ev = ev.with_hex_preview(h);
+                                                            }
+                                                            if let Some(ref a) = ascii_prev {
+                                                                ev = ev.with_ascii_preview(a);
+                                                            }
+                                                            ev
+                                                        };
+
                                                         if emit_packet_events {
-                                                            cl_event_buffer.emit(
+                                                            cl_event_buffer.emit(attach_diag(
                                                                 DiagnosticEvent::new(
                                                                     cl_event_buffer
                                                                         .clock()
@@ -1072,8 +1143,8 @@ impl StreamRunner {
                                                                 )
                                                                 .with_source(&src_endpoint)
                                                                 .with_destination(&cl_primary_dest),
-                                                            );
-                                                            cl_event_buffer.emit(
+                                                            ));
+                                                            cl_event_buffer.emit(attach_diag(
                                                                 DiagnosticEvent::new(
                                                                     cl_event_buffer
                                                                         .clock()
@@ -1088,7 +1159,7 @@ impl StreamRunner {
                                                                 )
                                                                 .with_source(&src_endpoint)
                                                                 .with_destination(&cl_primary_dest),
-                                                            );
+                                                            ));
                                                         }
 
                                                         let datagram = Datagram {
@@ -1327,6 +1398,7 @@ impl StreamRunner {
                         }
                         let target_addr_str = stream.source.address.clone();
                         let target_source_path = source_path.clone();
+                        let conn_seq_tracker = Arc::clone(&recv_seq_tracker);
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
@@ -1384,8 +1456,39 @@ impl StreamRunner {
                                                         .received_bytes
                                                         .fetch_add(n as u64, Ordering::Relaxed);
 
+                                                    let (extracted_seq, hex_prev, ascii_prev) = {
+                                                        let mut tracker =
+                                                            conn_seq_tracker.lock().unwrap();
+                                                        if tracker.is_enabled() {
+                                                            let _ =
+                                                                tracker.process_packet(&payload);
+                                                            let seq =
+                                                                tracker.extract_sequence(&payload);
+                                                            let (hex, ascii) =
+                                                                tracker.format_previews(&payload);
+                                                            (seq, hex, ascii)
+                                                        } else {
+                                                            let (hex, ascii) =
+                                                                tracker.format_previews(&payload);
+                                                            (None, hex, ascii)
+                                                        }
+                                                    };
+
+                                                    let attach_diag = |mut ev: DiagnosticEvent| -> DiagnosticEvent {
+                                                        if let Some(s) = extracted_seq {
+                                                            ev = ev.with_sequence_number(s);
+                                                        }
+                                                        if let Some(ref h) = hex_prev {
+                                                            ev = ev.with_hex_preview(h);
+                                                        }
+                                                        if let Some(ref a) = ascii_prev {
+                                                            ev = ev.with_ascii_preview(a);
+                                                        }
+                                                        ev
+                                                    };
+
                                                     if emit_packet_events {
-                                                        recv_event_buffer.emit(
+                                                        recv_event_buffer.emit(attach_diag(
                                                             DiagnosticEvent::new(
                                                                 recv_event_buffer
                                                                     .clock()
@@ -1400,8 +1503,8 @@ impl StreamRunner {
                                                             )
                                                             .with_source(&src_endpoint)
                                                             .with_destination(&recv_primary_dest),
-                                                        );
-                                                        recv_event_buffer.emit(
+                                                        ));
+                                                        recv_event_buffer.emit(attach_diag(
                                                             DiagnosticEvent::new(
                                                                 recv_event_buffer
                                                                     .clock()
@@ -1416,7 +1519,7 @@ impl StreamRunner {
                                                             )
                                                             .with_source(&src_endpoint)
                                                             .with_destination(&recv_primary_dest),
-                                                        );
+                                                        ));
                                                     }
 
                                                     let datagram = Datagram {
@@ -1911,6 +2014,7 @@ impl StreamRunner {
             event_buffer,
             mode,
             source_transport,
+            sequence_tracker: seq_tracker,
             is_active,
             shutdown_flag,
             threads: runner_threads,
@@ -2016,6 +2120,7 @@ pub struct RelayHealthHandle {
 struct StreamRunnerHandle {
     stream_id: String,
     stats: Arc<StreamStats>,
+    sequence_tracker: Arc<Mutex<SequenceTracker>>,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
 }
@@ -2025,6 +2130,15 @@ impl RelayHealthHandle {
     #[must_use]
     pub fn event_buffer(&self) -> &DiagnosticBuffer {
         &self.event_buffer
+    }
+
+    /// Returns current sequence tracking snapshots for all streams (SPEC §8).
+    #[must_use]
+    pub fn sequence_states(&self) -> Vec<SequenceState> {
+        self.stream_runners
+            .iter()
+            .map(|r| r.sequence_tracker.lock().unwrap().snapshot())
+            .collect()
     }
 
     /// Returns true if the relay is running and all stream runners are healthy.
@@ -2243,6 +2357,7 @@ impl Relay {
             .map(|r| StreamRunnerHandle {
                 stream_id: r.stream_id.clone(),
                 stats: Arc::clone(&r.stats),
+                sequence_tracker: Arc::clone(&r.sequence_tracker),
                 is_active: Arc::clone(&r.is_active),
                 shutdown_flag: Arc::clone(&r.shutdown_flag),
             })

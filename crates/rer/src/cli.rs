@@ -83,19 +83,43 @@ pub struct ValidateArgs {
     pub effective: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct InspectArgs {
     /// Path to YAML configuration file
     #[arg(value_name = "FILE")]
     pub file: Option<PathBuf>,
 
-    /// Path to YAML configuration file
+    /// Path to YAML configuration file (alternative flag)
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Output format: yaml or json
-    #[arg(short, long, value_enum, default_value_t = InspectFormat::Yaml)]
-    pub format: InspectFormat,
+    /// Path to Unix domain socket for querying running instance
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+
+    /// Remote management endpoint for querying running instance (e.g. 127.0.0.1:9090)
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// Authentication token for management probe
+    #[arg(long)]
+    pub auth_token: Option<String>,
+
+    /// Timeout in seconds to wait for response
+    #[arg(long, default_value = "2.0")]
+    pub timeout: f64,
+
+    /// Output format: yaml, text, or json
+    #[arg(short, long, value_enum)]
+    pub format: Option<InspectFormat>,
+
+    /// Machine-readable JSON output (convenience alias for --format json)
+    #[arg(long)]
+    pub json: bool,
+
+    /// Output effective configuration (with secrets redacted)
+    #[arg(long)]
+    pub effective: bool,
 }
 
 #[derive(Args, Debug)]
@@ -286,6 +310,7 @@ pub enum OutputFormat {
 pub enum InspectFormat {
     Yaml,
     Json,
+    Text,
 }
 
 #[derive(Args, Debug)]
@@ -591,59 +616,193 @@ fn execute_validate(args: ValidateArgs) -> ExitCode {
     }
 }
 
-fn execute_inspect(args: InspectArgs) -> ExitCode {
-    let target_path = match args.file.or(args.config) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "Error: missing configuration file argument; provide a path or use --config <FILE>"
+fn print_inspect_report_text(report: &crate::management::InspectReport) {
+    println!("Per-Stream Sequence Tracking and Inspection:");
+    println!("============================================");
+    if report.streams.is_empty() {
+        println!("No streams configured.");
+        return;
+    }
+    for s in &report.streams {
+        println!("Stream '{}':", s.stream_id);
+        if s.enabled {
+            println!("  Sequence tracking: enabled");
+            let off = s.offset.unwrap_or(0);
+            let w = s.width.unwrap_or(4);
+            let bo = s
+                .byte_order
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "big_endian".to_string());
+            println!(
+                "  Extraction: offset={}, width={} bytes, byte_order={}",
+                off, w, bo
             );
-            return ExitCode::from(1);
+            if let Some(thresh) = s.rollover_threshold {
+                println!("  Rollover threshold: {}", thresh);
+            }
+            println!("  Packets evaluated: {}", s.packets_evaluated);
+            match s.last_sequence {
+                Some(seq) => println!("  Last sequence: {}", seq),
+                None => println!("  Last sequence: none"),
+            }
+            match s.highest_sequence {
+                Some(seq) => println!("  Highest sequence: {}", seq),
+                None => println!("  Highest sequence: none"),
+            }
+            println!("  Gaps detected: {}", s.gap_count);
+            println!("  Duplicates detected: {}", s.duplicate_count);
+            println!("  Out-of-order packets: {}", s.out_of_order_count);
+            println!("  Rollovers detected: {}", s.rollover_count);
+        } else {
+            println!("  Sequence tracking: disabled (off by default)");
         }
-    };
+        let hex_str = if s.hex_preview_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let ascii_str = if s.ascii_preview_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        println!(
+            "  Payload previews: hex={}, ascii={} (max {} bytes)",
+            hex_str, ascii_str, s.max_preview_bytes
+        );
+    }
+}
 
-    let content = match fs::read_to_string(&target_path) {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("Error reading '{}': {}", target_path.display(), err);
-            return ExitCode::from(1);
-        }
-    };
+fn execute_inspect(args: InspectArgs) -> ExitCode {
+    let is_json = args.json || args.format == Some(InspectFormat::Json);
 
-    let config = match Config::from_yaml_str(&content) {
-        Ok(cfg) => cfg,
-        Err(errs) => {
-            eprintln!("Cannot inspect invalid configuration (parse failed):");
-            for err in errs {
-                eprintln!("  - {}", err);
+    // If a configuration file is explicitly provided
+    if let Some(target_path) = args.file.as_ref().or(args.config.as_ref()) {
+        let content = match fs::read_to_string(target_path) {
+            Ok(c) => c,
+            Err(err) => {
+                if is_json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "error": format!("Error reading '{}': {}", target_path.display(), err)
+                        })
+                    );
+                } else {
+                    eprintln!("Error reading '{}': {}", target_path.display(), err);
+                }
+                return ExitCode::from(1);
+            }
+        };
+
+        let config = match Config::from_yaml_str(&content) {
+            Ok(cfg) => cfg,
+            Err(errs) => {
+                if is_json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "error": "Cannot inspect invalid configuration (parse failed)",
+                            "details": errs.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+                        })
+                    );
+                } else {
+                    eprintln!("Cannot inspect invalid configuration (parse failed):");
+                    for err in errs {
+                        eprintln!("  - {}", err);
+                    }
+                }
+                return ExitCode::from(1);
+            }
+        };
+
+        let semantic_errors = config.validate();
+        if !semantic_errors.is_empty() {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": "Cannot inspect invalid configuration (validation failed)",
+                        "details": semantic_errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+                    })
+                );
+            } else {
+                eprintln!("Cannot inspect invalid configuration (validation failed):");
+                for err in semantic_errors {
+                    eprintln!("  - {}", err);
+                }
             }
             return ExitCode::from(1);
         }
-    };
 
-    let semantic_errors = config.validate();
-    if !semantic_errors.is_empty() {
-        eprintln!("Cannot inspect invalid configuration (validation failed):");
-        for err in semantic_errors {
-            eprintln!("  - {}", err);
-        }
-        return ExitCode::from(1);
-    }
-
-    let effective = config.to_effective();
-    match args.format {
-        InspectFormat::Yaml => {
+        // If user explicitly asks for effective YAML config or default without text/json format
+        if args.effective
+            || args.format == Some(InspectFormat::Yaml)
+            || (args.format.is_none() && !args.json)
+        {
+            let effective = config.to_effective();
             println!("{}", effective.to_effective_yaml().unwrap());
+            return ExitCode::SUCCESS;
         }
-        InspectFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&effective.to_effective_json().unwrap()).unwrap()
-            );
+
+        // Otherwise generate per-stream sequence and inspection report
+        let mut states = Vec::new();
+        for inst in config.all_instances() {
+            for stream in &inst.streams {
+                let tracker = crate::diagnostics::SequenceTracker::new(
+                    &stream.id,
+                    stream.sequence.as_ref(),
+                    stream.inspection.as_ref(),
+                );
+                states.push(tracker.snapshot());
+            }
         }
+        let report = crate::management::InspectReport { streams: states };
+
+        if is_json {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        } else {
+            print_inspect_report_text(&report);
+        }
+        return ExitCode::SUCCESS;
     }
 
-    ExitCode::SUCCESS
+    // Query running instance via management socket or endpoint
+    let target = args.endpoint.unwrap_or_else(|| {
+        args.socket
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| std::env::var("RER_MGMT_SOCKET").ok())
+            .unwrap_or_else(|| "/tmp/relay_health.sock".to_string())
+    });
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+
+    match crate::management::query_inspect(&target, timeout, args.auth_token.as_deref()) {
+        Ok(report) => {
+            if is_json {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            } else {
+                print_inspect_report_text(&report);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": format!("cannot connect to management endpoint at '{}': {}", crate::relay::format_endpoint(&target), err)
+                    })
+                );
+            } else {
+                eprintln!(
+                    "Error querying management endpoint at '{}': {}",
+                    crate::relay::format_endpoint(&target),
+                    err
+                );
+            }
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn execute_run(args: RunArgs) -> ExitCode {

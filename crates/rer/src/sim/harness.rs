@@ -40,6 +40,15 @@ pub struct HarnessConfig {
     /// Forwarding destination transport protocol (default: UDP)
     #[serde(default = "default_transport_udp")]
     pub destination_transport: TransportType,
+    /// Optional sequence extraction configuration for the relay stream (SPEC §8)
+    #[serde(default)]
+    pub sequence: Option<crate::config::SequenceConfig>,
+    /// Optional packet inspection configuration for the relay stream (SPEC §8)
+    #[serde(default)]
+    pub inspection: Option<crate::config::InspectionConfig>,
+    /// Optional sequence rollover threshold
+    #[serde(default)]
+    pub rollover_threshold: Option<u64>,
 }
 
 fn default_transport_udp() -> TransportType {
@@ -61,6 +70,9 @@ impl Default for HarnessConfig {
             relay_drop_policy: None,
             source_transport: TransportType::Udp,
             destination_transport: TransportType::Udp,
+            sequence: None,
+            inspection: None,
+            rollover_threshold: None,
         }
     }
 }
@@ -80,6 +92,12 @@ impl SimulationHarness {
         let mut receiver = TrafficReceiver::new(expected_count, expected_stream_hash);
         if let Some(ref tid) = config.test_id {
             receiver.set_test_id(tid.clone());
+        }
+        if let Some(ref seq_cfg) = config.sequence {
+            receiver.set_sequence_config(seq_cfg.clone());
+        }
+        if let Some(thresh) = config.rollover_threshold {
+            receiver.set_rollover_threshold(thresh);
         }
 
         let receiver_port: u16;
@@ -181,6 +199,31 @@ impl SimulationHarness {
                 String::new()
             };
 
+            let sequence_yaml = if let Some(ref seq) = config.sequence {
+                let off = seq.offset;
+                let w = seq.width;
+                let bo = seq.byte_order.to_string();
+                let thresh_str = seq
+                    .rollover_threshold
+                    .map(|t| format!("          rollover_threshold: {}\n", t))
+                    .unwrap_or_default();
+                format!(
+                    "        sequence:\n          enabled: {}\n          offset: {}\n          width: {}\n          byte_order: \"{}\"\n{}",
+                    seq.enabled, off, w, bo, thresh_str
+                )
+            } else {
+                String::new()
+            };
+
+            let inspection_yaml = if let Some(ref insp) = config.inspection {
+                format!(
+                    "        inspection:\n          hex_preview: {}\n          ascii_preview: {}\n          max_preview_bytes: {}\n",
+                    insp.hex_preview, insp.ascii_preview, insp.max_preview_bytes
+                )
+            } else {
+                String::new()
+            };
+
             let yaml = format!(
                 r#"
 version: "1"
@@ -194,7 +237,7 @@ instances:
         destination:
           transport: "{dest_transport_name}"
           address: "{final_receiver_dest}"
-{buffer_yaml}
+{buffer_yaml}{sequence_yaml}{inspection_yaml}
 "#
             );
 

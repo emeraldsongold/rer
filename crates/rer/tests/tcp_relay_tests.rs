@@ -38,6 +38,7 @@ fn test_harness_integration_udp_to_udp() {
         relay_drop_policy: Some(DropPolicy::DropOldest),
         source_transport: TransportType::Udp,
         destination_transport: TransportType::Udp,
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("run harness udp-to-udp");
@@ -68,6 +69,7 @@ fn test_harness_integration_udp_to_tcp() {
         relay_drop_policy: Some(DropPolicy::DropOldest),
         source_transport: TransportType::Udp,
         destination_transport: TransportType::Tcp,
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("run harness udp-to-tcp");
@@ -98,6 +100,7 @@ fn test_harness_integration_tcp_to_udp() {
         relay_drop_policy: Some(DropPolicy::DropOldest),
         source_transport: TransportType::Tcp,
         destination_transport: TransportType::Udp,
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("run harness tcp-to-udp");
@@ -128,6 +131,7 @@ fn test_harness_integration_tcp_to_tcp() {
         relay_drop_policy: Some(DropPolicy::DropOldest),
         source_transport: TransportType::Tcp,
         destination_transport: TransportType::Tcp,
+        ..Default::default()
     };
 
     let report = SimulationHarness::run(harness_config).expect("run harness tcp-to-tcp");
