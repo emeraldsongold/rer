@@ -7,8 +7,11 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use rer::config::Config;
-use rer::management::{query_status, ManagementResponse, ManagementServer, MGMT_API_VERSION};
+use rer::config::{Config, OperationalMode};
+use rer::management::{
+    query_events, query_status, ManagementRequest, ManagementResponse, ManagementServer,
+    OperationType, MGMT_API_VERSION,
+};
 use rer::relay::Relay;
 use rer::sim::{GeneratorConfig, Packet, TrafficGenerator, TrafficReceiver};
 
@@ -550,4 +553,299 @@ instances:
             .any(|e| e.reason.contains("requires encryption")),
         "Validator must reject remote management without TLS"
     );
+}
+
+// ============================================================================
+// 5. RER-F-028: Read-only events management operation and authorization
+// ============================================================================
+
+#[test]
+fn test_management_events_classification_and_authorization() {
+    // 1. Classification as read-only
+    let req_events = ManagementRequest {
+        version: MGMT_API_VERSION.to_string(),
+        action: "events".to_string(),
+        auth_token: None,
+        role: None,
+        params: None,
+    };
+    assert_eq!(
+        req_events.operation_type(),
+        Some(OperationType::ReadOnly),
+        "'events' operation must be classified as ReadOnly"
+    );
+
+    let req_recent_events = ManagementRequest {
+        version: MGMT_API_VERSION.to_string(),
+        action: "recent_events".to_string(),
+        auth_token: None,
+        role: None,
+        params: None,
+    };
+    assert_eq!(
+        req_recent_events.operation_type(),
+        Some(OperationType::ReadOnly),
+        "'recent_events' operation must be classified as ReadOnly"
+    );
+
+    // 2. Readonly role caller is allowed
+    let port = pick_unused_port();
+    let sock_path = std::env::temp_dir().join(format!("rer_mgmt_events_auth_{}.sock", port));
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "mgmt-auth-node"
+  mode: "test"
+  test_mode:
+    correlation_id: "test-auth-corr"
+    duration_seconds: 60
+  management:
+    enabled: true
+    endpoint: "{}"
+  streams:
+    - id: "s1"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:4801"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:4802"
+"#,
+        sock_path.display()
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("parse config");
+    let relay = Relay::start(&config).expect("start relay");
+    let mgmt_server = ManagementServer::start_local(&sock_path, relay.health_handle(), None)
+        .expect("start mgmt server");
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Caller with role="readonly" can execute read-only events op
+    let mut stream = UnixStream::connect(&sock_path).expect("connect");
+    let req = serde_json::json!({
+        "version": MGMT_API_VERSION,
+        "action": "events",
+        "role": "readonly"
+    });
+    writeln!(stream, "{req}").expect("write");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read");
+    let resp: ManagementResponse = serde_json::from_str(&line).expect("parse response");
+    assert_eq!(
+        resp.status, "ok",
+        "ReadOnly role must be permitted to call 'events' action"
+    );
+
+    mgmt_server.stop();
+    relay.stop();
+    let _ = fs::remove_file(&sock_path);
+}
+
+#[test]
+fn test_management_events_unauthorized_caller_refused() {
+    let port = pick_unused_port();
+    let remote_addr = format!("127.0.0.1:{port}");
+    let cert_file = std::env::temp_dir().join(format!("unauth_cert_{}.crt", port));
+    let key_file = std::env::temp_dir().join(format!("unauth_key_{}.key", port));
+    fs::write(&cert_file, "DUMMY_TLS_CERT").expect("write cert");
+    fs::write(&key_file, "DUMMY_TLS_KEY").expect("write key");
+
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "remote-unauth-events-node"
+  mode: "test"
+  test_mode:
+    correlation_id: "corr-unauth"
+  management:
+    enabled: true
+    endpoint: "{remote_addr}"
+    auth_token: "secret-token-123"
+    tls:
+      cert_file: "{}"
+      key_file: "{}"
+  streams:
+    - id: "s1"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:4811"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:4812"
+"#,
+        cert_file.display(),
+        key_file.display()
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("parse config");
+    let relay = Relay::start(&config).expect("start relay");
+    let fallback_sock = std::env::temp_dir().join(format!("fallback_unauth_{}.sock", port));
+    let mgmt_server =
+        ManagementServer::start_from_config(&config, relay.health_handle(), &fallback_sock)
+            .expect("start mgmt server");
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Remote caller without auth_token must be refused
+    let mut tcp = TcpStream::connect(&remote_addr).expect("connect remote TCP");
+    let unauth_req = serde_json::json!({
+        "version": MGMT_API_VERSION,
+        "action": "events"
+    });
+    writeln!(tcp, "{unauth_req}").expect("write");
+    let mut reader = BufReader::new(tcp);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read");
+    let resp: ManagementResponse = serde_json::from_str(&line).expect("parse response");
+    assert_eq!(
+        resp.status, "error",
+        "Unauthorized remote caller to 'events' must be refused"
+    );
+    assert_eq!(resp.error.unwrap().code, "unauthorized");
+
+    // Remote caller with wrong token must be refused
+    let mut tcp = TcpStream::connect(&remote_addr).expect("connect remote TCP");
+    let wrong_req = serde_json::json!({
+        "version": MGMT_API_VERSION,
+        "action": "recent_events",
+        "auth_token": "wrong-token"
+    });
+    writeln!(tcp, "{wrong_req}").expect("write");
+    let mut reader = BufReader::new(tcp);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read");
+    let resp: ManagementResponse = serde_json::from_str(&line).expect("parse response");
+    assert_eq!(
+        resp.status, "error",
+        "Remote caller with wrong token to 'recent_events' must be refused"
+    );
+    assert_eq!(resp.error.unwrap().code, "unauthorized");
+
+    // Remote caller with valid auth token must succeed
+    let mut tcp = TcpStream::connect(&remote_addr).expect("connect remote TCP");
+    let auth_req = serde_json::json!({
+        "version": MGMT_API_VERSION,
+        "action": "events",
+        "auth_token": "secret-token-123"
+    });
+    writeln!(tcp, "{auth_req}").expect("write");
+    let mut reader = BufReader::new(tcp);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read");
+    let resp: ManagementResponse = serde_json::from_str(&line).expect("parse response");
+    assert_eq!(
+        resp.status, "ok",
+        "Authorized remote caller to 'events' must succeed"
+    );
+
+    mgmt_server.stop();
+    relay.stop();
+    let _ = fs::remove_file(&cert_file);
+    let _ = fs::remove_file(&key_file);
+    let _ = fs::remove_file(&fallback_sock);
+}
+
+#[test]
+fn test_management_events_endpoint_returns_recent_events_mode_expiry_and_drops() {
+    let src_port = pick_unused_port();
+    let dst_port = pick_unused_port();
+    let mgmt_port = pick_unused_port();
+    let sock_path = std::env::temp_dir().join(format!("rer_mgmt_events_data_{}.sock", mgmt_port));
+
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "mgmt-data-node"
+  mode: "test"
+  test_mode:
+    correlation_id: "corr-mgmt-data"
+    duration_seconds: 180
+    prior_mode: "production"
+  management:
+    enabled: true
+    endpoint: "{}"
+  streams:
+    - id: "s-mgmt-test"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:{src_port}"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:{dst_port}"
+"#,
+        sock_path.display()
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("parse config");
+    let relay = Relay::start(&config).expect("start relay");
+    let mgmt_server = ManagementServer::start_local(&sock_path, relay.health_handle(), None)
+        .expect("start mgmt server");
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Send a packet through data plane to generate events
+    let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind client");
+    let dst_sock = std::net::UdpSocket::bind(format!("127.0.0.1:{dst_port}")).expect("bind dst");
+    dst_sock
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("timeout");
+
+    client
+        .send_to(b"test-mgmt-event-packet", format!("127.0.0.1:{src_port}"))
+        .expect("send");
+    let mut buf = [0u8; 128];
+    let (n, _) = dst_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], b"test-mgmt-event-packet");
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Query events via client helper function
+    let rep = query_events(
+        &sock_path.to_string_lossy(),
+        Duration::from_secs(2),
+        None,
+        None,
+    )
+    .expect("query_events");
+
+    assert_eq!(rep.mode, OperationalMode::Test);
+    assert_eq!(rep.expiry, Some(180));
+    assert_eq!(rep.dropped_count, 0);
+    assert!(!rep.events.is_empty(), "Should return recorded events");
+
+    // Verify ordering: newest is last
+    if rep.events.len() >= 2 {
+        for w in rep.events.windows(2) {
+            assert!(
+                w[0].monotonic_timestamp <= w[1].monotonic_timestamp,
+                "Events must be ordered newest last (arrival order)"
+            );
+        }
+    }
+
+    // Verify correlation ID on events
+    for ev in &rep.events {
+        assert_eq!(ev.correlation_id.as_deref(), Some("corr-mgmt-data"));
+    }
+
+    // Test with bounded limit
+    let rep_limited = query_events(
+        &sock_path.to_string_lossy(),
+        Duration::from_secs(2),
+        None,
+        Some(2),
+    )
+    .expect("query_events with limit");
+    assert_eq!(rep_limited.events.len(), 2, "Must respect limit parameter");
+    // Newest last check on limited result
+    assert!(rep_limited.events[0].monotonic_timestamp <= rep_limited.events[1].monotonic_timestamp);
+
+    mgmt_server.stop();
+    relay.stop();
+    let _ = fs::remove_file(&sock_path);
 }

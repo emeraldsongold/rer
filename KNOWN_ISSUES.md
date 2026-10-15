@@ -10,7 +10,12 @@ RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone 
 - **Distributed Multi-Hop Simulation & Correlation (`RER-F-010`)**:
   End-to-end multi-hop topology testing and distributed evidence correlation across multiple relay instances are scheduled in milestone RER-F-010. The initial traffic generator and single-relay simulation harness (`RER-F-004`) are functional (`rer test`).
 - **Diagnostic Logging & Inspection (`RER-F-008`, `RER-F-009`)**:
-  Forwarding path packet diagnostics across lifecycle stages (received, accepted, routed-or-queued, send-attempted, and send-succeeded) in debug mode, quiet production mode, and failure/drop/health events are implemented (RER-F-027). Sequence gap detection and hex preview facilities are scheduled in roadmap milestone RER-F-009.
+  All three operational diagnostic modes—production, debug, and test mode—are implemented (RER-F-026, RER-F-027, RER-F-028):
+  - **Production mode**: Quiet by default; no per-packet forwarding log output; maintains a bounded recent-event buffer; records significant failures, queue drops, and health transitions.
+  - **Debug mode**: Emits detailed per-packet lifecycle events (received, accepted, routed-or-queued, send-attempted, and send-succeeded) with stream IDs, timestamps, endpoints, and packet lengths.
+  - **Test mode**: Executes a bounded diagnostic run with documented maximums (up to 86,400 seconds duration and up to 1,000,000 events); stamps every event with the configured correlation ID; ends upon reaching expiry or event limits, records the termination reason, and automatically returns the instance to its prior diagnostic level.
+  - **Management API diagnostics query**: Read-only `events` / `recent_events` operation exposes bounded recent diagnostic events (newest last), dropped-event count, current mode, and expiry.
+  Runtime mode modification is out of scope (mode and bounds are established via configuration). Sequence gap detection and hex preview facilities remain scheduled in roadmap milestone RER-F-009.
 
 ## 3. Tooling and CI Tracking
 

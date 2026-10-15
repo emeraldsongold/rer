@@ -12,7 +12,7 @@ use crate::config::{
     Config, ConnectionMode, DropPolicy, EndpointConfig, InstanceConfig, OperationalMode,
     StreamConfig, TransportType,
 };
-use crate::diagnostics::{DiagnosticBuffer, DiagnosticEvent, DiagnosticStage};
+use crate::diagnostics::{DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState};
 use crate::framing;
 
 /// Default maximum queue size (packets) when not explicitly configured.
@@ -734,7 +734,22 @@ impl StreamRunner {
         let stats = Arc::new(StreamStats::default());
         let source_path = format!("{stream_prefix}.source.address");
         let mode = instance.mode;
-        let emit_packet_events = mode == OperationalMode::Debug || mode == OperationalMode::Test;
+        if event_buffer.test_state().is_none() {
+            let correlation_id = instance.resolved_correlation_id().map(String::from);
+            let expiry_seconds = instance.resolved_expiry_seconds();
+            let max_events = instance.resolved_max_events();
+            let prior_mode = instance.resolved_prior_mode();
+            let test_state = Arc::new(DiagnosticTestState::new(
+                instance.id.clone(),
+                instance.mode,
+                correlation_id,
+                expiry_seconds,
+                max_events,
+                Some(prior_mode),
+                event_buffer.clock().clone(),
+            ));
+            event_buffer.set_test_state(test_state);
+        }
         let source_transport = stream.source.transport;
 
         // Resolve buffer limits (stream config overrides instance config overrides default)
@@ -817,7 +832,7 @@ impl StreamRunner {
 
                                 let src_endpoint = src_addr.to_string();
 
-                                if emit_packet_events {
+                                if recv_event_buffer.should_emit_packet_events() {
                                     recv_event_buffer.emit(
                                         DiagnosticEvent::new(
                                             recv_event_buffer.clock().monotonic_nanos(),
@@ -860,7 +875,7 @@ impl StreamRunner {
                                     continue;
                                 }
 
-                                if emit_packet_events {
+                                if recv_event_buffer.should_emit_packet_events() {
                                     recv_event_buffer.emit(
                                         DiagnosticEvent::new(
                                             recv_event_buffer.clock().monotonic_nanos(),
@@ -892,7 +907,7 @@ impl StreamRunner {
 
                                 match push_result {
                                     PushResult::Enqueued => {
-                                        if emit_packet_events {
+                                        if recv_event_buffer.should_emit_packet_events() {
                                             recv_event_buffer.emit(
                                                 DiagnosticEvent::new(
                                                     recv_event_buffer.clock().monotonic_nanos(),
@@ -1056,7 +1071,9 @@ impl StreamRunner {
                                                             .received_bytes
                                                             .fetch_add(n as u64, Ordering::Relaxed);
 
-                                                        if emit_packet_events {
+                                                        if cl_event_buffer
+                                                            .should_emit_packet_events()
+                                                        {
                                                             cl_event_buffer.emit(
                                                                 DiagnosticEvent::new(
                                                                     cl_event_buffer
@@ -1109,7 +1126,9 @@ impl StreamRunner {
 
                                                         match push_res {
                                                             PushResult::Enqueued => {
-                                                                if emit_packet_events {
+                                                                if cl_event_buffer
+                                                                    .should_emit_packet_events()
+                                                                {
                                                                     cl_event_buffer.emit(
                                                                         DiagnosticEvent::new(
                                                                             cl_event_buffer.clock().monotonic_nanos(),
@@ -1384,7 +1403,8 @@ impl StreamRunner {
                                                         .received_bytes
                                                         .fetch_add(n as u64, Ordering::Relaxed);
 
-                                                    if emit_packet_events {
+                                                    if recv_event_buffer.should_emit_packet_events()
+                                                    {
                                                         recv_event_buffer.emit(
                                                             DiagnosticEvent::new(
                                                                 recv_event_buffer
@@ -1437,7 +1457,9 @@ impl StreamRunner {
 
                                                     match push_res {
                                                         PushResult::Enqueued => {
-                                                            if emit_packet_events {
+                                                            if recv_event_buffer
+                                                                .should_emit_packet_events()
+                                                            {
                                                                 recv_event_buffer.emit(
                                                                     DiagnosticEvent::new(
                                                                         recv_event_buffer.clock().monotonic_nanos(),
@@ -1719,7 +1741,7 @@ impl StreamRunner {
                         for (idx, (dest, dest_path)) in dest_specs.iter().enumerate() {
                             let dest_addr_str = format_endpoint(&dest.address);
 
-                            if emit_packet_events {
+                            if fwd_event_buffer.should_emit_packet_events() {
                                 fwd_event_buffer.emit(
                                     DiagnosticEvent::new(
                                         fwd_event_buffer.clock().monotonic_nanos(),
@@ -1774,7 +1796,8 @@ impl StreamRunner {
                                                     fwd_stats
                                                         .forwarded_bytes
                                                         .fetch_add(sent as u64, Ordering::SeqCst);
-                                                    if emit_packet_events {
+                                                    if fwd_event_buffer.should_emit_packet_events()
+                                                    {
                                                         fwd_event_buffer.emit(
                                                             DiagnosticEvent::new(
                                                                 fwd_event_buffer
@@ -1865,7 +1888,7 @@ impl StreamRunner {
                                                 "[stream {}] TCP destination error sending to {}: {}",
                                                 fwd_stream_id, format_endpoint(&dest.address), e
                                             );
-                                        } else if emit_packet_events {
+                                        } else if fwd_event_buffer.should_emit_packet_events() {
                                             fwd_event_buffer.emit(
                                                 DiagnosticEvent::new(
                                                     fwd_event_buffer.clock().monotonic_nanos(),
@@ -1926,7 +1949,7 @@ impl StreamRunner {
     /// Returns the operational mode of this stream runner.
     #[must_use]
     pub fn mode(&self) -> OperationalMode {
-        self.mode
+        self.event_buffer.current_mode()
     }
 
     /// Emits a stream health state transition event with a descriptive reason.
@@ -2025,6 +2048,30 @@ impl RelayHealthHandle {
     #[must_use]
     pub fn event_buffer(&self) -> &DiagnosticBuffer {
         &self.event_buffer
+    }
+
+    /// Returns the current operational mode.
+    #[must_use]
+    pub fn current_mode(&self) -> OperationalMode {
+        self.event_buffer.current_mode()
+    }
+
+    /// Returns configured test mode expiry in seconds, if active.
+    #[must_use]
+    pub fn current_expiry(&self) -> Option<u64> {
+        self.event_buffer.current_expiry()
+    }
+
+    /// Returns active test run correlation ID, if configured.
+    #[must_use]
+    pub fn correlation_id(&self) -> Option<String> {
+        self.event_buffer.correlation_id()
+    }
+
+    /// Returns reason why the test run ended, if ended.
+    #[must_use]
+    pub fn test_end_reason(&self) -> Option<String> {
+        self.event_buffer.test_end_reason()
     }
 
     /// Returns true if the relay is running and all stream runners are healthy.
@@ -2164,6 +2211,22 @@ impl Relay {
             } else {
                 format!("instances[{inst_idx}]")
             };
+            if event_buffer.test_state().is_none() {
+                let correlation_id = inst.resolved_correlation_id().map(String::from);
+                let expiry_seconds = inst.resolved_expiry_seconds();
+                let max_events = inst.resolved_max_events();
+                let prior_mode = inst.resolved_prior_mode();
+                let test_state = Arc::new(DiagnosticTestState::new(
+                    inst.id.clone(),
+                    inst.mode,
+                    correlation_id,
+                    expiry_seconds,
+                    max_events,
+                    Some(prior_mode),
+                    event_buffer.clock().clone(),
+                ));
+                event_buffer.set_test_state(test_state);
+            }
             for (s_idx, stream) in inst.streams.iter().enumerate() {
                 let stream_prefix = format!("{inst_prefix}.streams[{s_idx}]");
                 let runner = StreamRunner::start_with_buffer(
@@ -2199,6 +2262,30 @@ impl Relay {
     #[must_use]
     pub fn event_buffer(&self) -> &DiagnosticBuffer {
         &self.event_buffer
+    }
+
+    /// Returns the current operational mode.
+    #[must_use]
+    pub fn current_mode(&self) -> OperationalMode {
+        self.event_buffer.current_mode()
+    }
+
+    /// Returns configured test mode expiry in seconds, if active.
+    #[must_use]
+    pub fn current_expiry(&self) -> Option<u64> {
+        self.event_buffer.current_expiry()
+    }
+
+    /// Returns active test run correlation ID, if configured.
+    #[must_use]
+    pub fn correlation_id(&self) -> Option<String> {
+        self.event_buffer.correlation_id()
+    }
+
+    /// Returns reason why the test run ended, if ended.
+    #[must_use]
+    pub fn test_end_reason(&self) -> Option<String> {
+        self.event_buffer.test_end_reason()
     }
 
     /// Returns a reference to all stream runners.

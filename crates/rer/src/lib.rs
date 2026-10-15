@@ -16,21 +16,22 @@ pub mod sim;
 
 pub use config::{
     Config, DropPolicy, InstanceConfig, LogicalInterfaceConfig, MetricsConfig, StreamConfig,
-    ValidationError, ValidationReport,
+    TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
     Clock, DiagnosticBuffer, DiagnosticBufferBuilder, DiagnosticEvent, DiagnosticSnapshot,
-    DiagnosticStage, ManualClock, RateLimiter, Stage, SystemClock,
+    DiagnosticStage, DiagnosticTestState, ManualClock, RateLimiter, Stage, SystemClock,
 };
 pub use framing::{encode_frame, read_frame, write_frame};
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
 };
 pub use management::{
-    generate_prometheus_text, query_metrics, query_status, query_streams, query_version,
-    AggregateCounters, ManagementError, ManagementRequest, ManagementResponse, ManagementServer,
-    MetricsReport, MetricsServer, OperationType, StatusReport, StreamStatusReport,
-    StreamsManagementReport, VersionReport, DEFAULT_MANAGEMENT_SOCKET, MGMT_API_VERSION,
+    generate_prometheus_text, query_events, query_metrics, query_recent_events, query_status,
+    query_streams, query_version, AggregateCounters, DiagnosticEventsReport, ManagementError,
+    ManagementRequest, ManagementResponse, ManagementServer, MetricsReport, MetricsServer,
+    OperationType, StatusReport, StreamStatusReport, StreamsManagementReport, VersionReport,
+    DEFAULT_MANAGEMENT_SOCKET, MGMT_API_VERSION,
 };
 pub use relay::{
     bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,

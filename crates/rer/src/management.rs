@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::OperationalMode;
+use crate::diagnostics::DiagnosticEvent;
 use crate::health::{generate_health_report, StreamHealthReport};
 use crate::relay::{LogicalInterfaceStats, RelayHealthHandle};
 
@@ -84,9 +86,8 @@ impl ManagementRequest {
     #[must_use]
     pub fn operation_type(&self) -> Option<OperationType> {
         match self.action.as_str() {
-            "status" | "health" | "streams" | "metrics" | "version" | "inspect_config" => {
-                Some(OperationType::ReadOnly)
-            }
+            "status" | "health" | "streams" | "metrics" | "version" | "inspect_config"
+            | "events" | "recent_events" | "diagnostics" => Some(OperationType::ReadOnly),
             "set_log_level" | "trigger_test" => Some(OperationType::BehaviorChanging),
             _ => None,
         }
@@ -182,6 +183,37 @@ pub struct VersionReport {
     pub name: String,
     pub version: String,
     pub api_version: String,
+}
+
+/// Maximum number of recent events returned by the management API in a single query.
+pub const MAX_EVENTS_LIMIT: usize = 1000;
+
+/// Default number of recent events returned by the management API if limit is unspecified.
+pub const DEFAULT_EVENTS_LIMIT: usize = 100;
+
+/// Diagnostic events report payload returned by `events` / `recent_events` action (SPEC §9, §10).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiagnosticEventsReport {
+    /// Diagnostic events in arrival order (bounded limit, newest last).
+    pub events: Vec<DiagnosticEvent>,
+    /// Number of diagnostic events dropped due to capacity, contention, or rate limits.
+    pub dropped_count: u64,
+    /// Alias for dropped_count.
+    pub dropped_events: u64,
+    /// Current operational mode (returns prior mode if test mode expired).
+    pub mode: OperationalMode,
+    /// Configured expiry seconds if currently in test mode, or None if expired or not in test mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<u64>,
+    /// Configured expiry seconds if currently in test mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiry_seconds: Option<u64>,
+    /// Correlation ID if configured for the test run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Reason why the test run ended (if ended).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
 }
 
 /// Computes aggregate counters from stream snapshots.
@@ -689,6 +721,45 @@ pub fn process_management_request(
                 data: serde_json::to_value(&rep).ok(),
                 error: None,
                 uptime_seconds: None,
+                streams: None,
+            }
+        }
+        "events" | "recent_events" | "diagnostics" => {
+            let limit = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .map(|v| (v as usize).min(MAX_EVENTS_LIMIT))
+                .unwrap_or(DEFAULT_EVENTS_LIMIT);
+
+            let snapshot = health_handle.event_buffer().snapshot();
+            let total_events = snapshot.events.len();
+            let start_idx = total_events.saturating_sub(limit);
+            let recent_events: Vec<DiagnosticEvent> = snapshot.events[start_idx..].to_vec();
+            let current_mode = health_handle.current_mode();
+            let expiry = health_handle.current_expiry();
+            let end_reason = health_handle.test_end_reason();
+            let correlation_id = health_handle.correlation_id();
+
+            let report = DiagnosticEventsReport {
+                events: recent_events,
+                dropped_count: snapshot.dropped_count,
+                dropped_events: snapshot.dropped_count,
+                mode: current_mode,
+                expiry,
+                expiry_seconds: expiry,
+                correlation_id,
+                end_reason,
+            };
+
+            ManagementResponse {
+                version: MGMT_API_VERSION.to_string(),
+                status: "ok".to_string(),
+                action: Some(request.action.clone()),
+                data: serde_json::to_value(&report).ok(),
+                error: None,
+                uptime_seconds: Some(health_handle.uptime_seconds()),
                 streams: None,
             }
         }
@@ -1499,4 +1570,53 @@ pub fn query_version(
             format!("failed to decode VersionReport: {e}"),
         )
     })
+}
+
+/// Queries recent diagnostic events, dropped count, current mode and expiry via management API.
+pub fn query_events(
+    endpoint: &str,
+    timeout: Duration,
+    auth_token: Option<&str>,
+    limit: Option<usize>,
+) -> io::Result<DiagnosticEventsReport> {
+    let params = limit.map(|l| serde_json::json!({ "limit": l }));
+    let req = ManagementRequest {
+        version: MGMT_API_VERSION.to_string(),
+        action: "events".to_string(),
+        auth_token: auth_token.map(String::from),
+        role: None,
+        params,
+    };
+    let resp = query_management_raw(endpoint, &req, timeout)?;
+    if resp.status != "ok" {
+        let msg = resp
+            .error
+            .map(|e| e.message)
+            .unwrap_or_else(|| "unknown error".to_string());
+        return Err(io::Error::other(msg));
+    }
+
+    let data = resp.data.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing 'data' field in events response",
+        )
+    })?;
+
+    serde_json::from_value::<DiagnosticEventsReport>(data).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to decode DiagnosticEventsReport: {e}"),
+        )
+    })
+}
+
+/// Alias for `query_events`.
+pub fn query_recent_events(
+    endpoint: &str,
+    timeout: Duration,
+    auth_token: Option<&str>,
+    limit: Option<usize>,
+) -> io::Result<DiagnosticEventsReport> {
+    query_events(endpoint, timeout, auth_token, limit)
 }

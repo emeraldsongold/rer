@@ -50,10 +50,45 @@ instances:
 | `id` | string | (required) | Unique identifier for this instance across the configuration. |
 | `name` | string | `null` | Optional human-readable name or description. |
 | `mode` | string | `"production"` | Operational profile: `"production"`, `"debug"`, or `"test"`. |
+| `test_mode` | object | `null` | Optional test mode configuration block (see Test Mode Configuration below). |
+| `correlation_id` | string | `null` | Run correlation ID (also configurable inside `test_mode`). Required when `mode` is `"test"`. |
+| `expiry_seconds` | integer | `3600` (in test mode) | Maximum test run duration in seconds (1 to 86,400). |
+| `max_events` | integer | `10000` (in test mode) | Maximum diagnostic events to emit before ending run (1 to 1,000,000). |
+| `prior_mode` | string | `"production"` | Diagnostic mode to revert to after test run ends (`"production"` or `"debug"`). |
 | `management` | object | `null` | Optional management plane settings. |
 | `streams` | array | `[]` | Forwarding streams configured on this instance. |
 | `logical_interfaces` | array | `[]` | Directional stream pairs (command/telemetry). |
 | `buffer` | object | `null` | Instance-level buffer queue bounding. |
+
+### Operational Diagnostic Modes
+
+RER supports three distinct operational diagnostic modes:
+
+1. **Production Mode (`"production"`)**:
+   - Quiet by default; no per-packet forwarding log output.
+   - Retains a bounded ring buffer of recent diagnostic events for significant failures, queue drops, and health state transitions.
+   - Default mode for production forwarding instances.
+
+2. **Debug Mode (`"debug"`)**:
+   - Emits detailed per-packet lifecycle events across forwarding stages: received, accepted, routed/queued, send-attempted, and send-succeeded.
+   - Includes stream IDs, nanosecond-precision timestamps, endpoints, packet lengths, and sequence information.
+   - Explains drops, rejection reasons, and destination errors.
+
+3. **Test Mode (`"test"`)**:
+   - Collects detailed diagnostic events for a bounded test run.
+   - Every event recorded during the run carries the run's configured `correlation_id` across relay instances.
+   - Strictly bounded in both duration (`expiry_seconds`, maximum 86,400 seconds / 24 hours) and event count (`max_events`, maximum 1,000,000 events).
+   - When a bound is reached or duration expires, the run ends, emits an end-of-run event explaining why (`"duration_expired"` or `"event_limit_reached"`), and the instance automatically returns to its configured `prior_mode` (default `"production"`).
+   - Changing modes dynamically at runtime is out of scope; test mode parameters are established via configuration.
+
+#### Test Mode Configuration (`TestModeConfig`)
+
+| Field | Type | Default | Bounds / Description |
+|---|---|---|---|
+| `correlation_id` | string | (required) | Non-empty correlation identifier stamped on all events in the test run. |
+| `expiry_seconds` | integer | `3600` | Run duration timeout in seconds (min: 1, max: 86,400 / 24 hours). |
+| `max_events` | integer | `10000` | Maximum diagnostic events to record (min: 1, max: 1,000,000). |
+| `prior_mode` | string | `"production"` | Diagnostic level to restore upon completion: `"production"` or `"debug"`. |
 
 ## 4. Management Plane (`ManagementConfig`)
 
@@ -313,6 +348,26 @@ Per-stream metrics carry the `stream` label containing the stream's unique confi
 | `rer_stream_socket_errors_total` | counter | Total socket errors encountered for the stream | `stream="<id>"` |
 | `rer_stream_backpressure_events_total` | counter | Total backpressure events recorded for the stream | `stream="<id>"` |
 | `rer_stream_healthy` | gauge | Whether the stream runner is currently healthy (1) or degraded (0) | `stream="<id>"` |
+
+### Diagnostic Events Management Operation (`events` / `recent_events`)
+
+The management plane provides a read-only diagnostics query operation (`events` or `recent_events`) over the management JSON socket/endpoint to inspect recent diagnostic events:
+
+- **Request**:
+  ```json
+  {"action": "events", "limit": 100}
+  ```
+  The `limit` parameter is optional (defaults to 100, clamped to a maximum of 1,000 events).
+- **Response**:
+  Returns a `DiagnosticEventsReport` containing:
+  - `events`: Array of recent structured diagnostic events ordered chronologically (bounded, newest last).
+  - `dropped_count` / `dropped_events`: Cumulative count of diagnostic events dropped due to buffer capacity bounds.
+  - `mode`: Current operational diagnostic mode (`"production"`, `"debug"`, or `"test"`).
+  - `expiry`: Unix timestamp in seconds when test mode expires (or `null`).
+  - `expiry_seconds`: Configured test duration in seconds (or `null`).
+  - `correlation_id`: Active test run correlation ID (or `null`).
+  - `end_reason`: If a test run has terminated, records why (`"duration_expired"`, `"event_limit_reached"`).
+- **Access Control**: Classified as `OperationType::ReadOnly`. Unauthenticated or unauthorized callers are refused with an error response.
 
 ### Safety and Secret Handling
 
