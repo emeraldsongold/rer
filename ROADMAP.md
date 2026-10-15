@@ -38,6 +38,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 26 | RER-F-026 | Diagnostic event model with a bounded, non-blocking event buffer | BACKLOG | feature | medium | ready-auto | RER-F-007 | §8, §10 |
 | 27 | RER-F-027 | Production and debug modes emit diagnostic events from the forwarding path | BACKLOG | feature | medium | ready-auto | RER-F-026 | §8, §10 |
 | 28 | RER-F-028 | Test mode with correlation IDs, and recent events through the management API | BACKLOG | feature | medium | ready-auto | RER-F-027 | §9, §10 |
+| 29 | RER-F-029 | Document The CLI options | BACKLOG | docs | low | needs-impl-approval | — | — |
 
 ## Cross-cutting tracks
 
@@ -50,7 +51,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029
 
 ## Owner approval gates
 

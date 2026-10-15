@@ -534,6 +534,25 @@ items:
       - The new operation appears in the operation classification as read-only, and a test shows an unauthorized caller is refused as for the other operations.
       - Existing management tests pass unmodified, and docs and KNOWN_ISSUES.md describe the three modes as implemented.
 
+  - id: RER-F-029
+    order: 29
+    title: Document The CLI options
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: []
+    spec_refs: []
+    test_profile: fast
+    notes: Show the usage of the tools CLI options, inputs and outputs
+    acceptance:
+      - Running 'rer --help' exits with status 0 and prints a usage line that starts with "Usage:".
+      - The help output lists each CLI option (e.g., '--config', '--mode', '--listen', '--target', '--verbose', '--quiet') with a description.
+      - The help output shows the default value for each option that has one.
+      - The help output describes the expected input arguments and their meaning.
+      - The help output describes the output produced by the tool (e.g., prints statistics to stdout, writes logs to stderr).
+
   - id: RER-T-001
     kind: track
     order: 101
