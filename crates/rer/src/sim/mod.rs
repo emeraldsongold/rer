@@ -11,6 +11,7 @@ pub mod harness;
 pub mod packet;
 pub mod receiver;
 pub mod sha256;
+pub mod topology;
 
 pub use channel::{ImpairmentConfig, SimulatedChannel};
 pub use generator::{GeneratorConfig, GeneratorStats, SplitMix64, TrafficGenerator};
@@ -18,6 +19,11 @@ pub use harness::{HarnessConfig, SimulationHarness};
 pub use packet::{Packet, PacketError};
 pub use receiver::{ReceiverReport, ReorderedPacket, TrafficReceiver};
 pub use sha256::{sha256_bytes, sha256_hex};
+pub use topology::{
+    correlate_topology_hops, CorrelationSummary, DivergencePoint, DivergenceType, HopObservation,
+    HopType, RelayHopConfig, TestController, TestOutcome, TopologyConfig, TopologyHarness,
+    TopologyReport,
+};
 
 /// Alias for `TrafficReceiver`.
 pub type TestReceiver = TrafficReceiver;

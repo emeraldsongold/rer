@@ -450,7 +450,7 @@ impl StreamStats {
 }
 
 /// Point-in-time snapshot of stream statistics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StreamStatsSnapshot {
     pub received_packets: u64,
     pub received_bytes: u64,

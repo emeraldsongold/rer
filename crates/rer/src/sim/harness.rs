@@ -304,4 +304,11 @@ instances:
 
         Ok(report)
     }
+
+    /// Executes a coordinated multi-instance topology simulation on localhost.
+    pub fn run_topology(
+        config: super::topology::TopologyConfig,
+    ) -> io::Result<super::topology::TopologyReport> {
+        super::topology::TestController::run(config)
+    }
 }
