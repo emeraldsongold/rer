@@ -534,6 +534,26 @@ items:
       - The new operation appears in the operation classification as read-only, and a test shows an unauthorized caller is refused as for the other operations.
       - Existing management tests pass unmodified, and docs and KNOWN_ISSUES.md describe the three modes as implemented.
 
+  - id: RER-F-029
+    order: 29
+    title: Document CLI commands and options in configuration guide
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-009]
+    spec_refs: [§7]
+    test_profile: standard
+    notes: 'Document the CLI Relevant code: docs/SPEC.md, docs/CONFIGURATION.md, crates/rer/src/cli.rs.'
+    acceptance:
+      - In docs/CONFIGURATION.md, Section 8 documents rer health with options --socket, --timeout and --json, describing its exit code 0 on healthy status and non-zero exit code on unhealthy status or connection failure.
+      - In docs/CONFIGURATION.md, Section 8 documents rer inspect with options --config, --format, --json, --effective, --socket, --endpoint, --auth-token and --timeout, describing effective configuration output and sequence tracking inspection reports.
+      - In docs/CONFIGURATION.md, Section 8 documents rer test and subcommands harness, generate and receive with options --count, --size, --rate, --burst, --duration, --seed, --loss-rate, --duplicate-rate, --reorder-rate, --json, --target and --bind.
+      - In docs/CONFIGURATION.md, Section 8 documents options --health-socket and --metrics-endpoint for rer run, and environment variables RER_MGMT_SOCKET and RER_HEALTH_SOCKET for management socket overrides.
+      - In docs/CONFIGURATION.md, Section 8 documents commands rer version, rer diagnose, rer capture and rer replay, noting that rer version prints binary version information and exits with status 0 while rer diagnose, rer capture and rer replay exit with status 1 as planned roadmap features.
+      - In README.md, the CLI summary in the Current Status section lists commands rer validate, rer inspect, rer run, rer test, rer status, rer health, rer streams, rer metrics and rer version.
+
   - id: RER-T-001
     kind: track
     order: 101
