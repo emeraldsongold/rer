@@ -6,7 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added - Milestone RER-F-009 (Sequence tracking and packet inspection)
+### Added - Milestone RER-F-010 (Multi-instance topology simulation and distributed test correlation)
+- **Multi-Instance Topology Simulation**: Implemented `TestController`, `TopologyConfig`, and `TopologyHarness` coordinating multi-relay chains and topologies in CI across UDP and TCP with deterministic PRNG seeds (SPEC §11, §13).
+- **Per-Hop Distributed Observation & Evidence Correlation**: Collected per-hop ingress, classification, routing, local send success, and downstream delivery observations across traffic generator, intermediate relays, and destination receiver, tagged with unique test run correlation IDs.
+- **Divergence Identification**: Implemented automated correlation identifying the first observed point of divergence (missing sequence gaps, duplicates, or corrupted payload mismatches) with exact hop and sequence attribution.
+- **Unreachable Relay Handling**: Ensured unreachable or failed relays yield `Incomplete` or `Unknown` outcomes, guaranteeing that missing evidence is never converted into a passing result.
+- **Downstream Delivery Verification**: Strictly segregated local socket send success from independent downstream receipt, guaranteeing local send success is never reported as downstream delivery.
+- **Independent Relay Operation**: Verified that RER instances operate independently without requiring the test controller.
+
 - **Configurable Sequence Extraction**: Added `SequenceConfig` supporting configurable byte offset, field width (1, 2, 4, 8 bytes), and byte order (big-endian, little-endian), disabled by default on streams (SPEC §8).
 - **Sequence Continuity & Rollover Tracking**: Implemented `SequenceTracker` detecting missing packets (gaps), duplicates, out-of-order packets, and configurable sequence rollovers across forwarding streams and simulation test harness.
 - **Opt-in Length-Bounded Previews**: Added `InspectionConfig` with opt-in hexadecimal and ASCII packet previews bounded to configurable lengths.

@@ -44,8 +44,11 @@ pub use relay::{
 
 pub use secret::SecretString;
 pub use sim::{
-    GeneratorConfig, GeneratorStats, HarnessConfig, ImpairmentConfig, Packet, ReceiverReport,
-    ReorderedPacket, SimulatedChannel, SimulationHarness, TestReceiver, TrafficGenerator,
+    correlate_topology_hops, CorrelationSummary, DivergencePoint, DivergenceType, GeneratorConfig,
+    GeneratorStats, HarnessConfig, HopObservation, HopType, ImpairmentConfig, Packet,
+    ReceiverReport, RelayHopConfig, ReorderedPacket, SimulatedChannel, SimulationHarness,
+    TestController, TestOutcome, TestReceiver, TopologyConfig, TopologyHarness, TopologyReport,
+    TrafficGenerator,
 };
 
 /// Returns the current version of RER.
