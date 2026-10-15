@@ -10,7 +10,7 @@ RER has completed Milestone RER-F-001 (repository foundation and CI), Milestone 
 - **Distributed Multi-Hop Simulation & Correlation (`RER-F-010`)**:
   End-to-end multi-hop topology testing and distributed evidence correlation across multiple relay instances are scheduled in milestone RER-F-010. The initial traffic generator and single-relay simulation harness (`RER-F-004`) are functional (`rer test`).
 - **Diagnostic Logging & Inspection (`RER-F-008`, `RER-F-009`)**:
-  Structured packet diagnostics, sequence gap detection, and hex preview facilities are not yet implemented.
+  Forwarding path packet diagnostics across lifecycle stages (received, accepted, routed-or-queued, send-attempted, and send-succeeded) in debug mode, quiet production mode, and failure/drop/health events are implemented (RER-F-027). Sequence gap detection and hex preview facilities are scheduled in roadmap milestone RER-F-009.
 
 ## 3. Tooling and CI Tracking
 

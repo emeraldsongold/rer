@@ -36,7 +36,7 @@ pub use relay::{
     bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,
     parse_scoped_socket_addr, resolve_endpoint, resolve_endpoint_with_context, select_socket_addr,
     BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,
-    ScopedEndpoint, StreamHealthSnapshot, StreamStats, StreamStatsSnapshot,
+    ScopedEndpoint, StreamHealthSnapshot, StreamRunner, StreamStats, StreamStatsSnapshot,
 };
 
 pub use secret::SecretString;
