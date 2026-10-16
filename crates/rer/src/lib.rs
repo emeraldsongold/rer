@@ -3,6 +3,7 @@
 //! An open-source network relay, telemetry/command routing, and distributed
 //! network diagnostics tool.
 
+pub mod capture;
 pub mod cli;
 pub mod config;
 pub mod diagnostics;
@@ -10,10 +11,16 @@ pub mod framing;
 pub mod health;
 pub mod management;
 pub mod relay;
+pub mod replay;
 pub mod secret;
 pub mod signals;
 pub mod sim;
 
+pub use capture::{
+    build_synthetic_frame, build_synthetic_pcap, build_synthetic_pcapng, compute_ipv4_checksum,
+    decode_packet, parse_capture, parse_capture_file, parse_pcap, parse_pcapng, CaptureError,
+    CaptureFormat, CaptureSummary, CapturedPacket, LinkType, SyntheticPacket,
+};
 pub use config::{
     ByteOrder, Config, DropPolicy, InspectionConfig, InstanceConfig, LogicalInterfaceConfig,
     MetricsConfig, SequenceConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
@@ -40,6 +47,9 @@ pub use relay::{
     parse_scoped_socket_addr, resolve_endpoint, resolve_endpoint_with_context, select_socket_addr,
     BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,
     ScopedEndpoint, StreamHealthSnapshot, StreamRunner, StreamStats, StreamStatsSnapshot,
+};
+pub use replay::{
+    execute_replay_session, is_test_endpoint, matches_filter, ReplayConfig, ReplayReport,
 };
 
 pub use secret::SecretString;

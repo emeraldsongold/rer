@@ -54,8 +54,8 @@ pub enum Commands {
     /// Capture network traffic (planned)
     Capture(PlaceholderArgs),
 
-    /// Replay captured traffic (planned)
-    Replay(PlaceholderArgs),
+    /// Replay captured traffic (SPEC §12)
+    Replay(ReplayArgs),
 
     /// Run network simulation and tests
     Test(TestArgs),
@@ -536,10 +536,7 @@ pub fn execute(cli: Cli) -> ExitCode {
             eprintln!("rer capture is not yet implemented (scheduled in roadmap milestone RER-F-011). See KNOWN_ISSUES.md.");
             ExitCode::from(1)
         }
-        Commands::Replay(_) => {
-            eprintln!("rer replay is not yet implemented (scheduled in roadmap milestone RER-F-011). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Replay(args) => execute_replay(args),
         Commands::Test(args) => execute_test(args),
     }
 }
@@ -1856,5 +1853,207 @@ fn print_stream_details(label: &str, stream: &StreamReport, indent: &str) {
             "{}    * {} {} ({})",
             indent, dest.transport, dest.address, dest.mode
         );
+    }
+}
+
+/// Command-line arguments for `rer replay` (SPEC §12).
+#[derive(Args, Debug, Clone)]
+pub struct ReplayArgs {
+    /// Path to PCAP or PCAPNG capture file
+    #[arg(value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
+    /// Path to PCAP or PCAPNG capture file (alternative flag)
+    #[arg(short, long, value_name = "FILE")]
+    pub capture: Option<PathBuf>,
+
+    /// Explicit destination endpoint for replayed packets (e.g. 127.0.0.1:5000)
+    #[arg(short, long, value_name = "ENDPOINT")]
+    pub destination: Option<String>,
+
+    /// Destination transport protocol ("udp" or "tcp", default: "udp")
+    #[arg(short, long, default_value = "udp")]
+    pub transport: String,
+
+    /// Replay speed multiplier (1.0 = original timing, >1.0 = faster, <1.0 = slower, 0 = max rate)
+    #[arg(long, default_value = "1.0")]
+    pub speed: f64,
+
+    /// Replay at maximum feasible rate without timing delays (equivalent to --speed 0)
+    #[arg(long)]
+    pub max_rate: bool,
+
+    /// Maximum rate limit in packets per second (optional throttle)
+    #[arg(long)]
+    pub pps: Option<f64>,
+
+    /// Filter by stream identifier or 5-tuple
+    #[arg(long)]
+    pub stream: Option<String>,
+
+    /// Filter by source endpoint or IP in capture
+    #[arg(long)]
+    pub src: Option<String>,
+
+    /// Filter by destination endpoint or IP in capture
+    #[arg(long)]
+    pub dst: Option<String>,
+
+    /// Filter by endpoint (matches either source or destination)
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// Replay packets starting at or after relative time in seconds
+    #[arg(long)]
+    pub start_time: Option<f64>,
+
+    /// Replay packets up to relative time in seconds
+    #[arg(long)]
+    pub end_time: Option<f64>,
+
+    /// Maximum duration of replay session in seconds
+    #[arg(long)]
+    pub duration: Option<f64>,
+
+    /// Maximum number of packets to inject
+    #[arg(long)]
+    pub max_packets: Option<u64>,
+
+    /// Allow replaying to non-test/production endpoints (bypasses safety check)
+    #[arg(long, alias = "allow-production")]
+    pub allow_non_test_destinations: bool,
+
+    /// Output format for replay report
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// Machine-readable JSON output (convenience alias for --format json)
+    #[arg(long)]
+    pub json: bool,
+}
+
+fn execute_replay(args: ReplayArgs) -> ExitCode {
+    let is_json = args.json || args.format == OutputFormat::Json;
+
+    let target_file = match args.file.or(args.capture) {
+        Some(f) => f,
+        None => {
+            let err_msg = "missing capture file; provide a path or use --capture <FILE>";
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "selected": 0,
+                        "attempted": 0,
+                        "injected": 0,
+                        "failed": 0,
+                        "success": false,
+                        "errors": [err_msg]
+                    })
+                );
+            } else {
+                eprintln!("Error: {err_msg}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let destination = match args.destination {
+        Some(d) if !d.trim().is_empty() => d,
+        _ => {
+            let err_msg =
+                "replay requires an explicit destination endpoint (use --destination <ENDPOINT>)";
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "selected": 0,
+                        "attempted": 0,
+                        "injected": 0,
+                        "failed": 0,
+                        "success": false,
+                        "errors": [err_msg]
+                    })
+                );
+            } else {
+                eprintln!("Error: {err_msg}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let config = crate::replay::ReplayConfig {
+        destination: destination.clone(),
+        transport: args.transport,
+        speed: args.speed,
+        max_rate: args.max_rate,
+        pps: args.pps,
+        stream_filter: args.stream,
+        src_filter: args.src,
+        dst_filter: args.dst,
+        endpoint_filter: args.endpoint,
+        start_time: args.start_time,
+        end_time: args.end_time,
+        duration: args.duration,
+        max_packets: args.max_packets,
+        allow_non_test_destinations: args.allow_non_test_destinations,
+    };
+
+    match crate::replay::execute_replay_session(&target_file, &config) {
+        Ok(report) => {
+            if is_json {
+                println!("{}", report.to_json());
+            } else {
+                println!("--- Replay Report ---");
+                println!(
+                    "Result: {}",
+                    if report.success { "SUCCESS" } else { "FAILED" }
+                );
+                println!(
+                    "Destination: {}",
+                    report.destination.as_deref().unwrap_or("unknown")
+                );
+                println!(
+                    "Timing Mode: {}",
+                    report.timing_mode.as_deref().unwrap_or("unknown")
+                );
+                println!("Selected Packets: {}", report.selected);
+                println!("Attempted Packets: {}", report.attempted);
+                println!("Injected Packets: {}", report.injected);
+                println!("Failed Packets: {}", report.failed);
+                println!("Bytes Injected: {}", report.bytes_injected);
+                println!("Duration: {} ms", report.duration_ms);
+                if !report.errors.is_empty() {
+                    println!("Errors:");
+                    for e in &report.errors {
+                        println!("  - {e}");
+                    }
+                }
+            }
+            if report.success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "selected": 0,
+                        "attempted": 0,
+                        "injected": 0,
+                        "failed": 0,
+                        "destination": destination,
+                        "success": false,
+                        "errors": [err]
+                    })
+                );
+            } else {
+                eprintln!("Error: {err}");
+            }
+            ExitCode::from(1)
+        }
     }
 }

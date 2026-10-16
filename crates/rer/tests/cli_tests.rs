@@ -376,18 +376,6 @@ fn test_cli_capture_exit_1() {
 }
 
 #[test]
-fn test_cli_replay_exit_1() {
-    let output = Command::new(rer_bin())
-        .arg("replay")
-        .output()
-        .expect("failed to execute rer replay");
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("rer replay is not yet implemented"));
-}
-
-#[test]
 fn test_cli_health_connection_failure_exit_1() {
     let non_existent_sock = std::env::temp_dir().join("test_nonexistent_health.sock");
     let output = Command::new(rer_bin())
@@ -467,4 +455,115 @@ fn test_cli_docs_acceptance_criteria() {
     assert!(readme_md.contains("rer streams"));
     assert!(readme_md.contains("rer metrics"));
     assert!(readme_md.contains("rer version"));
+}
+
+#[test]
+fn test_cli_replay_missing_file_error() {
+    let output = Command::new(rer_bin())
+        .arg("replay")
+        .arg("--destination")
+        .arg("127.0.0.1:5000")
+        .output()
+        .expect("failed to execute rer replay");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing capture file"));
+}
+
+#[test]
+fn test_cli_replay_missing_destination_error() {
+    let temp_file = std::env::temp_dir().join("test_cli_missing_dest.pcap");
+    std::fs::write(&temp_file, b"dummy content").unwrap();
+
+    let output = Command::new(rer_bin())
+        .arg("replay")
+        .arg(&temp_file)
+        .output()
+        .expect("failed to execute rer replay");
+
+    let _ = std::fs::remove_file(&temp_file);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("explicit destination endpoint"));
+}
+
+#[test]
+fn test_cli_replay_non_test_destination_refused_by_default() {
+    let pkts = vec![rer::capture::SyntheticPacket {
+        timestamp: std::time::Duration::ZERO,
+        src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        src_port: 5000,
+        dst_port: 6000,
+        payload: b"cli-safety-check".to_vec(),
+    }];
+    let pcap = rer::capture::build_synthetic_pcap(rer::capture::LinkType::Ethernet, &pkts, false);
+    let temp_file = std::env::temp_dir().join("test_cli_safety.pcap");
+    std::fs::write(&temp_file, &pcap).unwrap();
+
+    let output = Command::new(rer_bin())
+        .arg("replay")
+        .arg(&temp_file)
+        .arg("--destination")
+        .arg("8.8.8.8:53")
+        .output()
+        .expect("failed to execute rer replay");
+
+    let _ = std::fs::remove_file(&temp_file);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("refusing to replay capture to non-test endpoint"));
+}
+
+#[test]
+fn test_cli_replay_json_output() {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let port = socket.local_addr().unwrap().port();
+    let dest = format!("127.0.0.1:{port}");
+
+    let pkts = vec![
+        rer::capture::SyntheticPacket {
+            timestamp: std::time::Duration::ZERO,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            src_port: 5001,
+            dst_port: port,
+            payload: b"json-packet-1".to_vec(),
+        },
+        rer::capture::SyntheticPacket {
+            timestamp: std::time::Duration::from_millis(10),
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            src_port: 5002,
+            dst_port: port,
+            payload: b"json-packet-2".to_vec(),
+        },
+    ];
+    let pcap = rer::capture::build_synthetic_pcap(rer::capture::LinkType::Ethernet, &pkts, false);
+    let temp_file = std::env::temp_dir().join(format!("test_cli_json_{}.pcap", port));
+    std::fs::write(&temp_file, &pcap).unwrap();
+
+    let output = Command::new(rer_bin())
+        .arg("replay")
+        .arg(&temp_file)
+        .arg("--destination")
+        .arg(&dest)
+        .arg("--max-rate")
+        .arg("--json")
+        .output()
+        .expect("failed to execute rer replay --json");
+
+    let _ = std::fs::remove_file(&temp_file);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON expected");
+    assert_eq!(val["selected"], 2);
+    assert_eq!(val["attempted"], 2);
+    assert_eq!(val["injected"], 2);
+    assert_eq!(val["failed"], 0);
+    assert_eq!(val["success"], true);
 }
