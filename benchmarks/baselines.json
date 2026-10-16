@@ -1,0 +1,149 @@
+[
+  {
+    "benchmark_id": "udp_forward_64b",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 53.58,
+    "packets_measured": 500,
+    "throughput_pps": 9331.9,
+    "throughput_mbps": 0.57,
+    "min_latency_us": 55.4,
+    "p50_latency_us": 105.7,
+    "p90_latency_us": 139.2,
+    "p99_latency_us": 163.7,
+    "max_latency_us": 198.5,
+    "rss_memory_mb": 5.45
+  },
+  {
+    "benchmark_id": "udp_forward_512b",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 52.53,
+    "packets_measured": 500,
+    "throughput_pps": 9517.5,
+    "throughput_mbps": 4.65,
+    "min_latency_us": 56.1,
+    "p50_latency_us": 104.0,
+    "p90_latency_us": 135.8,
+    "p99_latency_us": 157.5,
+    "max_latency_us": 210.4,
+    "rss_memory_mb": 5.58
+  },
+  {
+    "benchmark_id": "udp_forward_1400b",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 64.40,
+    "packets_measured": 500,
+    "throughput_pps": 7763.3,
+    "throughput_mbps": 10.37,
+    "min_latency_us": 58.2,
+    "p50_latency_us": 119.7,
+    "p90_latency_us": 155.1,
+    "p99_latency_us": 197.9,
+    "max_latency_us": 245.3,
+    "rss_memory_mb": 5.58
+  },
+  {
+    "benchmark_id": "tcp_forward_64b",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 25427.9,
+    "packets_measured": 500,
+    "throughput_pps": 19.7,
+    "throughput_mbps": 0.001,
+    "min_latency_us": 50303.2,
+    "p50_latency_us": 50858.9,
+    "p90_latency_us": 51079.7,
+    "p99_latency_us": 51611.3,
+    "max_latency_us": 51968.1,
+    "rss_memory_mb": 5.73
+  },
+  {
+    "benchmark_id": "tcp_forward_512b",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 25381.0,
+    "packets_measured": 500,
+    "throughput_pps": 19.7,
+    "throughput_mbps": 0.010,
+    "min_latency_us": 50329.7,
+    "p50_latency_us": 50867.6,
+    "p90_latency_us": 50993.1,
+    "p99_latency_us": 51540.3,
+    "max_latency_us": 52209.3,
+    "rss_memory_mb": 5.73
+  },
+  {
+    "benchmark_id": "tcp_forward_1400b",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 25400.3,
+    "packets_measured": 500,
+    "throughput_pps": 19.7,
+    "throughput_mbps": 0.026,
+    "min_latency_us": 50406.2,
+    "p50_latency_us": 50733.1,
+    "p90_latency_us": 51035.6,
+    "p99_latency_us": 51594.8,
+    "max_latency_us": 52427.8,
+    "rss_memory_mb": 5.73
+  },
+  {
+    "benchmark_id": "bounded_queue_ops",
+    "environment": {
+      "label": "linux-x86_64-runner",
+      "os": "linux",
+      "arch": "x86_64",
+      "cpu_cores": 10,
+      "cpu_model": "AMD EPYC",
+      "rustc_version": "0.1.0"
+    },
+    "duration_ms": 0.99,
+    "packets_measured": 10000,
+    "throughput_pps": 10067745.9,
+    "throughput_mbps": 2457.95,
+    "min_latency_us": 0.05,
+    "p50_latency_us": 0.09,
+    "p90_latency_us": 0.11,
+    "p99_latency_us": 0.13,
+    "max_latency_us": 4.21,
+    "rss_memory_mb": 5.73
+  }
+]

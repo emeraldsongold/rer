@@ -17,3 +17,7 @@ serde_path_to_error = { workspace = true }
 schemars = { workspace = true }
 libc = { workspace = true }
 socket2 = { workspace = true }
+
+[[bench]]
+name = "benchmarks"
+harness = false
