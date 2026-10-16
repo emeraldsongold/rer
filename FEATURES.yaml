@@ -554,6 +554,25 @@ items:
       - In docs/CONFIGURATION.md, Section 8 documents commands rer version, rer diagnose, rer capture and rer replay, noting that rer version prints binary version information and exits with status 0 while rer diagnose, rer capture and rer replay exit with status 1 as planned roadmap features.
       - In README.md, the CLI summary in the Current Status section lists commands rer validate, rer inspect, rer run, rer test, rer status, rer health, rer streams, rer metrics and rer version.
 
+  - id: RER-F-030
+    order: 30
+    title: Implement rer diagnose CLI command for management diagnostic events
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-028]
+    spec_refs: [§7, §8, §9, §10, §20]
+    test_profile: standard
+    notes: 'Find gaps between SPEC §20 and the shipped CLI Relevant code: docs/SPEC.md, crates/rer/src/cli.rs, crates/rer/src/management.rs.'
+    acceptance:
+      - Running rer diagnose with option --socket pointing to an active relay management socket outputs the current operational mode, dropped event count, and recorded diagnostic events in arrival order, exiting with status 0.
+      - Running rer diagnose with options --socket and --json outputs a valid JSON object matching DiagnosticEventsReport containing mode, dropped_count, and events, exiting with status 0.
+      - Running rer diagnose with option --limit and a value of 2 returns at most 2 diagnostic events, with the newest event ordered last.
+      - Running rer diagnose against a running test-mode relay outputs the configured correlation ID and expiry seconds.
+      - Running rer diagnose with option --socket pointing to a nonexistent socket path prints an error to stderr and exits with status 1.
+
   - id: RER-T-001
     kind: track
     order: 101
