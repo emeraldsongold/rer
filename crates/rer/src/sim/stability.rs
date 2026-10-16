@@ -24,6 +24,7 @@ pub fn current_rss_bytes() -> u64 {
             let _size = parts.next();
             if let Some(resident_str) = parts.next() {
                 if let Ok(pages) = resident_str.parse::<u64>() {
+                    // SAFETY: sysconf(_SC_PAGESIZE) is a POSIX system call that queries system page size without mutating state or dereferencing pointers.
                     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
                     if page_size > 0 {
                         return pages * (page_size as u64);
@@ -34,7 +35,9 @@ pub fn current_rss_bytes() -> u64 {
     }
 
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage is a POSIX system call passed RUSAGE_SELF and a valid mutable pointer to uninitialized memory in `usage` to be initialized by the kernel.
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } == 0 {
+        // SAFETY: getrusage returned 0 (success), guaranteeing the `usage` struct was fully initialized by the kernel.
         let usage = unsafe { usage.assume_init() };
         #[cfg(target_os = "macos")]
         {

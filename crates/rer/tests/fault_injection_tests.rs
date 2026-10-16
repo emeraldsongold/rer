@@ -132,7 +132,6 @@ fn test_long_duration_quick_smoke_reports_memory_and_queue_stability() {
 // ===========================================================================
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_loss() {
     let res = FaultInjectionRunner::run(FaultType::Loss).expect("run loss fault scenario");
     assert!(res.passed, "Loss scenario details: {}", res.details);
@@ -141,7 +140,6 @@ fn test_fault_injection_loss() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_delay() {
     let res = FaultInjectionRunner::run(FaultType::Delay).expect("run delay fault scenario");
     assert!(res.passed, "Delay scenario details: {}", res.details);
@@ -149,7 +147,6 @@ fn test_fault_injection_delay() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_jitter() {
     let res = FaultInjectionRunner::run(FaultType::Jitter).expect("run jitter fault scenario");
     assert!(res.passed, "Jitter scenario details: {}", res.details);
@@ -157,7 +154,6 @@ fn test_fault_injection_jitter() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_reorder() {
     let res = FaultInjectionRunner::run(FaultType::Reorder).expect("run reorder fault scenario");
     assert!(res.passed, "Reorder scenario details: {}", res.details);
@@ -166,7 +162,6 @@ fn test_fault_injection_reorder() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_disconnect() {
     let res =
         FaultInjectionRunner::run(FaultType::Disconnect).expect("run disconnect fault scenario");
@@ -175,7 +170,6 @@ fn test_fault_injection_disconnect() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_slow_reader() {
     let res =
         FaultInjectionRunner::run(FaultType::SlowReader).expect("run slow reader fault scenario");
@@ -185,7 +179,6 @@ fn test_fault_injection_slow_reader() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_saturation() {
     let res =
         FaultInjectionRunner::run(FaultType::Saturation).expect("run saturation fault scenario");
@@ -194,7 +187,6 @@ fn test_fault_injection_saturation() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_fault_injection_restart() {
     let res = FaultInjectionRunner::run(FaultType::Restart).expect("run restart fault scenario");
     assert!(res.passed, "Restart scenario details: {}", res.details);
@@ -202,7 +194,6 @@ fn test_fault_injection_restart() {
 }
 
 #[test]
-#[ignore = "stress/adversarial suite (runs outside unprivileged suite)"]
 fn test_long_duration_stress_stability() {
     let config = LongDurationConfig {
         duration: Duration::from_secs(3),
@@ -228,7 +219,6 @@ fn test_long_duration_stress_stability() {
 }
 
 #[test]
-#[ignore = "benchmark suite (runs outside unprivileged suite)"]
 fn test_benchmark_suite_execution() {
     let results = BenchmarkRunner::run_all().expect("run full benchmark suite");
     assert!(!results.is_empty());
