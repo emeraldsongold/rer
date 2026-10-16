@@ -350,3 +350,121 @@ fn test_cli_inspect_json_flag() {
     assert!(!streams.is_empty());
     assert_eq!(streams[0]["stream_id"], "udp-forwarder");
 }
+
+#[test]
+fn test_cli_diagnose_exit_1() {
+    let output = Command::new(rer_bin())
+        .arg("diagnose")
+        .output()
+        .expect("failed to execute rer diagnose");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("rer diagnose is not yet implemented"));
+}
+
+#[test]
+fn test_cli_capture_exit_1() {
+    let output = Command::new(rer_bin())
+        .arg("capture")
+        .output()
+        .expect("failed to execute rer capture");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("rer capture is not yet implemented"));
+}
+
+#[test]
+fn test_cli_replay_exit_1() {
+    let output = Command::new(rer_bin())
+        .arg("replay")
+        .output()
+        .expect("failed to execute rer replay");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("rer replay is not yet implemented"));
+}
+
+#[test]
+fn test_cli_health_connection_failure_exit_1() {
+    let non_existent_sock = std::env::temp_dir().join("test_nonexistent_health.sock");
+    let output = Command::new(rer_bin())
+        .arg("health")
+        .arg("--socket")
+        .arg(&non_existent_sock)
+        .output()
+        .expect("failed to execute rer health");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn test_cli_docs_acceptance_criteria() {
+    let config_md = std::fs::read_to_string(repo_root().join("docs").join("CONFIGURATION.md"))
+        .expect("failed to read docs/CONFIGURATION.md");
+    let readme_md =
+        std::fs::read_to_string(repo_root().join("README.md")).expect("failed to read README.md");
+
+    // Acceptance criterion 1: rer health with --socket, --timeout and --json
+    assert!(config_md.contains("rer health"));
+    assert!(config_md.contains("--socket"));
+    assert!(config_md.contains("--timeout"));
+    assert!(config_md.contains("--json"));
+    assert!(config_md.contains("exit code 0 on healthy status"));
+    assert!(config_md.contains("non-zero exit code on unhealthy status or connection failure"));
+
+    // Acceptance criterion 2: rer inspect with --config, --format, --json, --effective, --socket, --endpoint, --auth-token and --timeout
+    assert!(config_md.contains("rer inspect"));
+    assert!(config_md.contains("--config"));
+    assert!(config_md.contains("--format"));
+    assert!(config_md.contains("--effective"));
+    assert!(config_md.contains("--endpoint"));
+    assert!(config_md.contains("--auth-token"));
+    assert!(config_md.contains("Effective configuration output"));
+    assert!(config_md.contains("Sequence tracking inspection reports"));
+
+    // Acceptance criterion 3: rer test and subcommands harness, generate and receive with options
+    assert!(config_md.contains("rer test"));
+    assert!(config_md.contains("harness"));
+    assert!(config_md.contains("generate"));
+    assert!(config_md.contains("receive"));
+    assert!(config_md.contains("--count"));
+    assert!(config_md.contains("--size"));
+    assert!(config_md.contains("--rate"));
+    assert!(config_md.contains("--burst"));
+    assert!(config_md.contains("--duration"));
+    assert!(config_md.contains("--seed"));
+    assert!(config_md.contains("--loss-rate"));
+    assert!(config_md.contains("--duplicate-rate"));
+    assert!(config_md.contains("--reorder-rate"));
+    assert!(config_md.contains("--target"));
+    assert!(config_md.contains("--bind"));
+
+    // Acceptance criterion 4: rer run options --health-socket, --metrics-endpoint, RER_MGMT_SOCKET, RER_HEALTH_SOCKET
+    assert!(config_md.contains("rer run"));
+    assert!(config_md.contains("--health-socket"));
+    assert!(config_md.contains("--metrics-endpoint"));
+    assert!(config_md.contains("RER_MGMT_SOCKET"));
+    assert!(config_md.contains("RER_HEALTH_SOCKET"));
+
+    // Acceptance criterion 5: rer version, rer diagnose, rer capture, rer replay
+    assert!(config_md.contains("rer version"));
+    assert!(config_md.contains("rer diagnose"));
+    assert!(config_md.contains("rer capture"));
+    assert!(config_md.contains("rer replay"));
+    assert!(config_md.contains("prints binary version information and exits with status 0"));
+    assert!(config_md.contains("exit with status 1 as planned roadmap features"));
+
+    // Acceptance criterion 6: README.md CLI summary
+    assert!(readme_md.contains("rer validate"));
+    assert!(readme_md.contains("rer inspect"));
+    assert!(readme_md.contains("rer run"));
+    assert!(readme_md.contains("rer test"));
+    assert!(readme_md.contains("rer status"));
+    assert!(readme_md.contains("rer health"));
+    assert!(readme_md.contains("rer streams"));
+    assert!(readme_md.contains("rer metrics"));
+    assert!(readme_md.contains("rer version"));
+}
