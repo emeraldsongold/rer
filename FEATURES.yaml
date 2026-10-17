@@ -573,6 +573,64 @@ items:
       - Running rer diagnose against a running test-mode relay outputs the configured correlation ID and expiry seconds.
       - Running rer diagnose with option --socket pointing to a nonexistent socket path prints an error to stderr and exits with status 1.
 
+  - id: RER-F-031
+    order: 31
+    title: In-tree CCSDS primary header parser and per-APID sequence tracker
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-016]
+    spec_refs: [§14, §5, §8]
+    test_profile: standard
+    notes: 'Part 1 of 3 of one request. Implement the CCSDS Space Packet support proposed in docs/proposals/RER-F-016.md, with these owner decisions. 1) In-tree, zero-dependency primary header parser (header parsing, validation, APID extraction, per-APID sequence tracking), kept extensible so a crate such as spacepackets can be added later. 2) An optional ccsds subsection under StreamConfig (stream.ccsds), separate from generic sequence tracking; existing configs behave exactly as before when it is off; a config that enables both ccsds sequence tracking and generic sequence tracking is rejected. 3) CCSDS length-based framing (C + 7 bytes) as an explicit alternative to RER''s four-byte length prefix for TCP, which stays the default; it must handle fragmented reads, several packets in one read, bounded buffering, invalid lengths and packet boundaries. 4) On a validation failure, drop the packet by default and emit a structured diagnostic event; add an opt-in passthrough_on_error option that forwards the original bytes unchanged and records the failure. Sequence gaps, duplicates and out-of-order packets produce diagnostics and never cause drops. Keep parsing, validation and TCP framing separate concerns; UDP datagrams and TCP streams need different boundary handling. Everything is opt-in, with tests for malformed headers, packet boundaries, sequence tracking and backward compatibility. Order: parser first, then stream integration, then TCP framing as its own step. Relevant code: docs/SPEC.md, docs/proposals/RER-F-016.md, crates/rer/src/config.rs.'
+    acceptance:
+      - crates/rer/src/ccsds.rs defines parse_ccsds_primary_header returning a parsed CcsdsPrimaryHeader with the 3-bit version, 1-bit packet type, 1-bit secondary header flag, 11-bit APID, 2-bit sequence flags, 14-bit sequence count, and total packet length calculated as packet data length plus 7 bytes.
+      - parse_ccsds_primary_header on a buffer shorter than 6 bytes returns CcsdsParseError::TruncatedHeader.
+      - parse_ccsds_primary_header on a header whose 3-bit packet version is non-zero returns CcsdsParseError::InvalidVersion.
+      - parse_ccsds_primary_header on a buffer whose byte length is less than declared packet data length plus 7 bytes returns CcsdsParseError::LengthMismatch.
+      - CcsdsSequenceTracker maintains sequence counts modulo 16384 independently for two distinct APIDs, detecting sequence gaps and duplicates on one APID without altering continuity state for the other APID.
+      - CcsdsSequenceTracker configured with idle packet filtering ignores packets with APID 2047 and records no sequence continuity gaps for that APID.
+
+  - id: RER-F-032
+    order: 32
+    title: CCSDS stream configuration and relay forwarding integration
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-031]
+    spec_refs: [§14, §5, §8]
+    test_profile: standard
+    notes: 'Part 2 of 3 of one request. Implement the CCSDS Space Packet support proposed in docs/proposals/RER-F-016.md, with these owner decisions. 1) In-tree, zero-dependency primary header parser (header parsing, validation, APID extraction, per-APID sequence tracking), kept extensible so a crate such as spacepackets can be added later. 2) An optional ccsds subsection under StreamConfig (stream.ccsds), separate from generic sequence tracking; existing configs behave exactly as before when it is off; a config that enables both ccsds sequence tracking and generic sequence tracking is rejected. 3) CCSDS length-based framing (C + 7 bytes) as an explicit alternative to RER''s four-byte length prefix for TCP, which stays the default; it must handle fragmented reads, several packets in one read, bounded buffering, invalid lengths and packet boundaries. 4) On a validation failure, drop the packet by default and emit a structured diagnostic event; add an opt-in passthrough_on_error option that forwards the original bytes unchanged and records the failure. Sequence gaps, duplicates and out-of-order packets produce diagnostics and never cause drops. Keep parsing, validation and TCP framing separate concerns; UDP datagrams and TCP streams need different boundary handling. Everything is opt-in, with tests for malformed headers, packet boundaries, sequence tracking and backward compatibility. Order: parser first, then stream integration, then TCP framing as its own step. Relevant code: docs/SPEC.md, docs/proposals/RER-F-016.md, crates/rer/src/config.rs.'
+    acceptance:
+      - StreamConfig accepts an optional ccsds configuration subsection, and configurations without ccsds forward packets identically to previous behavior.
+      - rer validate rejects any configuration where both ccsds sequence tracking and generic sequence tracking are enabled with a validation error identifying conflicting sequence tracking.
+      - When ccsds is enabled on a UDP stream, incoming datagrams with invalid version or truncated length are dropped by default, incrementing dropped packet counters and emitting a DiagnosticStage::Dropped diagnostic event.
+      - When ccsds has option passthrough_on_error set to true, datagrams failing CCSDS validation are forwarded unchanged to the destination while emitting a diagnostic failure event and recording the error.
+      - In a UDP stream with ccsds sequence tracking enabled, sequence gaps, duplicates, and out-of-order packets emit diagnostic events and are forwarded without dropping packets.
+
+  - id: RER-F-033
+    order: 33
+    title: CCSDS length-based framing for TCP streams
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-032]
+    spec_refs: [§14, §5, §8]
+    test_profile: standard
+    notes: 'Part 3 of 3 of one request. Implement the CCSDS Space Packet support proposed in docs/proposals/RER-F-016.md, with these owner decisions. 1) In-tree, zero-dependency primary header parser (header parsing, validation, APID extraction, per-APID sequence tracking), kept extensible so a crate such as spacepackets can be added later. 2) An optional ccsds subsection under StreamConfig (stream.ccsds), separate from generic sequence tracking; existing configs behave exactly as before when it is off; a config that enables both ccsds sequence tracking and generic sequence tracking is rejected. 3) CCSDS length-based framing (C + 7 bytes) as an explicit alternative to RER''s four-byte length prefix for TCP, which stays the default; it must handle fragmented reads, several packets in one read, bounded buffering, invalid lengths and packet boundaries. 4) On a validation failure, drop the packet by default and emit a structured diagnostic event; add an opt-in passthrough_on_error option that forwards the original bytes unchanged and records the failure. Sequence gaps, duplicates and out-of-order packets produce diagnostics and never cause drops. Keep parsing, validation and TCP framing separate concerns; UDP datagrams and TCP streams need different boundary handling. Everything is opt-in, with tests for malformed headers, packet boundaries, sequence tracking and backward compatibility. Order: parser first, then stream integration, then TCP framing as its own step. Relevant code: docs/SPEC.md, docs/proposals/RER-F-016.md, crates/rer/src/config.rs.'
+    acceptance:
+      - When TCP framing is configured with option framing set to ccsds, TCP ingress parses packet boundaries from the 6-byte CCSDS primary header data length field plus 7 bytes instead of the default 4-byte length prefix.
+      - A TCP stream configured with CCSDS framing reassembles packets arriving across fragmented reads delivering one byte at a time into complete individual Space Packets matching the sent payloads.
+      - A TCP stream configured with CCSDS framing receiving three concatenated Space Packets in a single read buffer separates and yields the three packets individually at their declared packet data length plus 7 byte boundaries.
+      - A TCP frame declaring a packet length exceeding the stream buffer limit causes the connection to reject the frame and increment dropped packet counters without crashing the relay.
+      - TCP endpoints without explicit framing configuration continue to use the default 4-byte length prefix, verified by existing TCP loopback integration tests passing unmodified.
+
   - id: RER-T-001
     kind: track
     order: 101
