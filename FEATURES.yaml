@@ -649,6 +649,61 @@ items:
       - In INSTALL, the Docker section provides commands to run the container image ghcr.io/emeraldsongold/rer:0.1.0 with options --read-only, --cap-drop=ALL, and --security-opt no-new-privileges:true, mapping port 5000:5000/udp.
       - In INSTALL, the Docker Compose section provides startup commands using docker compose -f deploy/compose/docker-compose.single.yml up -d for single instances and docker compose -f deploy/compose/docker-compose.relay-chain.yml up -d for relay chains.
 
+  - id: RER-F-036
+    order: 36
+    title: In-tree CBOR parser for BPv7 primary blocks
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-019]
+    spec_refs: [§14, §8]
+    test_profile: standard
+    notes: 'Part 1 of 3 of one request. Complete RER-F-019 with these decisions: 1. **Parser:** Use a lightweight, zero-dependency CBOR scanner for the BPv7 primary block. Keep it modular so an external crate such as ''bp7'' can be considered if future requirements expand. Enforce strict bounds checking and safe malformed-input handling. 2. **Configuration:** Add optional settings under ''stream.inspection.bpv7''. Inspection must be opt-in, preserve existing behavior when disabled, and enforce configurable limits on inspection size and extracted metadata. 3. **TCPCLv4:** Keep Phase 1 focused on transparent TCP/UDP relaying and passive BPv7 inspection. Defer TCPCLv4 session framing and negotiation to a future proposal with interoperability testing. 4. **Diagnostics:** Add a dedicated ''BundleInspection'' event in ''diagnostics.rs'' for structured bundle metadata and parse status. Ensure diagnostic handling is bounded and non-blocking. 5. **Milestone:** Approve changing the Phase 1 task in ''FEATURES.yaml'' from ''investigate-only'' to ''ready-auto'', subject to the defined scope and existing testing requirements. **Additional suggestions:** Inspection must never modify forwarded bytes or block relay workers. Distinguish malformed CBOR, valid non-BPv7 traffic, and valid BPv7 bundles. Test ''dtn:'' and ''ipn:'' EIDs, fragmentation metadata, CRC handling, truncated inputs, oversized values, and RFC 9171 reference vectors. Document that this is passive metadata inspection, not full BPv7 or TCPCLv4 support. Keep bundle storage, routing, BPSec verification, and convergence-layer implementation out of scope. Use established implementations such as ION or HDTN for integration testing where practical. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/relay.rs.'
+    acceptance:
+      - In crates/rer/src/bpv7.rs, parsing a valid CBOR primary block matching RFC 9171 reference vectors extracts the bundle protocol version 7, destination endpoint identifier, source node identifier, creation timestamp, and lifetime.
+      - 'In crates/rer/src/bpv7.rs, parsing a primary block containing an ipn: scheme destination endpoint identifier and a dtn: scheme source node identifier returns both decoded URI strings.'
+      - In crates/rer/src/bpv7.rs, parsing an input buffer shorter than the declared CBOR item lengths or truncated before the primary block completes returns an error indicating truncated input.
+      - In crates/rer/src/bpv7.rs, parsing an RFC 9171 primary block with fragmentation flags set extracts the fragment offset and total application data unit length.
+      - In crates/rer/src/bpv7.rs, evaluating arbitrary non-CBOR payload bytes returns a status distinguishing malformed CBOR from valid BPv7 bundle headers without panicking.
+
+  - id: RER-F-037
+    order: 37
+    title: BPv7 inspection configuration and BundleInspection diagnostic event
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-036]
+    spec_refs: [§14, §8]
+    test_profile: standard
+    notes: 'Part 2 of 3 of one request. Complete RER-F-019 with these decisions: 1. **Parser:** Use a lightweight, zero-dependency CBOR scanner for the BPv7 primary block. Keep it modular so an external crate such as ''bp7'' can be considered if future requirements expand. Enforce strict bounds checking and safe malformed-input handling. 2. **Configuration:** Add optional settings under ''stream.inspection.bpv7''. Inspection must be opt-in, preserve existing behavior when disabled, and enforce configurable limits on inspection size and extracted metadata. 3. **TCPCLv4:** Keep Phase 1 focused on transparent TCP/UDP relaying and passive BPv7 inspection. Defer TCPCLv4 session framing and negotiation to a future proposal with interoperability testing. 4. **Diagnostics:** Add a dedicated ''BundleInspection'' event in ''diagnostics.rs'' for structured bundle metadata and parse status. Ensure diagnostic handling is bounded and non-blocking. 5. **Milestone:** Approve changing the Phase 1 task in ''FEATURES.yaml'' from ''investigate-only'' to ''ready-auto'', subject to the defined scope and existing testing requirements. **Additional suggestions:** Inspection must never modify forwarded bytes or block relay workers. Distinguish malformed CBOR, valid non-BPv7 traffic, and valid BPv7 bundles. Test ''dtn:'' and ''ipn:'' EIDs, fragmentation metadata, CRC handling, truncated inputs, oversized values, and RFC 9171 reference vectors. Document that this is passive metadata inspection, not full BPv7 or TCPCLv4 support. Keep bundle storage, routing, BPSec verification, and convergence-layer implementation out of scope. Use established implementations such as ION or HDTN for integration testing where practical. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/relay.rs.'
+    acceptance:
+      - Deserializing a configuration YAML containing stream option inspection without option bpv7 defaults to None and preserves existing inspection behavior.
+      - Running rer validate on a configuration with option bpv7 and option max_inspect_bytes set to 0 returns a validation error reporting an invalid inspection size limit.
+      - In crates/rer/src/diagnostics.rs, creating a BundleInspection diagnostic event with endpoint identifiers, DTN timestamp, lifetime, and parse status serializes into JSON containing the structured bundle metadata.
+      - In crates/rer/src/diagnostics.rs, emitting a BundleInspection diagnostic event into a full DiagnosticBuffer drops the event without blocking or panicking.
+
+  - id: RER-F-038
+    order: 38
+    title: Passive BPv7 stream inspection and transparent relay forwarding
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-037]
+    spec_refs: [§14, §8]
+    test_profile: standard
+    notes: 'Part 3 of 3 of one request. Complete RER-F-019 with these decisions: 1. **Parser:** Use a lightweight, zero-dependency CBOR scanner for the BPv7 primary block. Keep it modular so an external crate such as ''bp7'' can be considered if future requirements expand. Enforce strict bounds checking and safe malformed-input handling. 2. **Configuration:** Add optional settings under ''stream.inspection.bpv7''. Inspection must be opt-in, preserve existing behavior when disabled, and enforce configurable limits on inspection size and extracted metadata. 3. **TCPCLv4:** Keep Phase 1 focused on transparent TCP/UDP relaying and passive BPv7 inspection. Defer TCPCLv4 session framing and negotiation to a future proposal with interoperability testing. 4. **Diagnostics:** Add a dedicated ''BundleInspection'' event in ''diagnostics.rs'' for structured bundle metadata and parse status. Ensure diagnostic handling is bounded and non-blocking. 5. **Milestone:** Approve changing the Phase 1 task in ''FEATURES.yaml'' from ''investigate-only'' to ''ready-auto'', subject to the defined scope and existing testing requirements. **Additional suggestions:** Inspection must never modify forwarded bytes or block relay workers. Distinguish malformed CBOR, valid non-BPv7 traffic, and valid BPv7 bundles. Test ''dtn:'' and ''ipn:'' EIDs, fragmentation metadata, CRC handling, truncated inputs, oversized values, and RFC 9171 reference vectors. Document that this is passive metadata inspection, not full BPv7 or TCPCLv4 support. Keep bundle storage, routing, BPSec verification, and convergence-layer implementation out of scope. Use established implementations such as ION or HDTN for integration testing where practical. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/relay.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a UDP datagram containing a valid BPv7 bundle sends the exact datagram payload bytes unmodified to destination sockets.
+      - In crates/rer/src/relay.rs, forwarding a TCP stream containing a BPv7 bundle records a BundleInspection diagnostic event with extracted endpoint identifiers in the diagnostic buffer while forwarding the stream unmodified.
+      - When a relay stream receives malformed CBOR or non-BPv7 traffic, the relay forwards the payload unmodified and records a diagnostic event with a status indicating unparsed traffic without stalling the forwarding thread.
+      - In docs/CONFIGURATION.md, documentation for stream option inspection specifies that BPv7 support performs passive metadata inspection without bundle storage, routing, BPSec verification, or TCPCLv4 convergence layer framing.
+
   - id: RER-T-001
     kind: track
     order: 101
