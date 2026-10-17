@@ -40,6 +40,9 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 28 | RER-F-028 | Test mode with correlation IDs, and recent events through the management API | BACKLOG | feature | medium | ready-auto | RER-F-027 | §9, §10 |
 | 29 | RER-F-029 | Document CLI commands and options in configuration guide | BACKLOG | docs | low | needs-impl-approval | RER-F-009 | §7 |
 | 30 | RER-F-030 | Implement rer diagnose CLI command for management diagnostic events | BACKLOG | feature | low | needs-impl-approval | RER-F-028 | §7, §8, §9, §10, §20 |
+| 31 | RER-F-031 | In-tree CCSDS primary header parser and per-APID sequence tracker | BACKLOG | feature | low | needs-impl-approval | RER-F-016 | §14, §5, §8 |
+| 32 | RER-F-032 | CCSDS stream configuration and relay forwarding integration | BACKLOG | feature | medium | needs-impl-approval | RER-F-031 | §14, §5, §8 |
+| 33 | RER-F-033 | CCSDS length-based framing for TCP streams | BACKLOG | feature | medium | needs-impl-approval | RER-F-032 | §14, §5, §8 |
 
 ## Cross-cutting tracks
 
@@ -52,7 +55,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033
 
 ## Owner approval gates
 
