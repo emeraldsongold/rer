@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-032 (CCSDS stream configuration and relay forwarding integration)
+- **CCSDS Stream Configuration**: Added optional `ccsds` subsection under `StreamConfig` (`stream.ccsds`) with `CcsdsConfig` supporting `enabled`, `validate_version`, `validate_length`, `track_sequences`, `filter_apids`, `ignore_idle_apid`, and `passthrough_on_error` (SPEC §14, §5, §8). Existing configurations without `ccsds` forward packets identically to previous behavior.
+- **Conflicting Sequence Tracking Validation**: Enforced semantic validation in `Config::validate()` and `rer validate` rejecting configurations where both CCSDS sequence tracking and generic sequence tracking are enabled with a validation error identifying conflicting sequence tracking.
+- **Default Drop on CCSDS Validation Failure**: Integrated ingress packet validation on UDP streams where datagrams with invalid version or truncated length are dropped by default, incrementing dropped packet counters and emitting `DiagnosticStage::Dropped` diagnostic events.
+- **Opt-in Error Passthrough**: Added `passthrough_on_error` option allowing datagrams failing CCSDS validation to be forwarded unchanged to the destination while recording validation errors and emitting `DiagnosticStage::Failure` diagnostic events.
+- **Per-APID Sequence Tracking Forwarding**: Integrated per-APID sequence tracking on UDP streams, emitting structured diagnostic events for sequence gaps, duplicate packets, and out-of-order packets while forwarding all packets without dropping.
+
 ### Added - Milestone RER-F-031 (In-tree CCSDS primary header parser and per-APID sequence tracker)
 - **Zero-Dependency CCSDS Primary Header Parser**: Added `parse_ccsds_primary_header` in `crates/rer/src/ccsds.rs` parsing the 6-octet CCSDS Space Packet Primary Header (3-bit version, 1-bit packet type, 1-bit secondary header flag, 11-bit APID, 2-bit sequence flags, 14-bit sequence count, and declared packet data length plus 7 bytes) per CCSDS 133.0-B-2 and SPEC §14.
 - **Robust Malformed Header Rejection**: Validated buffer boundaries and protocol invariants, returning explicit `CcsdsParseError::TruncatedHeader` on buffers shorter than 6 octets, `CcsdsParseError::InvalidVersion` on non-zero version numbers, and `CcsdsParseError::LengthMismatch` when buffer byte length is less than declared packet data length plus 7 bytes.

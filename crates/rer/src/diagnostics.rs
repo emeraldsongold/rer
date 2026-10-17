@@ -135,6 +135,18 @@ pub struct DiagnosticEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_number: Option<u64>,
 
+    /// CCSDS Application Process Identifier (APID) (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apid: Option<u16>,
+
+    /// CCSDS 14-bit sequence count (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccsds_sequence: Option<u16>,
+
+    /// CCSDS 2-bit sequence flags (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccsds_flags: Option<u8>,
+
     /// Opt-in hexadecimal preview of payload bytes (SPEC §8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hex_preview: Option<String>,
@@ -167,6 +179,9 @@ impl DiagnosticEvent {
             correlation_id: None,
             reason: None,
             sequence_number: None,
+            apid: None,
+            ccsds_sequence: None,
+            ccsds_flags: None,
             hex_preview: None,
             ascii_preview: None,
         }
@@ -204,6 +219,27 @@ impl DiagnosticEvent {
     #[must_use]
     pub fn with_sequence_number(mut self, seq: u64) -> Self {
         self.sequence_number = Some(seq);
+        self
+    }
+
+    /// Sets the CCSDS APID.
+    #[must_use]
+    pub fn with_apid(mut self, apid: u16) -> Self {
+        self.apid = Some(apid);
+        self
+    }
+
+    /// Sets the CCSDS sequence count.
+    #[must_use]
+    pub fn with_ccsds_sequence(mut self, seq: u16) -> Self {
+        self.ccsds_sequence = Some(seq);
+        self
+    }
+
+    /// Sets the CCSDS sequence flags.
+    #[must_use]
+    pub fn with_ccsds_flags(mut self, flags: u8) -> Self {
+        self.ccsds_flags = Some(flags);
         self
     }
 

@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::ByteOrder;
 use crate::diagnostics::{SequenceState, SequenceTrackingEvent};
 
+pub use crate::config::CcsdsConfig;
+
 /// CCSDS Space Packet Primary Header length in octets (fixed 6 octets / 48 bits).
 pub const CCSDS_PRIMARY_HEADER_LEN: usize = 6;
 
@@ -157,24 +159,28 @@ impl fmt::Display for CcsdsParseError {
 
 impl std::error::Error for CcsdsParseError {}
 
-/// Parses a CCSDS Space Packet Primary Header from a byte slice.
+/// Parses a CCSDS Space Packet Primary Header from a byte slice with configurable validation.
 ///
 /// # Acceptance Rules
 /// - Returns [`CcsdsParseError::TruncatedHeader`] if `data.len() < 6`.
-/// - Returns [`CcsdsParseError::InvalidVersion`] if the 3-bit packet version is non-zero.
-/// - Returns [`CcsdsParseError::LengthMismatch`] if `data.len() < packet_data_length + 7`.
+/// - Returns [`CcsdsParseError::InvalidVersion`] if `validate_version` is true and version != 0.
+/// - Returns [`CcsdsParseError::LengthMismatch`] if `validate_length` is true and `data.len() < total_packet_length`.
 /// - Calculates `total_packet_length` as `packet_data_length + 7` bytes.
 ///
 /// # Errors
 /// Returns [`CcsdsParseError`] if the header is truncated, invalid, or length declared exceeds the buffer.
-pub fn parse_ccsds_primary_header(data: &[u8]) -> Result<CcsdsPrimaryHeader, CcsdsParseError> {
+pub fn parse_ccsds_primary_header_relaxed(
+    data: &[u8],
+    validate_version: bool,
+    validate_length: bool,
+) -> Result<CcsdsPrimaryHeader, CcsdsParseError> {
     if data.len() < CCSDS_PRIMARY_HEADER_LEN {
         return Err(CcsdsParseError::TruncatedHeader);
     }
 
     let word1 = u16::from_be_bytes([data[0], data[1]]);
     let version = ((word1 >> 13) & 0x07) as u8;
-    if version != 0 {
+    if validate_version && version != 0 {
         return Err(CcsdsParseError::InvalidVersion);
     }
 
@@ -189,7 +195,7 @@ pub fn parse_ccsds_primary_header(data: &[u8]) -> Result<CcsdsPrimaryHeader, Ccs
     let packet_data_length = u16::from_be_bytes([data[4], data[5]]);
     let total_packet_length = (packet_data_length as usize) + 7;
 
-    if data.len() < total_packet_length {
+    if validate_length && data.len() < total_packet_length {
         return Err(CcsdsParseError::LengthMismatch);
     }
 
@@ -203,6 +209,31 @@ pub fn parse_ccsds_primary_header(data: &[u8]) -> Result<CcsdsPrimaryHeader, Ccs
         packet_data_length,
         total_packet_length,
     })
+}
+
+/// Parses a CCSDS Space Packet Primary Header from a byte slice with default validation.
+///
+/// # Acceptance Rules
+/// - Returns [`CcsdsParseError::TruncatedHeader`] if `data.len() < 6`.
+/// - Returns [`CcsdsParseError::InvalidVersion`] if the 3-bit packet version is non-zero.
+/// - Returns [`CcsdsParseError::LengthMismatch`] if `data.len() < packet_data_length + 7`.
+/// - Calculates `total_packet_length` as `packet_data_length + 7` bytes.
+///
+/// # Errors
+/// Returns [`CcsdsParseError`] if the header is truncated, invalid, or length declared exceeds the buffer.
+pub fn parse_ccsds_primary_header(data: &[u8]) -> Result<CcsdsPrimaryHeader, CcsdsParseError> {
+    parse_ccsds_primary_header_relaxed(data, true, true)
+}
+
+/// Parses and validates a CCSDS Space Packet from a byte slice using the given [`CcsdsConfig`].
+///
+/// # Errors
+/// Returns [`CcsdsParseError`] if the packet fails validation per configured options.
+pub fn parse_and_validate_ccsds_packet(
+    data: &[u8],
+    config: &CcsdsConfig,
+) -> Result<CcsdsPrimaryHeader, CcsdsParseError> {
+    parse_ccsds_primary_header_relaxed(data, config.validate_version, config.validate_length)
 }
 
 /// Continuity and sequence tracking state for an individual APID modulo 16384.
@@ -397,6 +428,7 @@ pub struct CcsdsSequenceTracker {
     ignore_idle_apid: bool,
     allowed_apids: Option<HashSet<u16>>,
     trackers: HashMap<u16, ApidSequenceTracker>,
+    validation_errors: u64,
 }
 
 impl CcsdsSequenceTracker {
@@ -410,7 +442,19 @@ impl CcsdsSequenceTracker {
             ignore_idle_apid,
             allowed_apids: None,
             trackers: HashMap::new(),
+            validation_errors: 0,
         }
+    }
+
+    /// Records a CCSDS packet validation error.
+    pub fn record_validation_error(&mut self) {
+        self.validation_errors += 1;
+    }
+
+    /// Returns the total count of CCSDS validation errors recorded.
+    #[must_use]
+    pub fn validation_error_count(&self) -> u64 {
+        self.validation_errors
     }
 
     /// Creates a new CCSDS sequence tracker with idle packet filtering.

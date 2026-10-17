@@ -76,6 +76,55 @@
         "little_endian"
       ]
     },
+    "CcsdsConfig": {
+      "description": "Configuration for CCSDS Space Packet parsing, validation, and sequence tracking (SPEC §14).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable CCSDS primary header parsing and validation. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "filter_apids": {
+          "description": "Optional allowlist of APIDs to accept/track. If None, all APIDs are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0.0
+          }
+        },
+        "ignore_idle_apid": {
+          "description": "Exclude idle packets (APID 2047 / 0x7FF) from sequence tracking and gap alerts. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "passthrough_on_error": {
+          "description": "When true, datagrams failing CCSDS validation are forwarded unchanged to destination. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "track_sequences": {
+          "description": "Track sequence continuity independently per APID. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "validate_length": {
+          "description": "Validate that datagram size matches Packet Data Length + 7. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "validate_version": {
+          "description": "Enforce Packet Version Number == 0. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "ConnectionMode": {
       "description": "Connection modes for endpoints.",
       "type": "string",
@@ -467,6 +516,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/BufferConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ccsds": {
+          "description": "Optional CCSDS Space Packet parsing, validation, and sequence tracking configuration (SPEC §14). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CcsdsConfig"
             },
             {
               "type": "null"
