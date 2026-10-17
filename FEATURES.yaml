@@ -631,6 +631,24 @@ items:
       - A TCP frame declaring a packet length exceeding the stream buffer limit causes the connection to reject the frame and increment dropped packet counters without crashing the relay.
       - TCP endpoints without explicit framing configuration continue to use the default 4-byte length prefix, verified by existing TCP loopback integration tests passing unmodified.
 
+  - id: RER-F-035
+    order: 35
+    title: Create INSTALL guide for package and container deployments
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-014, RER-F-015]
+    spec_refs: [§16]
+    test_profile: standard
+    notes: 'Create a new document called INSTALL. With instructions on how to install the software on the various systems. Explain and show how to do the apt, deb, portable, docker, docker-compose, and helm installs. Relevant code: README.md, PLATFORM_SUPPORT.md, deploy/docker/README.md.'
+    acceptance:
+      - In README.md, the Documentation Index section includes a link to INSTALL documenting installation procedures across supported deployment targets.
+      - In INSTALL, the portable standalone section documents extracting rer-&lt;version&gt;-linux-&lt;arch&gt;.tar.gz with tar -xzf and running bin/rer with configuration /etc/rer/rer.yaml and systemd unit systemd/rer.service.
+      - In INSTALL, the Docker section provides commands to run the container image ghcr.io/emeraldsongold/rer:0.1.0 with options --read-only, --cap-drop=ALL, and --security-opt no-new-privileges:true, mapping port 5000:5000/udp.
+      - In INSTALL, the Docker Compose section provides startup commands using docker compose -f deploy/compose/docker-compose.single.yml up -d for single instances and docker compose -f deploy/compose/docker-compose.relay-chain.yml up -d for relay chains.
+
   - id: RER-T-001
     kind: track
     order: 101
