@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-031 (In-tree CCSDS primary header parser and per-APID sequence tracker)
+- **Zero-Dependency CCSDS Primary Header Parser**: Added `parse_ccsds_primary_header` in `crates/rer/src/ccsds.rs` parsing the 6-octet CCSDS Space Packet Primary Header (3-bit version, 1-bit packet type, 1-bit secondary header flag, 11-bit APID, 2-bit sequence flags, 14-bit sequence count, and declared packet data length plus 7 bytes) per CCSDS 133.0-B-2 and SPEC §14.
+- **Robust Malformed Header Rejection**: Validated buffer boundaries and protocol invariants, returning explicit `CcsdsParseError::TruncatedHeader` on buffers shorter than 6 octets, `CcsdsParseError::InvalidVersion` on non-zero version numbers, and `CcsdsParseError::LengthMismatch` when buffer byte length is less than declared packet data length plus 7 bytes.
+- **Independent Per-APID Sequence Tracking**: Implemented `CcsdsSequenceTracker` maintaining sequence continuity modulo 16384 independently across distinct APIDs, detecting sequence gaps and duplicates on one APID without altering continuity state for other APIDs.
+- **Idle Packet Filtering**: Supported opt-in filtering for CCSDS idle packets (APID 2047 / `0x7FF`), ignoring fill packets and recording no continuity gaps or errors for that APID.
+
 ### Added - Milestone RER-F-017 (Long-duration, adversarial, fault-injection and performance testing)
 - **Repeatable Benchmark Definitions & Environment-Labelled Baselines**: Codified deterministic benchmark definitions (`udp_forward_64b`, `udp_forward_512b`, `udp_forward_1400b`, `tcp_forward_64b`, `tcp_forward_512b`, `tcp_forward_1400b`, and `bounded_queue_ops`) with recorded baselines labelled by environment (`linux-x86_64-runner`) in `docs/BENCHMARKS.md` and `benchmarks/baselines.json` (SPEC §13, §21).
 - **Zero-Unmeasured-Performance-Claims Enforcement**: Strictly enforced requirement that no throughput, latency, CPU, or memory claims are made without empirical before-and-after measured data; verified comparative results across unoptimized debug and optimized release builds.
