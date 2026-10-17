@@ -97,6 +97,17 @@
             "minimum": 0.0
           }
         },
+        "framing": {
+          "description": "Optional framing mode override (\"length_prefix\" or \"ccsds\").",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "ignore_idle_apid": {
           "description": "Exclude idle packets (APID 2047 / 0x7FF) from sequence tracking and gap alerts. Defaults to true.",
           "default": true,
@@ -154,6 +165,17 @@
           "description": "Network endpoint address in \"host:port\" format (e.g. \"127.0.0.1:5000\").",
           "type": "string"
         },
+        "framing": {
+          "description": "Optional framing mode for TCP endpoints (\"length_prefix\" or \"ccsds\"). Defaults to length_prefix.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "mode": {
           "description": "Connection mode (\"listen\" or \"connect\").",
           "anyOf": [
@@ -175,6 +197,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "FramingMode": {
+      "description": "Framing modes for TCP streams (SPEC §5, §14).",
+      "oneOf": [
+        {
+          "description": "Standard 4-byte big-endian length prefix (default).",
+          "type": "string",
+          "enum": [
+            "length_prefix"
+          ]
+        },
+        {
+          "description": "CCSDS Space Packet length-based framing (packet data length field + 7 bytes).",
+          "type": "string",
+          "enum": [
+            "ccsds"
+          ]
+        }
+      ]
     },
     "InspectionConfig": {
       "description": "Opt-in packet inspection and payload preview configuration (SPEC §8).",
@@ -560,6 +601,17 @@
           "items": {
             "$ref": "#/definitions/EndpointConfig"
           }
+        },
+        "framing": {
+          "description": "Optional framing mode for TCP streams (\"length_prefix\" or \"ccsds\"). Defaults to length_prefix.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "id": {
           "description": "Unique identity of the stream.",

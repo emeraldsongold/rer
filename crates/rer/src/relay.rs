@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequenceTracker};
 use crate::config::{
-    Config, ConnectionMode, DropPolicy, EndpointConfig, InstanceConfig, OperationalMode,
-    StreamConfig, TransportType,
+    CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig, FramingMode, InstanceConfig,
+    OperationalMode, StreamConfig, TransportType,
 };
 use crate::diagnostics::{
     DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState, SequenceState,
@@ -482,6 +482,7 @@ struct TcpDestinationConnection {
     config_path: String,
     stream_id: String,
     event_buffer: DiagnosticBuffer,
+    framing: FramingMode,
     stream: Option<TcpStream>,
     backoff: Duration,
     initial_backoff: Duration,
@@ -497,12 +498,14 @@ impl TcpDestinationConnection {
         config_path: String,
         stream_id: String,
         event_buffer: DiagnosticBuffer,
+        framing: FramingMode,
     ) -> Self {
         Self {
             address,
             config_path,
             stream_id,
             event_buffer,
+            framing,
             stream: None,
             initial_backoff: Duration::from_millis(50),
             max_backoff: Duration::from_millis(1000),
@@ -626,10 +629,17 @@ impl TcpDestinationConnection {
             ));
         }
 
-        let frame = framing::encode_frame(payload);
         let s = self.stream.as_mut().unwrap();
 
-        match s.write_all(&frame) {
+        let write_res = match self.framing {
+            FramingMode::LengthPrefix => {
+                let frame = framing::encode_frame(payload);
+                s.write_all(&frame)
+            }
+            FramingMode::Ccsds => s.write_all(payload),
+        };
+
+        match write_res {
             Ok(()) => {
                 let _ = s.flush();
                 stats.forwarded_packets.fetch_add(1, Ordering::SeqCst);
@@ -681,6 +691,240 @@ impl TcpDestinationConnection {
                 );
                 Err(e)
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExtractedCcsds {
+    apid: Option<u16>,
+    seq: Option<u16>,
+    flags: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CcsdsIngressContext<'a> {
+    ccsds_cfg: Option<&'a CcsdsConfig>,
+    ccsds_tracker: Option<&'a Arc<Mutex<CcsdsSequenceTracker>>>,
+    stats: &'a StreamStats,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
+    transport: TransportType,
+}
+
+fn process_ccsds_ingress(payload: &[u8], ctx: &CcsdsIngressContext<'_>) -> Option<ExtractedCcsds> {
+    let CcsdsIngressContext {
+        ccsds_cfg,
+        ccsds_tracker,
+        stats,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+    let Some(ccsds_cfg) = ccsds_cfg else {
+        return Some(ExtractedCcsds::default());
+    };
+    if !ccsds_cfg.enabled {
+        return Some(ExtractedCcsds::default());
+    }
+
+    match parse_and_validate_ccsds_packet(payload, ccsds_cfg) {
+        Err(parse_err) => {
+            stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+            if let Some(t) = ccsds_tracker {
+                t.lock().unwrap().record_validation_error();
+            }
+
+            if !ccsds_cfg.passthrough_on_error {
+                stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+
+                let drop_reason = match parse_err {
+                    CcsdsParseError::TruncatedHeader => {
+                        "CCSDS packet truncated: buffer shorter than 6-byte primary header".to_string()
+                    }
+                    CcsdsParseError::InvalidVersion => {
+                        "invalid CCSDS packet version: expected 0 for Space Packets".to_string()
+                    }
+                    CcsdsParseError::LengthMismatch => {
+                        "CCSDS packet length mismatch: buffer length is less than declared packet data length plus 7 bytes".to_string()
+                    }
+                };
+                eprintln!(
+                    "[stream {}] Dropped invalid CCSDS {} packet: {}",
+                    stream_id, transport, drop_reason
+                );
+
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Dropped,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_reason(drop_reason),
+                );
+                None
+            } else {
+                let fail_reason = match parse_err {
+                    CcsdsParseError::TruncatedHeader => {
+                        "CCSDS validation failed (passthrough): buffer shorter than 6-byte primary header".to_string()
+                    }
+                    CcsdsParseError::InvalidVersion => {
+                        "CCSDS validation failed (passthrough): invalid CCSDS packet version".to_string()
+                    }
+                    CcsdsParseError::LengthMismatch => {
+                        "CCSDS validation failed (passthrough): buffer length is less than declared packet data length plus 7 bytes".to_string()
+                    }
+                };
+                eprintln!(
+                    "[stream {}] CCSDS validation failed (passthrough): {}",
+                    stream_id, fail_reason
+                );
+
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Failure,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_reason(fail_reason),
+                );
+                Some(ExtractedCcsds::default())
+            }
+        }
+        Ok(header) => {
+            let extracted = ExtractedCcsds {
+                apid: Some(header.apid),
+                seq: Some(header.sequence_count),
+                flags: Some(header.sequence_flags),
+            };
+
+            if ccsds_cfg.track_sequences {
+                if let Some(t) = ccsds_tracker {
+                    let tracking_ev = {
+                        let mut tracker = t.lock().unwrap();
+                        tracker.record_header(&header)
+                    };
+                    if let Some(ev) = tracking_ev {
+                        match ev {
+                            SequenceTrackingEvent::Gap {
+                                expected,
+                                actual,
+                                missing_count,
+                            } => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_apid(header.apid)
+                                    .with_sequence_number(u64::from(header.sequence_count))
+                                    .with_ccsds_sequence(header.sequence_count)
+                                    .with_ccsds_flags(header.sequence_flags)
+                                    .with_reason(format!(
+                                        "CCSDS sequence gap: APID {}, expected {}, actual {}, missing {} packets",
+                                        header.apid, expected, actual, missing_count
+                                    )),
+                                );
+                            }
+                            SequenceTrackingEvent::Duplicate { sequence } => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_apid(header.apid)
+                                    .with_sequence_number(sequence)
+                                    .with_ccsds_sequence(header.sequence_count)
+                                    .with_ccsds_flags(header.sequence_flags)
+                                    .with_reason(format!(
+                                        "CCSDS sequence duplicate: APID {}, duplicate sequence {}",
+                                        header.apid, sequence
+                                    )),
+                                );
+                            }
+                            SequenceTrackingEvent::OutOfOrder {
+                                sequence,
+                                previous_highest,
+                            } => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_apid(header.apid)
+                                    .with_sequence_number(sequence)
+                                    .with_ccsds_sequence(header.sequence_count)
+                                    .with_ccsds_flags(header.sequence_flags)
+                                    .with_reason(format!(
+                                        "CCSDS sequence out-of-order: APID {}, sequence {} arrived after highest {}",
+                                        header.apid, sequence, previous_highest
+                                    )),
+                                );
+                            }
+                            SequenceTrackingEvent::Rollover {
+                                sequence,
+                                missing_count,
+                            } if missing_count > 0 => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_apid(header.apid)
+                                    .with_sequence_number(sequence)
+                                    .with_ccsds_sequence(header.sequence_count)
+                                    .with_ccsds_flags(header.sequence_flags)
+                                    .with_reason(format!(
+                                        "CCSDS sequence rollover with gap: APID {}, rollover to {} with {} missing packets",
+                                        header.apid, sequence, missing_count
+                                    )),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some(extracted)
         }
     }
 }
@@ -864,197 +1108,21 @@ impl StreamRunner {
                                 let src_endpoint = src_addr.to_string();
                                 let payload_slice = &buf[..n];
 
-                                let mut extracted_seq = None;
-                                let mut extracted_apid = None;
-                                let mut extracted_ccsds_seq = None;
-                                let mut extracted_ccsds_flags = None;
-
-                                if let Some(ref ccsds_cfg) = recv_ccsds_config {
-                                    if ccsds_cfg.enabled {
-                                        match parse_and_validate_ccsds_packet(
-                                            payload_slice,
-                                            ccsds_cfg,
-                                        ) {
-                                            Err(parse_err) => {
-                                                recv_stats
-                                                    .validation_errors
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                                if let Some(ref t) = recv_ccsds_tracker {
-                                                    t.lock().unwrap().record_validation_error();
-                                                }
-
-                                                if !ccsds_cfg.passthrough_on_error {
-                                                    recv_stats
-                                                        .dropped_packets
-                                                        .fetch_add(1, Ordering::Relaxed);
-                                                    recv_stats
-                                                        .drops_validation
-                                                        .fetch_add(1, Ordering::Relaxed);
-
-                                                    let drop_reason = match parse_err {
-                                                        CcsdsParseError::TruncatedHeader => "CCSDS packet truncated: buffer shorter than 6-byte primary header".to_string(),
-                                                        CcsdsParseError::InvalidVersion => "invalid CCSDS packet version: expected 0 for Space Packets".to_string(),
-                                                        CcsdsParseError::LengthMismatch => "CCSDS packet length mismatch: buffer length is less than declared packet data length plus 7 bytes".to_string(),
-                                                    };
-                                                    eprintln!("[stream {}] Dropped invalid CCSDS datagram: {}", recv_stream_id, drop_reason);
-
-                                                    recv_event_buffer.emit(
-                                                        DiagnosticEvent::new(
-                                                            recv_event_buffer
-                                                                .clock()
-                                                                .monotonic_nanos(),
-                                                            recv_event_buffer
-                                                                .clock()
-                                                                .wall_clock_nanos(),
-                                                            &recv_stream_id,
-                                                            DiagnosticStage::Dropped,
-                                                            TransportType::Udp,
-                                                            n as u64,
-                                                        )
-                                                        .with_source(&src_endpoint)
-                                                        .with_destination(&recv_primary_dest)
-                                                        .with_reason(drop_reason),
-                                                    );
-                                                    continue;
-                                                } else {
-                                                    let fail_reason = match parse_err {
-                                                        CcsdsParseError::TruncatedHeader => "CCSDS validation failed (passthrough): buffer shorter than 6-byte primary header".to_string(),
-                                                        CcsdsParseError::InvalidVersion => "CCSDS validation failed (passthrough): invalid CCSDS packet version".to_string(),
-                                                        CcsdsParseError::LengthMismatch => "CCSDS validation failed (passthrough): buffer length is less than declared packet data length plus 7 bytes".to_string(),
-                                                    };
-                                                    eprintln!("[stream {}] CCSDS validation failed (passthrough): {}", recv_stream_id, fail_reason);
-
-                                                    recv_event_buffer.emit(
-                                                        DiagnosticEvent::new(
-                                                            recv_event_buffer
-                                                                .clock()
-                                                                .monotonic_nanos(),
-                                                            recv_event_buffer
-                                                                .clock()
-                                                                .wall_clock_nanos(),
-                                                            &recv_stream_id,
-                                                            DiagnosticStage::Failure,
-                                                            TransportType::Udp,
-                                                            n as u64,
-                                                        )
-                                                        .with_source(&src_endpoint)
-                                                        .with_destination(&recv_primary_dest)
-                                                        .with_reason(fail_reason),
-                                                    );
-                                                }
-                                            }
-                                            Ok(header) => {
-                                                extracted_seq =
-                                                    Some(u64::from(header.sequence_count));
-                                                extracted_apid = Some(header.apid);
-                                                extracted_ccsds_seq = Some(header.sequence_count);
-                                                extracted_ccsds_flags = Some(header.sequence_flags);
-
-                                                if ccsds_cfg.track_sequences {
-                                                    if let Some(ref t) = recv_ccsds_tracker {
-                                                        let tracking_ev = {
-                                                            let mut tracker = t.lock().unwrap();
-                                                            tracker.record_header(&header)
-                                                        };
-                                                        if let Some(ev) = tracking_ev {
-                                                            match ev {
-                                                                SequenceTrackingEvent::Gap { expected, actual, missing_count } => {
-                                                                    recv_event_buffer.emit(
-                                                                        DiagnosticEvent::new(
-                                                                            recv_event_buffer.clock().monotonic_nanos(),
-                                                                            recv_event_buffer.clock().wall_clock_nanos(),
-                                                                            &recv_stream_id,
-                                                                            DiagnosticStage::Failure,
-                                                                            TransportType::Udp,
-                                                                            n as u64,
-                                                                        )
-                                                                        .with_source(&src_endpoint)
-                                                                        .with_destination(&recv_primary_dest)
-                                                                        .with_apid(header.apid)
-                                                                        .with_sequence_number(u64::from(header.sequence_count))
-                                                                        .with_ccsds_sequence(header.sequence_count)
-                                                                        .with_ccsds_flags(header.sequence_flags)
-                                                                        .with_reason(format!(
-                                                                            "CCSDS sequence gap: APID {}, expected {}, actual {}, missing {} packets",
-                                                                            header.apid, expected, actual, missing_count
-                                                                        )),
-                                                                    );
-                                                                }
-                                                                SequenceTrackingEvent::Duplicate { sequence } => {
-                                                                    recv_event_buffer.emit(
-                                                                        DiagnosticEvent::new(
-                                                                            recv_event_buffer.clock().monotonic_nanos(),
-                                                                            recv_event_buffer.clock().wall_clock_nanos(),
-                                                                            &recv_stream_id,
-                                                                            DiagnosticStage::Failure,
-                                                                            TransportType::Udp,
-                                                                            n as u64,
-                                                                        )
-                                                                        .with_source(&src_endpoint)
-                                                                        .with_destination(&recv_primary_dest)
-                                                                        .with_apid(header.apid)
-                                                                        .with_sequence_number(u64::from(header.sequence_count))
-                                                                        .with_ccsds_sequence(header.sequence_count)
-                                                                        .with_ccsds_flags(header.sequence_flags)
-                                                                        .with_reason(format!(
-                                                                            "CCSDS duplicate packet: APID {}, sequence {}",
-                                                                            header.apid, sequence
-                                                                        )),
-                                                                    );
-                                                                }
-                                                                SequenceTrackingEvent::OutOfOrder { sequence, previous_highest } => {
-                                                                    recv_event_buffer.emit(
-                                                                        DiagnosticEvent::new(
-                                                                            recv_event_buffer.clock().monotonic_nanos(),
-                                                                            recv_event_buffer.clock().wall_clock_nanos(),
-                                                                            &recv_stream_id,
-                                                                            DiagnosticStage::Failure,
-                                                                            TransportType::Udp,
-                                                                            n as u64,
-                                                                        )
-                                                                        .with_source(&src_endpoint)
-                                                                        .with_destination(&recv_primary_dest)
-                                                                        .with_apid(header.apid)
-                                                                        .with_sequence_number(u64::from(header.sequence_count))
-                                                                        .with_ccsds_sequence(header.sequence_count)
-                                                                        .with_ccsds_flags(header.sequence_flags)
-                                                                        .with_reason(format!(
-                                                                            "CCSDS out-of-order packet: APID {}, sequence {}, previous highest {}",
-                                                                            header.apid, sequence, previous_highest
-                                                                        )),
-                                                                    );
-                                                                }
-                                                                SequenceTrackingEvent::Rollover { sequence, missing_count } if missing_count > 0 => {
-                                                                    recv_event_buffer.emit(
-                                                                        DiagnosticEvent::new(
-                                                                            recv_event_buffer.clock().monotonic_nanos(),
-                                                                            recv_event_buffer.clock().wall_clock_nanos(),
-                                                                            &recv_stream_id,
-                                                                            DiagnosticStage::Failure,
-                                                                            TransportType::Udp,
-                                                                            n as u64,
-                                                                        )
-                                                                        .with_source(&src_endpoint)
-                                                                        .with_destination(&recv_primary_dest)
-                                                                        .with_apid(header.apid)
-                                                                        .with_sequence_number(u64::from(header.sequence_count))
-                                                                        .with_ccsds_sequence(header.sequence_count)
-                                                                        .with_ccsds_flags(header.sequence_flags)
-                                                                        .with_reason(format!(
-                                                                            "CCSDS sequence gap: APID {}, rollover to {}, missing {} packets",
-                                                                            header.apid, sequence, missing_count
-                                                                        )),
-                                                                    );
-                                                                }
-                                                                _ => {}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                let Some(ccsds_info) = process_ccsds_ingress(
+                                    payload_slice,
+                                    &CcsdsIngressContext {
+                                        ccsds_cfg: recv_ccsds_config.as_ref(),
+                                        ccsds_tracker: recv_ccsds_tracker.as_ref(),
+                                        stats: &recv_stats,
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                ) else {
+                                    continue;
+                                };
 
                                 let (generic_seq, hex_prev, ascii_prev) = {
                                     let mut tracker = recv_seq_tracker.lock().unwrap();
@@ -1069,9 +1137,10 @@ impl StreamRunner {
                                     }
                                 };
 
-                                if extracted_seq.is_none() {
-                                    extracted_seq = generic_seq;
-                                }
+                                let extracted_seq = ccsds_info.seq.map(u64::from).or(generic_seq);
+                                let extracted_apid = ccsds_info.apid;
+                                let extracted_ccsds_seq = ccsds_info.seq;
+                                let extracted_ccsds_flags = ccsds_info.flags;
 
                                 let attach_diag = |mut ev: DiagnosticEvent| -> DiagnosticEvent {
                                     if let Some(s) = extracted_seq {
@@ -1281,6 +1350,9 @@ impl StreamRunner {
             }
             TransportType::Tcp => {
                 let mode_con = stream.source.mode.unwrap_or(ConnectionMode::Listen);
+                let source_framing = stream.source_framing();
+                let ccsds_tracker_for_tcp = ccsds_tracker.as_ref().map(Arc::clone);
+                let ccsds_config_for_tcp = stream.ccsds.clone();
                 let recv_stream_id = stream_id.clone();
                 let recv_stats = Arc::clone(&stats);
                 let recv_shutdown = Arc::clone(&shutdown_flag);
@@ -1319,12 +1391,17 @@ impl StreamRunner {
                                         let cl_stream_id = recv_stream_id.clone();
                                         let cl_primary_dest = recv_primary_dest.clone();
                                         let cl_seq_tracker = Arc::clone(&recv_seq_tracker);
+                                        let cl_source_framing = source_framing;
+                                        let cl_ccsds_tracker =
+                                            ccsds_tracker_for_tcp.as_ref().map(Arc::clone);
+                                        let cl_ccsds_config = ccsds_config_for_tcp.clone();
 
                                         let client_h = thread::spawn(move || {
                                             let src_endpoint = client_addr.to_string();
                                             while !cl_shutdown.load(Ordering::Relaxed) {
-                                                match framing::read_frame(
+                                                match framing::read_frame_with_mode(
                                                     &mut client_stream,
+                                                    cl_source_framing,
                                                     max_packet_size,
                                                     &cl_shutdown,
                                                 ) {
@@ -1337,7 +1414,27 @@ impl StreamRunner {
                                                             .received_bytes
                                                             .fetch_add(n as u64, Ordering::Relaxed);
 
-                                                        let (extracted_seq, hex_prev, ascii_prev) = {
+                                                        let Some(ccsds_info) =
+                                                            process_ccsds_ingress(
+                                                                &payload,
+                                                                &CcsdsIngressContext {
+                                                                    ccsds_cfg: cl_ccsds_config
+                                                                        .as_ref(),
+                                                                    ccsds_tracker: cl_ccsds_tracker
+                                                                        .as_ref(),
+                                                                    stats: &cl_stats,
+                                                                    event_buffer: &cl_event_buffer,
+                                                                    stream_id: &cl_stream_id,
+                                                                    src_endpoint: &src_endpoint,
+                                                                    primary_dest: &cl_primary_dest,
+                                                                    transport: TransportType::Tcp,
+                                                                },
+                                                            )
+                                                        else {
+                                                            continue;
+                                                        };
+
+                                                        let (generic_seq, hex_prev, ascii_prev) = {
                                                             let mut tracker =
                                                                 cl_seq_tracker.lock().unwrap();
                                                             if tracker.is_enabled() {
@@ -1355,9 +1452,27 @@ impl StreamRunner {
                                                             }
                                                         };
 
+                                                        let extracted_seq = ccsds_info
+                                                            .seq
+                                                            .map(u64::from)
+                                                            .or(generic_seq);
+                                                        let extracted_apid = ccsds_info.apid;
+                                                        let extracted_ccsds_seq = ccsds_info.seq;
+                                                        let extracted_ccsds_flags =
+                                                            ccsds_info.flags;
+
                                                         let attach_diag = |mut ev: DiagnosticEvent| -> DiagnosticEvent {
                                                             if let Some(s) = extracted_seq {
                                                                 ev = ev.with_sequence_number(s);
+                                                            }
+                                                            if let Some(a) = extracted_apid {
+                                                                ev = ev.with_apid(a);
+                                                            }
+                                                            if let Some(s) = extracted_ccsds_seq {
+                                                                ev = ev.with_ccsds_sequence(s);
+                                                            }
+                                                            if let Some(f) = extracted_ccsds_flags {
+                                                                ev = ev.with_ccsds_flags(f);
                                                             }
                                                             if let Some(ref h) = hex_prev {
                                                                 ev = ev.with_hex_preview(h);
@@ -1687,8 +1802,9 @@ impl StreamRunner {
                                         let src_endpoint = target_addr.to_string();
 
                                         while !recv_shutdown.load(Ordering::Relaxed) {
-                                            match framing::read_frame(
+                                            match framing::read_frame_with_mode(
                                                 &mut stream,
+                                                source_framing,
                                                 max_packet_size,
                                                 &recv_shutdown,
                                             ) {
@@ -1701,7 +1817,25 @@ impl StreamRunner {
                                                         .received_bytes
                                                         .fetch_add(n as u64, Ordering::Relaxed);
 
-                                                    let (extracted_seq, hex_prev, ascii_prev) = {
+                                                    let Some(ccsds_info) = process_ccsds_ingress(
+                                                        &payload,
+                                                        &CcsdsIngressContext {
+                                                            ccsds_cfg: ccsds_config_for_tcp
+                                                                .as_ref(),
+                                                            ccsds_tracker: ccsds_tracker_for_tcp
+                                                                .as_ref(),
+                                                            stats: &recv_stats,
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
+                                                    ) else {
+                                                        continue;
+                                                    };
+
+                                                    let (generic_seq, hex_prev, ascii_prev) = {
                                                         let mut tracker =
                                                             conn_seq_tracker.lock().unwrap();
                                                         if tracker.is_enabled() {
@@ -1719,9 +1853,26 @@ impl StreamRunner {
                                                         }
                                                     };
 
+                                                    let extracted_seq = ccsds_info
+                                                        .seq
+                                                        .map(u64::from)
+                                                        .or(generic_seq);
+                                                    let extracted_apid = ccsds_info.apid;
+                                                    let extracted_ccsds_seq = ccsds_info.seq;
+                                                    let extracted_ccsds_flags = ccsds_info.flags;
+
                                                     let attach_diag = |mut ev: DiagnosticEvent| -> DiagnosticEvent {
                                                         if let Some(s) = extracted_seq {
                                                             ev = ev.with_sequence_number(s);
+                                                        }
+                                                        if let Some(a) = extracted_apid {
+                                                            ev = ev.with_apid(a);
+                                                        }
+                                                        if let Some(s) = extracted_ccsds_seq {
+                                                            ev = ev.with_ccsds_sequence(s);
+                                                        }
+                                                        if let Some(f) = extracted_ccsds_flags {
+                                                            ev = ev.with_ccsds_flags(f);
                                                         }
                                                         if let Some(ref h) = hex_prev {
                                                             ev = ev.with_hex_preview(h);
@@ -1988,6 +2139,8 @@ impl StreamRunner {
         let fwd_event_buffer = event_buffer.clone();
         let is_active = Arc::new(AtomicBool::new(true));
         let fwd_is_active = Arc::clone(&is_active);
+        let fwd_stream_framing = stream.framing;
+        let fwd_stream_ccsds_framing = stream.ccsds.as_ref().and_then(|c| c.framing);
 
         let fwd_handle = thread::spawn(move || {
             let ipv4_socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0))).ok();
@@ -1998,11 +2151,17 @@ impl StreamRunner {
                 .iter()
                 .map(|(d, path)| {
                     if d.transport == TransportType::Tcp {
+                        let framing = d
+                            .framing
+                            .or(fwd_stream_framing)
+                            .or(fwd_stream_ccsds_framing)
+                            .unwrap_or_default();
                         Some(TcpDestinationConnection::new(
                             d.address.clone(),
                             path.clone(),
                             fwd_stream_id.clone(),
                             fwd_event_buffer.clone(),
+                            framing,
                         ))
                     } else {
                         None
