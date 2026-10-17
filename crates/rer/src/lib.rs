@@ -4,6 +4,7 @@
 //! network diagnostics tool.
 
 pub mod capture;
+pub mod ccsds;
 pub mod cli;
 pub mod config;
 pub mod diagnostics;
@@ -20,6 +21,10 @@ pub use capture::{
     build_synthetic_frame, build_synthetic_pcap, build_synthetic_pcapng, compute_ipv4_checksum,
     decode_packet, parse_capture, parse_capture_file, parse_pcap, parse_pcapng, CaptureError,
     CaptureFormat, CaptureSummary, CapturedPacket, LinkType, SyntheticPacket,
+};
+pub use ccsds::{
+    parse_ccsds_primary_header, ApidSequenceTracker, CcsdsParseError, CcsdsPrimaryHeader,
+    CcsdsSequenceTracker, CCSDS_IDLE_APID, CCSDS_PRIMARY_HEADER_LEN, CCSDS_SEQUENCE_MODULUS,
 };
 pub use config::{
     ByteOrder, Config, DropPolicy, InspectionConfig, InstanceConfig, LogicalInterfaceConfig,
