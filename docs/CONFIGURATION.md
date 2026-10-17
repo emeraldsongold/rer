@@ -111,8 +111,27 @@ Each stream specifies forwarding from a `source` to one or more destinations:
 | `destination` | object | No* | Single egress endpoint. Conflicts with `destinations`. |
 | `destinations` | array | No* | List of egress endpoints for fan-out. Conflicts with `destination`. |
 | `buffer` | object | No | Stream-level buffer limits (`max_queue_size`, `max_packet_size`, `drop_policy`). |
+| `sequence` | object | No | Optional generic sequence extraction and tracking (`SequenceConfig`). Off by default. |
+| `inspection` | object | No | Optional packet inspection and preview configuration (`InspectionConfig`). Off by default. |
+| `ccsds` | object | No | Optional CCSDS Space Packet parsing, validation, and per-APID sequence tracking (`CcsdsConfig`). Off by default. |
 
 *Note: Either `destination` or `destinations` must be specified, but not both.*
+
+### CCSDS Space Packet Configuration (`CcsdsConfig`)
+
+Configures parsing, validation, and sequence tracking for CCSDS Space Packets (CCSDS 133.0-B-2, SPEC §14).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enables CCSDS primary header parsing and validation. |
+| `validate_version` | boolean | `true` | Enforces packet version number == 0 (Space Packets). |
+| `validate_length` | boolean | `true` | Validates that datagram length is at least packet data length + 7. |
+| `track_sequences` | boolean | `true` | Tracks sequence continuity independently per APID modulo 16,384. |
+| `filter_apids` | array | `null` | Optional allowlist of APIDs (0–2047) to accept/track. |
+| `ignore_idle_apid` | boolean | `true` | Excludes idle packets (APID 2047 / 0x7FF) from sequence tracking and gap alerts. |
+| `passthrough_on_error` | boolean | `false` | When `true`, datagrams failing CCSDS validation are forwarded unchanged while emitting a diagnostic failure event and recording the error. When `false` (default), invalid datagrams are dropped with a `DiagnosticStage::Dropped` event. |
+
+*Note: A configuration specifying both active CCSDS sequence tracking (`ccsds.track_sequences: true`) and generic sequence tracking (`sequence.enabled: true`) on the same stream is rejected by `rer validate` with a conflicting sequence tracking error.*
 
 ### Endpoint Configuration (`EndpointConfig`)
 

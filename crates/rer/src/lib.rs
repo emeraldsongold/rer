@@ -23,13 +23,14 @@ pub use capture::{
     CaptureFormat, CaptureSummary, CapturedPacket, LinkType, SyntheticPacket,
 };
 pub use ccsds::{
-    parse_ccsds_primary_header, ApidSequenceTracker, CcsdsParseError, CcsdsPrimaryHeader,
+    parse_and_validate_ccsds_packet, parse_ccsds_primary_header,
+    parse_ccsds_primary_header_relaxed, ApidSequenceTracker, CcsdsParseError, CcsdsPrimaryHeader,
     CcsdsSequenceTracker, CCSDS_IDLE_APID, CCSDS_PRIMARY_HEADER_LEN, CCSDS_SEQUENCE_MODULUS,
 };
 pub use config::{
-    ByteOrder, Config, DropPolicy, InspectionConfig, InstanceConfig, LogicalInterfaceConfig,
-    MetricsConfig, OperationalMode, SequenceConfig, StreamConfig, TestModeConfig, ValidationError,
-    ValidationReport,
+    ByteOrder, CcsdsConfig, Config, DropPolicy, InspectionConfig, InstanceConfig,
+    LogicalInterfaceConfig, MetricsConfig, OperationalMode, SequenceConfig, StreamConfig,
+    TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, Clock, DiagnosticBuffer, DiagnosticBufferBuilder,
