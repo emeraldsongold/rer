@@ -23,7 +23,8 @@ pub use capture::{
 };
 pub use config::{
     ByteOrder, Config, DropPolicy, InspectionConfig, InstanceConfig, LogicalInterfaceConfig,
-    MetricsConfig, SequenceConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
+    MetricsConfig, OperationalMode, SequenceConfig, StreamConfig, TestModeConfig, ValidationError,
+    ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, Clock, DiagnosticBuffer, DiagnosticBufferBuilder,

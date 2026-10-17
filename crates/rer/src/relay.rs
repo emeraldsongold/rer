@@ -939,7 +939,6 @@ impl StreamRunner {
                                     recv_stats
                                         .queue_depth
                                         .store(q.len() as u64, Ordering::Relaxed);
-                                    recv_condvar.notify_one();
                                     res
                                 };
 
@@ -959,6 +958,7 @@ impl StreamRunner {
                                                 .with_destination(&recv_primary_dest),
                                             );
                                         }
+                                        recv_condvar.notify_one();
                                     }
                                     PushResult::DroppedOldest => {
                                         recv_stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -1192,7 +1192,6 @@ impl StreamRunner {
                                                                 q.len() as u64,
                                                                 Ordering::Relaxed,
                                                             );
-                                                            cl_condvar.notify_one();
                                                             res
                                                         };
 
@@ -1214,6 +1213,7 @@ impl StreamRunner {
                                                                         .with_destination(&cl_primary_dest),
                                                                     );
                                                                 }
+                                                                cl_condvar.notify_one();
                                                             }
                                                             PushResult::DroppedOldest => {
                                                                 cl_stats.dropped_packets.fetch_add(
@@ -1555,7 +1555,6 @@ impl StreamRunner {
                                                             q.len() as u64,
                                                             Ordering::Relaxed,
                                                         );
-                                                        recv_condvar.notify_one();
                                                         res
                                                     };
 
@@ -1577,6 +1576,7 @@ impl StreamRunner {
                                                                     .with_destination(&recv_primary_dest),
                                                                 );
                                                             }
+                                                            recv_condvar.notify_one();
                                                         }
                                                         PushResult::DroppedOldest => {
                                                             recv_stats

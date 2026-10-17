@@ -118,6 +118,16 @@ pub enum OperationalMode {
     Test,
 }
 
+impl fmt::Display for OperationalMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Production => write!(f, "production"),
+            Self::Debug => write!(f, "debug"),
+            Self::Test => write!(f, "test"),
+        }
+    }
+}
+
 fn default_operational_mode() -> OperationalMode {
     OperationalMode::Production
 }
@@ -416,6 +426,15 @@ pub struct EndpointConfig {
 pub enum TransportType {
     Udp,
     Tcp,
+}
+
+impl fmt::Display for TransportType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Udp => write!(f, "udp"),
+            Self::Tcp => write!(f, "tcp"),
+        }
+    }
 }
 
 /// Connection modes for endpoints.
