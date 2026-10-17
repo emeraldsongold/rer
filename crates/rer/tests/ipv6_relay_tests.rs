@@ -169,7 +169,15 @@ instances:
         assert_eq!(&buf[..n], *p);
     }
 
-    let stats = relay.stream_stats("fanout-stream").expect("stream stats");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut stats = relay.stream_stats("fanout-stream").expect("stream stats");
+    while (stats.forwarded_packets < 5 || stats.destination_errors < 5)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+        stats = relay.stream_stats("fanout-stream").expect("stream stats");
+    }
+
     assert_eq!(stats.received_packets, 5);
     assert_eq!(stats.forwarded_packets, 5);
     assert!(
