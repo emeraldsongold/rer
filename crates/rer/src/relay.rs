@@ -702,18 +702,29 @@ struct ExtractedCcsds {
     flags: Option<u8>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn process_ccsds_ingress(
-    payload: &[u8],
-    ccsds_cfg: Option<&CcsdsConfig>,
-    ccsds_tracker: Option<&Arc<Mutex<CcsdsSequenceTracker>>>,
-    stats: &StreamStats,
-    event_buffer: &DiagnosticBuffer,
-    stream_id: &str,
-    src_endpoint: &str,
-    primary_dest: &str,
+#[derive(Debug, Clone, Copy)]
+struct CcsdsIngressContext<'a> {
+    ccsds_cfg: Option<&'a CcsdsConfig>,
+    ccsds_tracker: Option<&'a Arc<Mutex<CcsdsSequenceTracker>>>,
+    stats: &'a StreamStats,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
     transport: TransportType,
-) -> Option<ExtractedCcsds> {
+}
+
+fn process_ccsds_ingress(payload: &[u8], ctx: &CcsdsIngressContext<'_>) -> Option<ExtractedCcsds> {
+    let CcsdsIngressContext {
+        ccsds_cfg,
+        ccsds_tracker,
+        stats,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
     let Some(ccsds_cfg) = ccsds_cfg else {
         return Some(ExtractedCcsds::default());
     };
@@ -1099,14 +1110,16 @@ impl StreamRunner {
 
                                 let Some(ccsds_info) = process_ccsds_ingress(
                                     payload_slice,
-                                    recv_ccsds_config.as_ref(),
-                                    recv_ccsds_tracker.as_ref(),
-                                    &recv_stats,
-                                    &recv_event_buffer,
-                                    &recv_stream_id,
-                                    &src_endpoint,
-                                    &recv_primary_dest,
-                                    TransportType::Udp,
+                                    &CcsdsIngressContext {
+                                        ccsds_cfg: recv_ccsds_config.as_ref(),
+                                        ccsds_tracker: recv_ccsds_tracker.as_ref(),
+                                        stats: &recv_stats,
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
                                 ) else {
                                     continue;
                                 };
@@ -1404,14 +1417,18 @@ impl StreamRunner {
                                                         let Some(ccsds_info) =
                                                             process_ccsds_ingress(
                                                                 &payload,
-                                                                cl_ccsds_config.as_ref(),
-                                                                cl_ccsds_tracker.as_ref(),
-                                                                &cl_stats,
-                                                                &cl_event_buffer,
-                                                                &cl_stream_id,
-                                                                &src_endpoint,
-                                                                &cl_primary_dest,
-                                                                TransportType::Tcp,
+                                                                &CcsdsIngressContext {
+                                                                    ccsds_cfg: cl_ccsds_config
+                                                                        .as_ref(),
+                                                                    ccsds_tracker: cl_ccsds_tracker
+                                                                        .as_ref(),
+                                                                    stats: &cl_stats,
+                                                                    event_buffer: &cl_event_buffer,
+                                                                    stream_id: &cl_stream_id,
+                                                                    src_endpoint: &src_endpoint,
+                                                                    primary_dest: &cl_primary_dest,
+                                                                    transport: TransportType::Tcp,
+                                                                },
                                                             )
                                                         else {
                                                             continue;
@@ -1802,14 +1819,18 @@ impl StreamRunner {
 
                                                     let Some(ccsds_info) = process_ccsds_ingress(
                                                         &payload,
-                                                        ccsds_config_for_tcp.as_ref(),
-                                                        ccsds_tracker_for_tcp.as_ref(),
-                                                        &recv_stats,
-                                                        &recv_event_buffer,
-                                                        &recv_stream_id,
-                                                        &src_endpoint,
-                                                        &recv_primary_dest,
-                                                        TransportType::Tcp,
+                                                        &CcsdsIngressContext {
+                                                            ccsds_cfg: ccsds_config_for_tcp
+                                                                .as_ref(),
+                                                            ccsds_tracker: ccsds_tracker_for_tcp
+                                                                .as_ref(),
+                                                            stats: &recv_stats,
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
                                                     ) else {
                                                         continue;
                                                     };
