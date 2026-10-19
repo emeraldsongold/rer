@@ -42,8 +42,8 @@ pub enum Commands {
     /// Show status of relay instances
     Status(StatusArgs),
 
-    /// Diagnose network issues (planned)
-    Diagnose(PlaceholderArgs),
+    /// View management diagnostic events and operational mode
+    Diagnose(DiagnoseArgs),
 
     /// Inspect stream configurations and logical interfaces
     Streams(StreamsArgs),
@@ -178,6 +178,37 @@ pub struct StatusArgs {
     /// Output report as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DiagnoseArgs {
+    /// Path to Unix domain socket for management diagnostic probe
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+
+    /// Remote management endpoint for diagnostic probe (e.g. 127.0.0.1:9443)
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
+    /// Authentication token for management probe
+    #[arg(long)]
+    pub auth_token: Option<String>,
+
+    /// Maximum number of diagnostic events to return (bounded limit, newest last)
+    #[arg(short, long)]
+    pub limit: Option<usize>,
+
+    /// Timeout in seconds to wait for diagnostic response
+    #[arg(short, long, default_value = "2.0")]
+    pub timeout: f64,
+
+    /// Output report as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Output format: text or json
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -526,10 +557,7 @@ pub fn execute(cli: Cli) -> ExitCode {
         Commands::Run(args) => execute_run(args),
         Commands::Health(args) => execute_health(args),
         Commands::Status(args) => execute_status(args),
-        Commands::Diagnose(_) => {
-            eprintln!("rer diagnose is not yet implemented (scheduled in roadmap milestone RER-F-008). See KNOWN_ISSUES.md.");
-            ExitCode::from(1)
-        }
+        Commands::Diagnose(args) => execute_diagnose(args),
         Commands::Streams(args) => execute_streams(args),
         Commands::Metrics(args) => execute_metrics(args),
         Commands::Capture(_) => {
@@ -1072,6 +1100,97 @@ fn execute_status(args: StatusArgs) -> ExitCode {
                 eprintln!(
                     "Error: cannot connect to RER relay at '{}': {}",
                     target, err
+                );
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn execute_diagnose(args: DiagnoseArgs) -> ExitCode {
+    let timeout = Duration::from_secs_f64(args.timeout.max(0.1));
+    let target = args.endpoint.unwrap_or_else(|| {
+        args.socket
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| std::env::var("RER_MGMT_SOCKET").ok())
+            .or_else(|| std::env::var("RER_HEALTH_SOCKET").ok())
+            .unwrap_or_else(|| "/tmp/relay_health.sock".to_string())
+    });
+
+    let is_json = args.json || args.format == OutputFormat::Json;
+
+    match crate::management::query_events(&target, timeout, args.auth_token.as_deref(), args.limit)
+    {
+        Ok(report) => {
+            if is_json {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            } else {
+                println!("RER Relay Diagnostic Events:");
+                println!("============================");
+                println!("Operational Mode: {}", report.mode);
+                println!("Dropped Events: {}", report.dropped_count);
+                println!("Dropped Event Count: {}", report.dropped_count);
+                if let Some(ref corr) = report.correlation_id {
+                    println!("Correlation ID: {}", corr);
+                }
+                if let Some(expiry) = report.expiry_seconds.or(report.expiry) {
+                    println!("Expiry Seconds: {}", expiry);
+                }
+                if let Some(ref reason) = report.end_reason {
+                    println!("End Reason: {}", reason);
+                }
+                println!("Recorded Diagnostic Events ({}):", report.events.len());
+                for (i, ev) in report.events.iter().enumerate() {
+                    let mut details = Vec::new();
+                    details.push(format!("stream={}", ev.stream_id));
+                    details.push(format!("stage={}", ev.stage));
+                    details.push(format!("transport={}", ev.transport));
+                    details.push(format!("bytes={}", ev.payload_length));
+                    if let Some(ref src) = ev.source_endpoint {
+                        details.push(format!("src={}", src));
+                    }
+                    if let Some(ref dst) = ev.destination_endpoint {
+                        details.push(format!("dst={}", dst));
+                    }
+                    if let Some(seq) = ev.sequence_number {
+                        details.push(format!("seq={}", seq));
+                    }
+                    if let Some(ref corr) = ev.correlation_id {
+                        details.push(format!("corr={}", corr));
+                    }
+                    if let Some(ref reason) = ev.reason {
+                        details.push(format!("reason={}", reason));
+                    }
+                    if let Some(ref hex) = ev.hex_preview {
+                        details.push(format!("hex={}", hex));
+                    }
+                    if let Some(ref ascii) = ev.ascii_preview {
+                        details.push(format!("ascii={}", ascii));
+                    }
+                    println!(
+                        "  [{}] mono={}ns wall={}ns: {}",
+                        i + 1,
+                        ev.monotonic_timestamp,
+                        ev.wall_clock_timestamp,
+                        details.join(" ")
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": format!("cannot connect to management endpoint at '{}': {}", crate::relay::format_endpoint(&target), err)
+                    })
+                );
+            } else {
+                eprintln!(
+                    "Error: cannot connect to RER management endpoint at '{}': {}",
+                    crate::relay::format_endpoint(&target),
+                    err
                 );
             }
             ExitCode::from(1)

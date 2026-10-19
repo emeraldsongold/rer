@@ -123,10 +123,91 @@ pub fn read_frame<R: Read>(
     Ok(Some(payload))
 }
 
+pub use crate::config::FramingMode;
+
+/// Reads a single CCSDS Space Packet frame from `reader`.
+///
+/// In CCSDS length-based framing, the 6-byte Space Packet Primary Header contains
+/// a 16-bit big-endian Packet Data Length field C at bytes 4..6.
+/// The total packet length is `C + 7` bytes (6-byte header + `C + 1` data bytes).
+///
+/// Validates that total packet length does not exceed `max_frame_size`.
+pub fn read_ccsds_frame<R: Read>(
+    reader: &mut R,
+    max_frame_size: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut header = [0u8; 6];
+    let ok = read_exact_interruptible(reader, &mut header, shutdown)?;
+    if !ok {
+        return Ok(None);
+    }
+
+    let packet_data_length = u16::from_be_bytes([header[4], header[5]]) as usize;
+    let total_packet_length = packet_data_length + 7;
+
+    if total_packet_length > max_frame_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "CCSDS frame total length {} exceeds maximum allowed {}",
+                total_packet_length, max_frame_size
+            ),
+        ));
+    }
+
+    let mut packet = vec![0u8; total_packet_length];
+    packet[..6].copy_from_slice(&header);
+
+    let ok = read_exact_interruptible(reader, &mut packet[6..], shutdown)?;
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "stream closed before full CCSDS frame payload was read",
+        ));
+    }
+
+    Ok(Some(packet))
+}
+
+/// Writes a CCSDS Space Packet frame to `writer`.
+///
+/// In CCSDS length-based framing, the packet is self-delimiting via its 6-byte
+/// primary header data length field, so the raw Space Packet bytes are transmitted
+/// directly without an additional length prefix.
+pub fn write_ccsds_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<()> {
+    writer.write_all(packet)
+}
+
+/// Reads a single frame from `reader` using the specified [`FramingMode`].
+pub fn read_frame_with_mode<R: Read>(
+    reader: &mut R,
+    mode: FramingMode,
+    max_frame_size: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<Option<Vec<u8>>> {
+    match mode {
+        FramingMode::LengthPrefix => read_frame(reader, max_frame_size, shutdown),
+        FramingMode::Ccsds => read_ccsds_frame(reader, max_frame_size, shutdown),
+    }
+}
+
 /// Writes a complete length-prefixed frame to `writer`.
 pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> io::Result<()> {
     let frame = encode_frame(payload);
     writer.write_all(&frame)
+}
+
+/// Writes a single frame to `writer` using the specified [`FramingMode`].
+pub fn write_frame_with_mode<W: Write>(
+    writer: &mut W,
+    mode: FramingMode,
+    payload: &[u8],
+) -> io::Result<()> {
+    match mode {
+        FramingMode::LengthPrefix => write_frame(writer, payload),
+        FramingMode::Ccsds => write_ccsds_frame(writer, payload),
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +331,142 @@ mod tests {
             .expect("read chunked")
             .expect("payload");
         assert_eq!(decoded, payload);
+    }
+
+    fn make_test_ccsds_packet(apid: u16, seq: u16, payload_data: &[u8]) -> Vec<u8> {
+        let payload_len = payload_data.len().max(1);
+        let c = (payload_len - 1) as u16;
+        let mut pkt = Vec::with_capacity(6 + payload_len);
+        let word1: u16 = apid & 0x07FF;
+        pkt.extend_from_slice(&word1.to_be_bytes());
+        let word2: u16 = (3 << 14) | (seq & 0x3FFF);
+        pkt.extend_from_slice(&word2.to_be_bytes());
+        pkt.extend_from_slice(&c.to_be_bytes());
+        pkt.extend_from_slice(payload_data);
+        if payload_data.is_empty() {
+            pkt.push(0x00);
+        }
+        pkt
+    }
+
+    #[test]
+    fn test_ccsds_single_frame() {
+        let pkt = make_test_ccsds_packet(42, 100, b"space packet payload");
+        let mut cursor = Cursor::new(pkt.clone());
+        let shutdown = AtomicBool::new(false);
+
+        let decoded = read_ccsds_frame(&mut cursor, 1024, &shutdown)
+            .expect("read frame")
+            .expect("some frame");
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn test_ccsds_fragmented_tcp_chunks_defragmentation() {
+        let pkt = make_test_ccsds_packet(101, 7, b"fragmented ccsds delivery byte-by-byte");
+        let cursor = Cursor::new(pkt.clone());
+        let mut chunked = ChunkedReader {
+            inner: cursor,
+            chunk_size: 1, // Deliver exactly 1 byte per read() call
+        };
+        let shutdown = AtomicBool::new(false);
+
+        let decoded = read_ccsds_frame(&mut chunked, 1024, &shutdown)
+            .expect("read chunked ccsds")
+            .expect("payload");
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn test_ccsds_three_concatenated_packets_in_single_read_buffer() {
+        let p1 = make_test_ccsds_packet(10, 1, b"first space packet");
+        let p2 = make_test_ccsds_packet(20, 2, b"second packet with different len");
+        let p3 = make_test_ccsds_packet(30, 3, b"3");
+
+        let mut stream_bytes = Vec::new();
+        stream_bytes.extend_from_slice(&p1);
+        stream_bytes.extend_from_slice(&p2);
+        stream_bytes.extend_from_slice(&p3);
+
+        let mut cursor = Cursor::new(stream_bytes);
+        let shutdown = AtomicBool::new(false);
+
+        let r1 = read_ccsds_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .unwrap();
+        let r2 = read_ccsds_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .unwrap();
+        let r3 = read_ccsds_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .unwrap();
+        let r4 = read_ccsds_frame(&mut cursor, 1024, &shutdown).unwrap();
+
+        assert_eq!(r1, p1);
+        assert_eq!(r2, p2);
+        assert_eq!(r3, p3);
+        assert!(r4.is_none());
+    }
+
+    #[test]
+    fn test_ccsds_oversized_frame_rejection() {
+        // Declared data length 200 -> total length 207 bytes
+        let pkt = make_test_ccsds_packet(5, 1, &[0xAA; 200]);
+        let mut cursor = Cursor::new(pkt);
+        let shutdown = AtomicBool::new(false);
+
+        // Limit is 100
+        let err = read_ccsds_frame(&mut cursor, 100, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_ccsds_unexpected_eof_in_header() {
+        let partial_header = vec![0x00, 0x01, 0x02]; // only 3 bytes instead of 6
+        let mut cursor = Cursor::new(partial_header);
+        let shutdown = AtomicBool::new(false);
+
+        let err = read_ccsds_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_ccsds_unexpected_eof_in_payload() {
+        let pkt = make_test_ccsds_packet(1, 1, b"0123456789");
+        // Truncate payload
+        let truncated = pkt[..pkt.len() - 3].to_vec();
+        let mut cursor = Cursor::new(truncated);
+        let shutdown = AtomicBool::new(false);
+
+        let err = read_ccsds_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_read_and_write_frame_with_mode() {
+        let shutdown = AtomicBool::new(false);
+
+        // LengthPrefix mode
+        let payload = b"hello length prefix".to_vec();
+        let mut lp_buf = Vec::new();
+        write_frame_with_mode(&mut lp_buf, FramingMode::LengthPrefix, &payload).unwrap();
+        let mut lp_cursor = Cursor::new(lp_buf);
+        let decoded =
+            read_frame_with_mode(&mut lp_cursor, FramingMode::LengthPrefix, 1024, &shutdown)
+                .unwrap()
+                .unwrap();
+        assert_eq!(decoded, payload);
+
+        // Ccsds mode
+        let ccsds_pkt = make_test_ccsds_packet(99, 1, b"hello ccsds mode");
+        let mut ccsds_buf = Vec::new();
+        write_frame_with_mode(&mut ccsds_buf, FramingMode::Ccsds, &ccsds_pkt).unwrap();
+        let mut ccsds_cursor = Cursor::new(ccsds_buf);
+        let decoded_ccsds =
+            read_frame_with_mode(&mut ccsds_cursor, FramingMode::Ccsds, 1024, &shutdown)
+                .unwrap()
+                .unwrap();
+        assert_eq!(decoded_ccsds, ccsds_pkt);
     }
 }

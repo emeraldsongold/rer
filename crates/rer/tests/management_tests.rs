@@ -849,3 +849,176 @@ instance:
     relay.stop();
     let _ = fs::remove_file(&sock_path);
 }
+
+// ============================================================================
+// Acceptance Criteria for RER-F-030: rer diagnose CLI command
+// ============================================================================
+
+#[test]
+fn test_cli_diagnose_running_relay() {
+    let src_port = pick_unused_port();
+    let dst_port = pick_unused_port();
+    let mgmt_port = pick_unused_port();
+    let sock_path = std::env::temp_dir().join(format!("rer_cli_diagnose_{}.sock", mgmt_port));
+
+    let yaml = format!(
+        r#"
+version: "1"
+instance:
+  id: "diagnose-test-node"
+  mode: "test"
+  test_mode:
+    correlation_id: "corr-diag-123"
+    duration_seconds: 300
+    prior_mode: "production"
+  management:
+    enabled: true
+    endpoint: "{}"
+  streams:
+    - id: "s-diag-test"
+      source:
+        transport: "udp"
+        address: "127.0.0.1:{src_port}"
+      destination:
+        transport: "udp"
+        address: "127.0.0.1:{dst_port}"
+"#,
+        sock_path.display()
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("parse config");
+    let relay = Relay::start(&config).expect("start relay");
+    let mgmt_server = ManagementServer::start_local(&sock_path, relay.health_handle(), None)
+        .expect("start mgmt server");
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Send packets through data plane to generate multiple diagnostic events
+    let client = UdpSocket::bind("127.0.0.1:0").expect("bind client");
+    let dst_sock = UdpSocket::bind(format!("127.0.0.1:{dst_port}")).expect("bind dst");
+    dst_sock
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("timeout");
+
+    for i in 0..2 {
+        client
+            .send_to(
+                format!("packet-{i}").as_bytes(),
+                format!("127.0.0.1:{src_port}"),
+            )
+            .expect("send");
+        let mut buf = [0u8; 128];
+        let (n, _) = dst_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(&buf[..n], format!("packet-{i}").as_bytes());
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Criterion 1 & Criterion 4: Running rer diagnose with option --socket outputs
+    // mode, dropped event count, recorded diagnostic events in arrival order,
+    // correlation ID and expiry seconds, exiting with status 0.
+    let out = Command::new(rer_bin())
+        .args(["diagnose", "--socket", sock_path.to_str().unwrap()])
+        .output()
+        .expect("rer diagnose --socket");
+    assert!(out.status.success(), "rer diagnose must exit with status 0");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("Operational Mode: test") || stdout.contains("test"));
+    assert!(stdout.contains("Dropped Events: 0") || stdout.contains("Dropped Event Count: 0"));
+    assert!(
+        stdout.contains("corr-diag-123"),
+        "outputs configured correlation ID"
+    );
+    assert!(stdout.contains("300"), "outputs configured expiry seconds");
+    assert!(stdout.contains("Recorded Diagnostic Events"));
+
+    // Criterion 2: Running rer diagnose with options --socket and --json outputs
+    // a valid JSON object matching DiagnosticEventsReport containing mode, dropped_count, and events,
+    // exiting with status 0.
+    let out_json = Command::new(rer_bin())
+        .args([
+            "diagnose",
+            "--socket",
+            sock_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("rer diagnose --socket --json");
+    assert!(
+        out_json.status.success(),
+        "rer diagnose --json must exit with status 0"
+    );
+    let report: rer::management::DiagnosticEventsReport =
+        serde_json::from_slice(&out_json.stdout).expect("valid DiagnosticEventsReport JSON");
+    assert_eq!(report.mode, OperationalMode::Test);
+    assert_eq!(report.dropped_count, 0);
+    assert!(!report.events.is_empty());
+    assert_eq!(report.correlation_id.as_deref(), Some("corr-diag-123"));
+    assert_eq!(report.expiry_seconds, Some(300));
+
+    // Events in arrival order: monotonic timestamps non-decreasing
+    if report.events.len() >= 2 {
+        for w in report.events.windows(2) {
+            assert!(
+                w[0].monotonic_timestamp <= w[1].monotonic_timestamp,
+                "Events must be in arrival order (newest last)"
+            );
+        }
+    }
+
+    // Criterion 3: Running rer diagnose with option --limit and a value of 2 returns
+    // at most 2 diagnostic events, with the newest event ordered last.
+    let out_limit = Command::new(rer_bin())
+        .args([
+            "diagnose",
+            "--socket",
+            sock_path.to_str().unwrap(),
+            "--limit",
+            "2",
+            "--json",
+        ])
+        .output()
+        .expect("rer diagnose --limit 2 --json");
+    assert!(out_limit.status.success());
+    let rep_limited: rer::management::DiagnosticEventsReport =
+        serde_json::from_slice(&out_limit.stdout).expect("valid DiagnosticEventsReport JSON");
+    assert_eq!(rep_limited.events.len(), 2, "Must return at most 2 events");
+    assert!(
+        rep_limited.events[0].monotonic_timestamp <= rep_limited.events[1].monotonic_timestamp,
+        "Newest event must be ordered last"
+    );
+
+    // Text limit test
+    let out_limit_txt = Command::new(rer_bin())
+        .args([
+            "diagnose",
+            "--socket",
+            sock_path.to_str().unwrap(),
+            "--limit",
+            "2",
+        ])
+        .output()
+        .expect("rer diagnose --limit 2");
+    assert!(out_limit_txt.status.success());
+    let txt = String::from_utf8(out_limit_txt.stdout).expect("utf8");
+    assert!(txt.contains("Recorded Diagnostic Events (2)"));
+
+    mgmt_server.stop();
+    relay.stop();
+    let _ = fs::remove_file(&sock_path);
+}
+
+#[test]
+fn test_cli_diagnose_nonexistent_socket() {
+    let non_existent =
+        std::env::temp_dir().join(format!("nonexistent_mgmt_sock_{}.sock", pick_unused_port()));
+    let out = Command::new(rer_bin())
+        .args(["diagnose", "--socket", non_existent.to_str().unwrap()])
+        .output()
+        .expect("rer diagnose --socket nonexistent");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).expect("utf8 stderr");
+    assert!(!stderr.is_empty(), "must print error to stderr");
+    assert!(stderr.contains("cannot connect") || stderr.contains("Error:"));
+}

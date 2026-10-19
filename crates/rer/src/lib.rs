@@ -4,6 +4,7 @@
 //! network diagnostics tool.
 
 pub mod capture;
+pub mod ccsds;
 pub mod cli;
 pub mod config;
 pub mod diagnostics;
@@ -21,16 +22,25 @@ pub use capture::{
     decode_packet, parse_capture, parse_capture_file, parse_pcap, parse_pcapng, CaptureError,
     CaptureFormat, CaptureSummary, CapturedPacket, LinkType, SyntheticPacket,
 };
+pub use ccsds::{
+    parse_and_validate_ccsds_packet, parse_ccsds_primary_header,
+    parse_ccsds_primary_header_relaxed, ApidSequenceTracker, CcsdsParseError, CcsdsPrimaryHeader,
+    CcsdsSequenceTracker, CCSDS_IDLE_APID, CCSDS_PRIMARY_HEADER_LEN, CCSDS_SEQUENCE_MODULUS,
+};
 pub use config::{
-    ByteOrder, Config, DropPolicy, InspectionConfig, InstanceConfig, LogicalInterfaceConfig,
-    MetricsConfig, SequenceConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
+    ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode, InspectionConfig, InstanceConfig,
+    LogicalInterfaceConfig, MetricsConfig, OperationalMode, SequenceConfig, StreamConfig,
+    TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, Clock, DiagnosticBuffer, DiagnosticBufferBuilder,
     DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, ManualClock,
     RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent, Stage, SystemClock,
 };
-pub use framing::{encode_frame, read_frame, write_frame};
+pub use framing::{
+    encode_frame, read_ccsds_frame, read_frame, read_frame_with_mode, write_ccsds_frame,
+    write_frame, write_frame_with_mode,
+};
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
 };

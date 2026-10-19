@@ -118,6 +118,16 @@ pub enum OperationalMode {
     Test,
 }
 
+impl fmt::Display for OperationalMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Production => write!(f, "production"),
+            Self::Debug => write!(f, "debug"),
+            Self::Test => write!(f, "test"),
+        }
+    }
+}
+
 fn default_operational_mode() -> OperationalMode {
     OperationalMode::Production
 }
@@ -282,6 +292,96 @@ pub struct StreamConfig {
     /// Optional packet inspection and preview configuration (SPEC §8). Off by default.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "preview")]
     pub inspection: Option<InspectionConfig>,
+
+    /// Optional CCSDS Space Packet parsing, validation, and sequence tracking configuration (SPEC §14). Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccsds: Option<CcsdsConfig>,
+
+    /// Optional framing mode for TCP streams ("length_prefix" or "ccsds"). Defaults to length_prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+/// Configuration for CCSDS Space Packet parsing, validation, and sequence tracking (SPEC §14).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CcsdsConfig {
+    /// Enable CCSDS primary header parsing and validation. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Enforce Packet Version Number == 0. Defaults to true.
+    #[serde(default = "default_true", alias = "version")]
+    pub validate_version: bool,
+
+    /// Validate that datagram size matches Packet Data Length + 7. Defaults to true.
+    #[serde(default = "default_true", alias = "length")]
+    pub validate_length: bool,
+
+    /// Track sequence continuity independently per APID. Defaults to true.
+    #[serde(
+        default = "default_true",
+        alias = "sequence_tracking",
+        alias = "track_sequence"
+    )]
+    pub track_sequences: bool,
+
+    /// Optional allowlist of APIDs to accept/track. If None, all APIDs are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_apids",
+        alias = "apids"
+    )]
+    pub filter_apids: Option<Vec<u16>>,
+
+    /// Exclude idle packets (APID 2047 / 0x7FF) from sequence tracking and gap alerts. Defaults to true.
+    #[serde(default = "default_true", alias = "ignore_idle", alias = "filter_idle")]
+    pub ignore_idle_apid: bool,
+
+    /// When true, datagrams failing CCSDS validation are forwarded unchanged to destination. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("length_prefix" or "ccsds").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+impl Default for CcsdsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            validate_version: true,
+            validate_length: true,
+            track_sequences: true,
+            filter_apids: None,
+            ignore_idle_apid: true,
+            passthrough_on_error: false,
+            framing: None,
+        }
+    }
+}
+
+impl StreamConfig {
+    /// Returns the effective framing mode for the source endpoint.
+    #[must_use]
+    pub fn source_framing(&self) -> FramingMode {
+        self.source
+            .framing
+            .or(self.framing)
+            .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
+            .unwrap_or_default()
+    }
+
+    /// Returns the effective framing mode for a destination endpoint.
+    #[must_use]
+    pub fn destination_framing(&self, dest: &EndpointConfig) -> FramingMode {
+        dest.framing
+            .or(self.framing)
+            .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
+            .unwrap_or_default()
+    }
 }
 
 /// Supported byte orders for binary sequence extraction (SPEC §8).
@@ -408,6 +508,32 @@ pub struct EndpointConfig {
     /// Connection mode ("listen" or "connect").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ConnectionMode>,
+
+    /// Optional framing mode for TCP endpoints ("length_prefix" or "ccsds"). Defaults to length_prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+/// Framing modes for TCP streams (SPEC §5, §14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FramingMode {
+    /// Standard 4-byte big-endian length prefix (default).
+    #[default]
+    #[serde(alias = "default", alias = "length_prefix", alias = "length_prefixed")]
+    LengthPrefix,
+    /// CCSDS Space Packet length-based framing (packet data length field + 7 bytes).
+    #[serde(alias = "CCSDS")]
+    Ccsds,
+}
+
+impl fmt::Display for FramingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LengthPrefix => write!(f, "length_prefix"),
+            Self::Ccsds => write!(f, "ccsds"),
+        }
+    }
 }
 
 /// Supported transport protocols (SPEC §5).
@@ -416,6 +542,15 @@ pub struct EndpointConfig {
 pub enum TransportType {
     Udp,
     Tcp,
+}
+
+impl fmt::Display for TransportType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Udp => write!(f, "udp"),
+            Self::Tcp => write!(f, "tcp"),
+        }
+    }
 }
 
 /// Connection modes for endpoints.
@@ -818,6 +953,33 @@ impl Config {
                             path: format!("{}.inspection.max_preview_bytes", stream_prefix),
                             reason: "max_preview_bytes must be greater than 0".to_string(),
                         });
+                    }
+                }
+
+                // Validate CCSDS configuration and check conflicting sequence tracking
+                if let Some(ref ccsds) = stream.ccsds {
+                    let ccsds_seq_enabled = ccsds.enabled && ccsds.track_sequences;
+                    let generic_seq_enabled = stream.sequence.as_ref().is_some_and(|s| s.enabled);
+
+                    if ccsds_seq_enabled && generic_seq_enabled {
+                        errors.push(ValidationError {
+                            path: format!("{}.ccsds.track_sequences", stream_prefix),
+                            reason: "conflicting sequence tracking: both CCSDS sequence tracking and generic sequence tracking cannot be enabled simultaneously".to_string(),
+                        });
+                    }
+
+                    if let Some(ref apids) = ccsds.filter_apids {
+                        for apid in apids {
+                            if *apid > 2047 {
+                                errors.push(ValidationError {
+                                    path: format!("{}.ccsds.filter_apids", stream_prefix),
+                                    reason: format!(
+                                        "invalid APID {}: APID must be between 0 and 2047",
+                                        apid
+                                    ),
+                                });
+                            }
+                        }
                     }
                 }
             }

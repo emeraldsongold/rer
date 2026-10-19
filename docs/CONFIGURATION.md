@@ -111,8 +111,29 @@ Each stream specifies forwarding from a `source` to one or more destinations:
 | `destination` | object | No* | Single egress endpoint. Conflicts with `destinations`. |
 | `destinations` | array | No* | List of egress endpoints for fan-out. Conflicts with `destination`. |
 | `buffer` | object | No | Stream-level buffer limits (`max_queue_size`, `max_packet_size`, `drop_policy`). |
+| `sequence` | object | No | Optional generic sequence extraction and tracking (`SequenceConfig`). Off by default. |
+| `inspection` | object | No | Optional packet inspection and preview configuration (`InspectionConfig`). Off by default. |
+| `ccsds` | object | No | Optional CCSDS Space Packet parsing, validation, and per-APID sequence tracking (`CcsdsConfig`). Off by default. |
+| `framing` | string | No | Optional stream-level framing mode override for TCP endpoints (`"length_prefix"` or `"ccsds"`). Defaults to `"length_prefix"`. |
 
 *Note: Either `destination` or `destinations` must be specified, but not both.*
+
+### CCSDS Space Packet Configuration (`CcsdsConfig`)
+
+Configures parsing, validation, and sequence tracking for CCSDS Space Packets (CCSDS 133.0-B-2, SPEC §14).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enables CCSDS primary header parsing and validation. |
+| `validate_version` | boolean | `true` | Enforces packet version number == 0 (Space Packets). |
+| `validate_length` | boolean | `true` | Validates that datagram length is at least packet data length + 7. |
+| `track_sequences` | boolean | `true` | Tracks sequence continuity independently per APID modulo 16,384. |
+| `filter_apids` | array | `null` | Optional allowlist of APIDs (0–2047) to accept/track. |
+| `ignore_idle_apid` | boolean | `true` | Excludes idle packets (APID 2047 / 0x7FF) from sequence tracking and gap alerts. |
+| `passthrough_on_error` | boolean | `false` | When `true`, datagrams failing CCSDS validation are forwarded unchanged while emitting a diagnostic failure event and recording the error. When `false` (default), invalid datagrams are dropped with a `DiagnosticStage::Dropped` event. |
+| `framing` | string | `null` | Optional framing mode override (`"length_prefix"` or `"ccsds"`). |
+
+*Note: A configuration specifying both active CCSDS sequence tracking (`ccsds.track_sequences: true`) and generic sequence tracking (`sequence.enabled: true`) on the same stream is rejected by `rer validate` with a conflicting sequence tracking error.*
 
 ### Endpoint Configuration (`EndpointConfig`)
 
@@ -121,6 +142,7 @@ Each stream specifies forwarding from a `source` to one or more destinations:
 | `transport` | string | (required) | Transport protocol: `"udp"` or `"tcp"`. |
 | `address` | string | (required) | Network address in `host:port` format (e.g. `127.0.0.1:5000` or `[::1]:5000`). Port must be between 1 and 65535. |
 | `mode` | string | `"listen"` for source, `"connect"` for dest | Connection mode: `"listen"` or `"connect"`. |
+| `framing` | string | `"length_prefix"` | Optional framing mode for TCP endpoints: `"length_prefix"` (default 4-byte prefix) or `"ccsds"` (CCSDS Space Packet length-based framing, C + 7 bytes). |
 
 #### Address Formats and IPv6 Support
 
@@ -160,12 +182,31 @@ RER supports all four transport conversion combinations across ingress and egres
 
 #### TCP Wire Framing Format
 
+##### 1. Default Length-Prefix Framing (`framing: "length_prefix"`)
+
 ```text
 +---------------------------+------------------------------------+
 | Length Prefix (4 bytes)   | Payload Bytes (N bytes)            |
 | uint32 big-endian (N)     | [u8; N]                            |
 +---------------------------+------------------------------------+
 ```
+
+##### 2. CCSDS Length-Based Framing (`framing: "ccsds"`)
+
+For TCP streams carrying CCSDS Space Packets (SPEC §14, §5), setting `framing: "ccsds"` on the endpoint or stream enables native length-based framing without RER's 4-byte length prefix:
+
+```text
++-----------------------------------+------------------------------------+
+| CCSDS Primary Header (6 octets)   | Packet Data Field (C + 1 octets)   |
+| bytes 4..5: big-endian uint16 (C) | user payload / secondary header    |
++-----------------------------------+------------------------------------+
+<----------------- Total Packet Length = C + 7 octets ------------------>
+```
+
+- **Packet Boundary Detection**: Ingress parses packet boundaries directly from the 6-byte CCSDS primary header's Packet Data Length field $C$, yielding total packet size $C + 7$ octets.
+- **Defragmentation**: Reassembles Space Packets arriving across fragmented reads delivering one byte at a time into complete individual Space Packets matching sent payloads.
+- **Concatenation Separation**: When multiple concatenated Space Packets arrive in a single read buffer, RER separates and yields each packet individually at its declared $C + 7$ byte boundary.
+- **Bounded Buffering**: A declared packet length exceeding the configured `max_packet_size` causes the connection to reject the frame and increment `drops_oversized` and `dropped_packets` counters without crashing the relay.
 
 Frames with length exceeding `max_packet_size` are dropped at ingress and tracked under `drops_oversized`. Destination outages trigger automatic reconnection with exponential backoff. Slow TCP readers that stall transmission cause bounded queue saturation and explicit drop policy enforcement without unbounded memory growth.
 

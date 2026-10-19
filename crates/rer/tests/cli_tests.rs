@@ -353,14 +353,17 @@ fn test_cli_inspect_json_flag() {
 
 #[test]
 fn test_cli_diagnose_exit_1() {
+    let non_existent_sock = std::env::temp_dir().join("test_nonexistent_diagnose.sock");
     let output = Command::new(rer_bin())
         .arg("diagnose")
+        .arg("--socket")
+        .arg(&non_existent_sock)
         .output()
         .expect("failed to execute rer diagnose");
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("rer diagnose is not yet implemented"));
+    assert!(stderr.contains("cannot connect") || stderr.contains("Error:"));
 }
 
 #[test]

@@ -249,6 +249,8 @@ impl TrafficGenerator {
                     if next_burst_time > now {
                         thread::sleep(next_burst_time - now);
                     }
+                } else {
+                    thread::yield_now();
                 }
             }
         }
