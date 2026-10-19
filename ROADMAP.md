@@ -48,6 +48,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 36 | RER-F-036 | In-tree CBOR parser for BPv7 primary blocks | BACKLOG | feature | low | needs-impl-approval | RER-F-019 | §14, §8 |
 | 37 | RER-F-037 | BPv7 inspection configuration and BundleInspection diagnostic event | BACKLOG | feature | low | needs-impl-approval | RER-F-036 | §14, §8 |
 | 38 | RER-F-038 | Passive BPv7 stream inspection and transparent relay forwarding | BACKLOG | feature | medium | needs-impl-approval | RER-F-037 | §14, §8 |
+| 43 | RER-F-043 | Deterministic queue saturation fault injection scenario | BACKLOG | test | low | needs-impl-approval | RER-F-017 | §13, §17 |
 
 ## Cross-cutting tracks
 
@@ -60,7 +61,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-043
 
 ## Owner approval gates
 

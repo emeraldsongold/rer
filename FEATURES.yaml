@@ -723,6 +723,24 @@ items:
       - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria asserts that docs/CONFIGURATION.md does not contain rer health, rer status, or rer test.
       - In README.md, the documentation list references the USAGE document alongside docs/CONFIGURATION.md and docs/SPEC.md.
 
+  - id: RER-F-043
+    order: 43
+    title: Deterministic queue saturation fault injection scenario
+    type: test
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-017]
+    spec_refs: [§13, §17]
+    test_profile: standard
+    notes: 'Make the fault-injection saturation scenario deterministic, so it forces the queue to overfill even where the sender is slower than the relay, for example by holding the forwarder back or sending enough to overfill the queue regardless of speed. Relevant code: crates/rer/src/sim/fault.rs, crates/rer/tests/fault_injection_tests.rs, crates/rer/src/cli.rs.'
+    acceptance:
+      - In crates/rer/src/sim/fault.rs, FaultInjectionRunner::run_saturation holds the forwarder back until the sender finishes emitting count packets, causing the bounded queue with capacity queue_size to overfill and increment drops_queue_full.
+      - In crates/rer/src/sim/fault.rs, FaultInjectionRunner::run_saturation sets field passed of FaultScenarioResult to true only when rx &gt; 0, tx &gt; 0, and drops &gt; 0.
+      - In crates/rer/tests/fault_injection_tests.rs, test_fault_injection_saturation asserts that calling FaultInjectionRunner::run(FaultType::Saturation) returns a FaultScenarioResult with field passed equal to true and field fault_events_count greater than 0.
+      - In crates/rer/tests/fault_injection_tests.rs, calling FaultInjectionRunner::run_saturation with each of the three policies DropPolicy::DropOldest, DropPolicy::DropNewest, and DropPolicy::Reject returns a FaultScenarioResult with field passed equal to true and field fault_events_count greater than 0.
+
   - id: RER-T-001
     kind: track
     order: 101
