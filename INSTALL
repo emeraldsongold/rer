@@ -1,0 +1,358 @@
+# INSTALL — Installation and Deployment Guide
+
+This document details installation and deployment procedures for RER (RER Engineering Relay) across all supported targets, fulfilling SPEC §16.
+
+RER supports four primary deployment paths:
+1. **Debian and Ubuntu Packages (`apt` and `deb`)**
+2. **RPM Packages (RHEL, Rocky Linux, AlmaLinux, Fedora)**
+3. **Portable Standalone Linux Binaries (`portable`)**
+4. **Container Deployments (`docker`, `docker-compose`, and `helm`)**
+
+---
+
+## 1. Operating Principles and Safe Defaults
+
+All RER deployment packages and artifacts adhere to the following principles defined in SPEC §16:
+
+- **Safe Defaults**: Installing RER creates system configuration files and unprivileged user/group accounts, but does **not** auto-start or auto-enable network relays. Unreviewed network listeners are never exposed automatically.
+- **Standard Linux Paths**:
+  - Configuration: `/etc/rer/rer.yaml`
+  - Persistent State: `/var/lib/rer/`
+  - Logs: Standard systemd journal / container stdout (file logging only if explicitly configured).
+- **Configuration Preservation**: Package upgrades preserve operator modifications in `/etc/rer/rer.yaml`.
+- **No Silent Data Loss**: Package uninstallation retains configuration files and persistent state directories unless explicitly purged.
+- **Least Privilege**: Services run under an unprivileged user (`rer`, UID `65532` in containers) with all unnecessary Linux capabilities dropped.
+
+---
+
+## 2. Debian / Ubuntu Package Installation (`apt` and `deb`)
+
+Official Debian packages (`.deb`) are provided for `amd64` (x86_64) and `arm64` (AArch64) architectures, targeting Ubuntu 22.04 LTS+, Debian 11 (Bullseye), and Debian 12 (Bookworm).
+
+### Package Artifact Names
+
+- `rer_<version>_amd64.deb` (e.g. `rer_0.1.0_amd64.deb`)
+- `rer_<version>_arm64.deb` (e.g. `rer_0.1.0_arm64.deb`)
+
+### Installation via `apt`
+
+Using `apt` automatically resolves any local package dependencies:
+
+```bash
+# Update repository index
+sudo apt update
+
+# Install RER Debian package
+sudo apt install ./rer_0.1.0_amd64.deb
+```
+
+### Direct Installation via `dpkg` (`deb`)
+
+You can also install the `.deb` file directly using `dpkg`:
+
+```bash
+# Install with dpkg
+sudo dpkg -i rer_0.1.0_amd64.deb
+
+# If any dependencies are missing, resolve them with apt:
+sudo apt-get install -f
+```
+
+### Installed Components
+
+The Debian package installs:
+- Executable binary: `/usr/bin/rer` (mode `0755`)
+- Safe default configuration: `/etc/rer/rer.yaml` (mode `0644`)
+- Systemd service unit: `/lib/systemd/system/rer.service` (mode `0644`)
+- Documentation: `/usr/share/doc/rer/README.md` and `/usr/share/doc/rer/CONFIGURATION.md`
+
+### Managing the Service
+
+After installation, review `/etc/rer/rer.yaml` to ensure stream endpoints match your environment, then start and enable the systemd service:
+
+```bash
+# Reload systemd manager configuration
+sudo systemctl daemon-reload
+
+# Enable and start the service immediately
+sudo systemctl enable --now rer
+
+# Verify service status
+sudo systemctl status rer
+```
+
+### Upgrading and Uninstallation
+
+- **Upgrading**:
+  ```bash
+  sudo apt install ./rer_0.2.0_amd64.deb
+  # or
+  sudo dpkg -i rer_0.2.0_amd64.deb
+  ```
+  The package manager recognizes `/etc/rer/rer.yaml` as a protected configuration file (`conffiles`) and will not overwrite operator changes.
+
+- **Uninstallation**:
+  ```bash
+  # Remove binary and service unit while preserving configuration and state
+  sudo apt remove rer
+  # or
+  sudo dpkg -r rer
+
+  # Purge configuration and all state completely
+  sudo apt purge rer
+  # or
+  sudo dpkg -P rer
+  ```
+
+---
+
+## 3. RPM Package Installation (RHEL, Rocky Linux, Fedora)
+
+RPM packages are provided for `x86_64` and `aarch64` architectures, targeting Enterprise Linux distributions (RHEL 8/9, Rocky Linux 8/9, AlmaLinux 8/9, and Fedora).
+
+### Package Artifact Names
+
+- `rer-<version>-1.x86_64.rpm` (e.g. `rer-0.1.0-1.x86_64.rpm`)
+- `rer-<version>-1.aarch64.rpm` (e.g. `rer-0.1.0-1.aarch64.rpm`)
+
+### Installation via `dnf` or `rpm`
+
+```bash
+# Install via dnf (recommended)
+sudo dnf install ./rer-0.1.0-1.x86_64.rpm
+
+# Or install via rpm directly
+sudo rpm -ivh rer-0.1.0-1.x86_64.rpm
+```
+
+### Service Management
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now rer
+sudo systemctl status rer
+```
+
+### Upgrading and Removal
+
+```bash
+# Upgrade
+sudo dnf upgrade ./rer-0.2.0-1.x86_64.rpm
+
+# Remove package (preserves config in /etc/rer/)
+sudo dnf remove rer
+```
+
+---
+
+## 4. Portable Standalone Linux Archive (`portable`)
+
+Standalone tarballs provide a portable distribution containing the compiled binary, default configuration, systemd service unit, examples, and documentation without requiring system package managers.
+
+### Portable Archive Names
+
+- `rer-<version>-linux-<arch>.tar.gz` (e.g. `rer-0.1.0-linux-x86_64.tar.gz` or `rer-0.1.0-linux-aarch64.tar.gz`)
+
+### Extracting and Running
+
+In the portable standalone section, extracting `rer-<version>-linux-<arch>.tar.gz` with `tar -xzf` and running `bin/rer` with configuration `/etc/rer/rer.yaml` and systemd unit `systemd/rer.service` is performed as follows:
+
+```bash
+# 1. Extract the portable archive
+tar -xzf rer-0.1.0-linux-x86_64.tar.gz
+cd rer-0.1.0-linux-x86_64
+
+# For any version and architecture:
+# tar -xzf rer-<version>-linux-<arch>.tar.gz
+# cd rer-<version>-linux-<arch>
+
+# 2. Inspect archive structure
+# The archive contains:
+#   bin/rer                - Executable binary
+#   config/rer.yaml        - Safe default configuration
+#   systemd/rer.service    - Systemd service unit definition
+#   doc/                   - User documentation
+#   examples/              - Example configurations
+
+# 3. Install configuration to standard path
+sudo mkdir -p /etc/rer
+sudo cp config/rer.yaml /etc/rer/rer.yaml
+
+# 4. Run binary directly with configuration /etc/rer/rer.yaml
+bin/rer run --config /etc/rer/rer.yaml
+
+# 5. Optionally install system-wide with systemd unit systemd/rer.service
+sudo cp bin/rer /usr/bin/rer
+sudo cp systemd/rer.service /etc/systemd/system/rer.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now rer.service
+```
+
+---
+
+## 5. Docker Container Deployment (`docker`)
+
+RER publishes minimal, hardened, multi-architecture distroless container images (`linux/amd64` and `linux/arm64`) to GitHub Container Registry. The container executes under unprivileged UID:GID `65532:65532` (`nonroot`), contains no runtime shell or package manager, and is designed to run with all capabilities dropped.
+
+### Container Image
+
+- `ghcr.io/emeraldsongold/rer:0.1.0`
+
+### Running the Container
+
+Run the container image `ghcr.io/emeraldsongold/rer:0.1.0` with options `--read-only`, `--cap-drop=ALL`, and `--security-opt no-new-privileges:true`, mapping port `5000:5000/udp`:
+
+```bash
+docker run -d \
+  --name rer \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges:true \
+  -u 65532:65532 \
+  -v /etc/rer/rer.yaml:/etc/rer/rer.yaml:ro \
+  -v rer-state:/var/lib/rer \
+  -p 5000:5000/udp \
+  ghcr.io/emeraldsongold/rer:0.1.0
+```
+
+### Security Options Breakdown
+
+- `--read-only`: Mounts the container root filesystem as read-only.
+- `--cap-drop=ALL`: Drops all Linux kernel capabilities from the process.
+- `--security-opt no-new-privileges:true`: Disallows privilege escalation via setuid/setgid binaries.
+- `-u 65532:65532`: Runs as the unprivileged `nonroot` user.
+- `-p 5000:5000/udp`: Maps host UDP port 5000 to container UDP port 5000 for telemetry routing.
+- `-v /etc/rer/rer.yaml:/etc/rer/rer.yaml:ro`: Mounts local host configuration as read-only.
+- `-v rer-state:/var/lib/rer`: Mounts a named volume for persistent application state.
+
+### Verifying Container Health
+
+The container image includes an integrated health check querying the relay internal socket:
+
+```bash
+# Check status
+docker ps --filter name=rer
+
+# Run health check directly
+docker exec rer /usr/local/bin/rer health
+```
+
+---
+
+## 6. Docker Compose Deployment (`docker-compose`)
+
+Preconfigured Compose configurations are provided under `deploy/compose/` for single-instance relays and multi-instance relay chains.
+
+### Validation
+
+Validate Compose files prior to starting services:
+
+```bash
+docker compose -f deploy/compose/docker-compose.single.yml config
+docker compose -f deploy/compose/docker-compose.relay-chain.yml config
+```
+
+### Startup Commands
+
+Start services in detached mode:
+
+- **Single Instance**:
+  ```bash
+  docker compose -f deploy/compose/docker-compose.single.yml up -d
+  ```
+
+- **Relay Chain**:
+  ```bash
+  docker compose -f deploy/compose/docker-compose.relay-chain.yml up -d
+  ```
+
+### Operational Commands
+
+- **Check Status and Health**:
+  ```bash
+  docker compose -f deploy/compose/docker-compose.single.yml ps
+  docker compose -f deploy/compose/docker-compose.relay-chain.yml ps
+  ```
+
+- **View Logs**:
+  ```bash
+  docker compose -f deploy/compose/docker-compose.single.yml logs -f
+  ```
+
+- **Graceful Shutdown**:
+  ```bash
+  docker compose -f deploy/compose/docker-compose.single.yml down
+  docker compose -f deploy/compose/docker-compose.relay-chain.yml down
+  ```
+
+- **Upgrade**:
+  ```bash
+  docker compose -f deploy/compose/docker-compose.single.yml pull
+  docker compose -f deploy/compose/docker-compose.single.yml up -d
+  ```
+
+---
+
+## 7. Kubernetes Helm Chart Deployment (`helm`)
+
+A production-ready Helm chart is provided in `deploy/helm/rer`.
+
+### Prerequisites
+
+- Kubernetes 1.24+
+- Helm 3.8+
+
+### CRITICAL: Replica Scaling and Routing Semantics Notice
+
+> **WARNING**: Scaling replicas does not preserve UDP/TCP routing semantics automatically.
+>
+> Ingress UDP telemetry streams rely on deterministic packet sequencing and in-memory queue management. Standard Kubernetes Service load balancers dispatch UDP datagrams packet-by-packet across backend pods, fragmenting packet streams and breaking sequence tracking. For high availability or multi-hop forwarding, deploy distinct named instances or dedicated relay chains rather than scaling `replicaCount` behind a shared service.
+
+### Installation via Helm
+
+```bash
+# Install default release
+helm install rer ./deploy/helm/rer
+
+# Install with custom values (e.g. single UDP forwarding instance)
+helm install rer ./deploy/helm/rer -f ./deploy/helm/rer/values-simple.yaml
+
+# Install multi-instance relay chain
+helm install rer ./deploy/helm/rer -f ./deploy/helm/rer/values-multi-instance.yaml
+```
+
+### Upgrading, Rollback, and Uninstallation
+
+```bash
+# Upgrade deployment
+helm upgrade rer ./deploy/helm/rer -f custom-values.yaml
+
+# View release revision history
+helm history rer
+
+# Rollback to revision 1
+helm rollback rer 1
+
+# Uninstall chart release
+helm uninstall rer
+```
+
+---
+
+## 8. Verifying Installation and Diagnostics
+
+After installation on any platform, verify the installation using the built-in CLI commands:
+
+```bash
+# 1. Check version
+rer version
+
+# 2. Validate configuration file syntax
+rer validate /etc/rer/rer.yaml
+
+# 3. Inspect configuration details
+rer inspect --config /etc/rer/rer.yaml
+
+# 4. Check runtime relay health
+rer health
+```

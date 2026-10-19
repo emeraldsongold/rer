@@ -15,6 +15,7 @@ Advanced transport features (TCP relays, paired streams, packet inspection, mana
 - [`DECISIONS.md`](DECISIONS.md): Architectural Decision Records (ADRs), including license confirmation.
 - [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md): Current limitations, unimplemented features, and tracking notes.
 - [`PLATFORM_SUPPORT.md`](PLATFORM_SUPPORT.md): Target platforms, supported architectures, and compatibility tiers.
+- [`INSTALL`](INSTALL): Installation procedures across supported deployment targets.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): Contribution guidelines, code standards, and verification workflow.
 - [`SECURITY.md`](SECURITY.md): Security policy, vulnerability reporting, and design boundaries.
 - [`CHANGELOG.md`](CHANGELOG.md): History of changes and milestone completions.
