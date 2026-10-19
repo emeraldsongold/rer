@@ -3,6 +3,7 @@
 //! An open-source network relay, telemetry/command routing, and distributed
 //! network diagnostics tool.
 
+pub mod bpv7;
 pub mod capture;
 pub mod ccsds;
 pub mod cli;
@@ -17,6 +18,14 @@ pub mod secret;
 pub mod signals;
 pub mod sim;
 
+pub use bpv7::{
+    compute_crc16_x25, compute_crc32c, evaluate_bpv7_payload, evaluate_bundle_header,
+    evaluate_payload, parse_bpv7_primary_block, parse_bundle, parse_primary_block, Bpv7ParseError,
+    BundleParseStatus, CrcType, CreationTimestamp, EndpointId, EndpointScheme, PrimaryBlock,
+    BP_VERSION_7, BUNDLE_IS_FRAGMENT, BUNDLE_MUST_NOT_BE_FRAGMENTED,
+    BUNDLE_PAYLOAD_IS_ADMIN_RECORD, BUNDLE_STATUS_REPORT_DELETION, BUNDLE_STATUS_REPORT_DELIVERY,
+    BUNDLE_STATUS_REPORT_FORWARDING, BUNDLE_STATUS_REPORT_RECEPTION, BUNDLE_STATUS_TIME_REQUESTED,
+};
 pub use capture::{
     build_synthetic_frame, build_synthetic_pcap, build_synthetic_pcapng, compute_ipv4_checksum,
     decode_packet, parse_capture, parse_capture_file, parse_pcap, parse_pcapng, CaptureError,
