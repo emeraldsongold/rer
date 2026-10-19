@@ -723,6 +723,80 @@ items:
       - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria asserts that docs/CONFIGURATION.md does not contain rer health, rer status, or rer test.
       - In README.md, the documentation list references the USAGE document alongside docs/CONFIGURATION.md and docs/SPEC.md.
 
+  - id: RER-F-039
+    order: 39
+    title: In-tree SDNV and LTP segment header parser
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-020]
+    spec_refs: [§14, §8, §13]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. "I approve RER-F-020, implement the proposal with the following decisions:\n\n1. **Configuration:** Nest LTP settings under ''stream.inspection.ltp''. Keep inspection opt-in and preserve existing behavior when disabled.\n\n2. **Parser:** Implement an in-tree, zero-dependency SDNV and LTP header parser. Consider ''licklider-core'' only if future requirements justify full report-claim parsing or stateful LTP functionality.\n\n3. **Detection:** Require explicit per-stream configuration rather than automatically enabling inspection based on UDP port 1113. Port-based detection may be offered later as an optional convenience, never as a substitute for explicit configuration.\n\n4. **Contact schedules:** Start with deterministic relative millisecond outage windows for the simulation harness. Design the interface so CCSDS/ION contact plans can be imported later without coupling the core simulator to a specific format.\n\n5. **Diagnostics:** Use a dedicated ''LtpInspection'' diagnostic event or variant, integrated with existing packet diagnostics. Keep events bounded and non-blocking, and never modify forwarded datagrams.\n\n**Additional recommendations:** Complete Phase 1 with strict bounds checking, malformed/truncated SDNV tests, RFC 5326 reference vectors, and tests proving byte-identical forwarding. Ensure inspection distinguishes invalid LTP from ordinary non-LTP traffic without interrupting relay operation. Make outage timing deterministic and define whether packets are dropped or buffered during outages; default to dropping unless buffering is explicitly configured.\n\nKeep LTP session management, retransmission, persistent storage, security extensions, and full protocol compliance out of scope. Use ION or ''licklider'' as external integration-test peers where practical.\n\nApprove Phase 1 for implementation once these decisions are incorporated into the proposal and acceptance criteria." Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/sim/channel.rs.'
+    acceptance:
+      - In crates/rer/src/ltp.rs, parsing a valid LTP data segment matching RFC 5326 reference vectors extracts version 0, segment type, session originator engine ID, session number, client service ID, offset, and length.
+      - In crates/rer/src/ltp.rs, parsing an LTP checkpoint segment extracts the checkpoint serial number and report serial number.
+      - In crates/rer/src/ltp.rs, decoding an SDNV value from an input buffer truncated before the continuation bit clears returns an error indicating truncated input.
+      - In crates/rer/src/ltp.rs, parsing a segment header with a non-zero LTP version returns an error distinguishing invalid version from valid LTP version 0.
+      - In crates/rer/src/ltp.rs, evaluating arbitrary non-LTP payload bytes returns a status distinguishing non-LTP traffic from valid LTP segments without panicking.
+
+  - id: RER-F-040
+    order: 40
+    title: LTP inspection configuration and LtpInspection diagnostic event
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-039]
+    spec_refs: [§14, §8, §13]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. "I approve RER-F-020, implement the proposal with the following decisions:\n\n1. **Configuration:** Nest LTP settings under ''stream.inspection.ltp''. Keep inspection opt-in and preserve existing behavior when disabled.\n\n2. **Parser:** Implement an in-tree, zero-dependency SDNV and LTP header parser. Consider ''licklider-core'' only if future requirements justify full report-claim parsing or stateful LTP functionality.\n\n3. **Detection:** Require explicit per-stream configuration rather than automatically enabling inspection based on UDP port 1113. Port-based detection may be offered later as an optional convenience, never as a substitute for explicit configuration.\n\n4. **Contact schedules:** Start with deterministic relative millisecond outage windows for the simulation harness. Design the interface so CCSDS/ION contact plans can be imported later without coupling the core simulator to a specific format.\n\n5. **Diagnostics:** Use a dedicated ''LtpInspection'' diagnostic event or variant, integrated with existing packet diagnostics. Keep events bounded and non-blocking, and never modify forwarded datagrams.\n\n**Additional recommendations:** Complete Phase 1 with strict bounds checking, malformed/truncated SDNV tests, RFC 5326 reference vectors, and tests proving byte-identical forwarding. Ensure inspection distinguishes invalid LTP from ordinary non-LTP traffic without interrupting relay operation. Make outage timing deterministic and define whether packets are dropped or buffered during outages; default to dropping unless buffering is explicitly configured.\n\nKeep LTP session management, retransmission, persistent storage, security extensions, and full protocol compliance out of scope. Use ION or ''licklider'' as external integration-test peers where practical.\n\nApprove Phase 1 for implementation once these decisions are incorporated into the proposal and acceptance criteria." Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/sim/channel.rs.'
+    acceptance:
+      - Deserializing a configuration YAML containing stream option inspection without option ltp defaults to None and preserves existing inspection behavior.
+      - Running rer validate on a configuration with option ltp and option max_inspect_bytes set to 0 returns a validation error reporting an invalid inspection size limit.
+      - In crates/rer/src/diagnostics.rs, creating an LtpInspection diagnostic event with session originator, session number, and segment type serializes into JSON containing the structured LTP metadata.
+      - In crates/rer/src/diagnostics.rs, emitting an LtpInspection diagnostic event into a full DiagnosticBuffer drops the event without blocking or panicking.
+
+  - id: RER-F-041
+    order: 41
+    title: Passive LTP stream inspection and transparent relay forwarding
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-040]
+    spec_refs: [§14, §8, §13]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. "I approve RER-F-020, implement the proposal with the following decisions:\n\n1. **Configuration:** Nest LTP settings under ''stream.inspection.ltp''. Keep inspection opt-in and preserve existing behavior when disabled.\n\n2. **Parser:** Implement an in-tree, zero-dependency SDNV and LTP header parser. Consider ''licklider-core'' only if future requirements justify full report-claim parsing or stateful LTP functionality.\n\n3. **Detection:** Require explicit per-stream configuration rather than automatically enabling inspection based on UDP port 1113. Port-based detection may be offered later as an optional convenience, never as a substitute for explicit configuration.\n\n4. **Contact schedules:** Start with deterministic relative millisecond outage windows for the simulation harness. Design the interface so CCSDS/ION contact plans can be imported later without coupling the core simulator to a specific format.\n\n5. **Diagnostics:** Use a dedicated ''LtpInspection'' diagnostic event or variant, integrated with existing packet diagnostics. Keep events bounded and non-blocking, and never modify forwarded datagrams.\n\n**Additional recommendations:** Complete Phase 1 with strict bounds checking, malformed/truncated SDNV tests, RFC 5326 reference vectors, and tests proving byte-identical forwarding. Ensure inspection distinguishes invalid LTP from ordinary non-LTP traffic without interrupting relay operation. Make outage timing deterministic and define whether packets are dropped or buffered during outages; default to dropping unless buffering is explicitly configured.\n\nKeep LTP session management, retransmission, persistent storage, security extensions, and full protocol compliance out of scope. Use ION or ''licklider'' as external integration-test peers where practical.\n\nApprove Phase 1 for implementation once these decisions are incorporated into the proposal and acceptance criteria." Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/sim/channel.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a UDP datagram containing a valid LTP segment on an inspected stream sends the exact datagram payload bytes byte-identically to destination sockets.
+      - In crates/rer/src/relay.rs, forwarding a UDP datagram containing a valid LTP segment records an LtpInspection diagnostic event with extracted session identifier in the diagnostic buffer while forwarding the datagram unmodified.
+      - When an inspected stream receives non-LTP datagram traffic, the relay forwards the payload unmodified and records a diagnostic event indicating unparsed traffic without interrupting relay operation.
+      - A UDP stream on port 1113 without explicit inspection configuration forwards datagrams byte-identically without emitting LtpInspection diagnostic events.
+      - In docs/CONFIGURATION.md, documentation for stream option inspection specifies that LTP support performs passive metadata inspection without session management, retransmissions, or timer handling.
+
+  - id: RER-F-042
+    order: 42
+    title: Deterministic contact schedule outage simulation for channel harness
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-041]
+    spec_refs: [§14, §8, §13]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. "I approve RER-F-020, implement the proposal with the following decisions:\n\n1. **Configuration:** Nest LTP settings under ''stream.inspection.ltp''. Keep inspection opt-in and preserve existing behavior when disabled.\n\n2. **Parser:** Implement an in-tree, zero-dependency SDNV and LTP header parser. Consider ''licklider-core'' only if future requirements justify full report-claim parsing or stateful LTP functionality.\n\n3. **Detection:** Require explicit per-stream configuration rather than automatically enabling inspection based on UDP port 1113. Port-based detection may be offered later as an optional convenience, never as a substitute for explicit configuration.\n\n4. **Contact schedules:** Start with deterministic relative millisecond outage windows for the simulation harness. Design the interface so CCSDS/ION contact plans can be imported later without coupling the core simulator to a specific format.\n\n5. **Diagnostics:** Use a dedicated ''LtpInspection'' diagnostic event or variant, integrated with existing packet diagnostics. Keep events bounded and non-blocking, and never modify forwarded datagrams.\n\n**Additional recommendations:** Complete Phase 1 with strict bounds checking, malformed/truncated SDNV tests, RFC 5326 reference vectors, and tests proving byte-identical forwarding. Ensure inspection distinguishes invalid LTP from ordinary non-LTP traffic without interrupting relay operation. Make outage timing deterministic and define whether packets are dropped or buffered during outages; default to dropping unless buffering is explicitly configured.\n\nKeep LTP session management, retransmission, persistent storage, security extensions, and full protocol compliance out of scope. Use ION or ''licklider'' as external integration-test peers where practical.\n\nApprove Phase 1 for implementation once these decisions are incorporated into the proposal and acceptance criteria." Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, crates/rer/src/sim/channel.rs.'
+    acceptance:
+      - In crates/rer/src/sim/channel.rs, configuring ImpairmentConfig with option outage_schedule drops packets whose arrival timestamp falls within a scheduled outage window when buffering is not configured.
+      - In crates/rer/src/sim/channel.rs, configuring ImpairmentConfig with option outage_schedule and option buffer_during_outage holds packets arriving during an outage window and releases them in order when the contact window opens.
+      - In crates/rer/src/sim/channel.rs, processing packets across two identical SimulatedChannel instances initialized with identical PRNG seed and outage_schedule produces identical packet output sequences.
+      - In crates/rer/src/sim/channel.rs, an ImpairmentConfig without option outage_schedule forwards packets according to configured option loss_rate and option delay_ms preserving previous impairment behavior.
+
   - id: RER-T-001
     kind: track
     order: 101
