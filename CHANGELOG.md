@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-036 (In-tree CBOR parser for BPv7 primary blocks)
+- **Zero-Dependency CBOR BPv7 Primary Block Parser**: Added `parse_primary_block` and `PrimaryBlock` in `crates/rer/src/bpv7.rs` parsing RFC 9171 BPv7 primary bundle blocks and bundles with strict bounds checking, extracting bundle version 7, control flags, CRC type, destination EID, source node ID, report-to EID, creation timestamp, and lifetime (SPEC §14, §8).
+- **Multi-Scheme Endpoint Identifier Decoding**: Supported both `ipn:` and `dtn:` addressing schemes, returning decoded URI strings (e.g. `ipn:node.service`, `dtn://node/service`, and null endpoint `dtn:none`) with string dereferencing and comparison helpers.
+- **Strict Truncation & Bounds Protection**: Enforced bounds validation returning explicit `Bpv7ParseError::Truncated` whenever an input buffer is shorter than declared CBOR item lengths or truncated prior to primary block completion.
+- **Fragmentation Metadata Extraction**: Parsed fragmented BPv7 bundles with fragmentation control flags set, extracting byte-accurate fragment offset and total Application Data Unit (ADU) length.
+- **Non-Panicking Payload Evaluation**: Added `evaluate_payload` and `BundleParseStatus` distinguishing malformed CBOR, valid non-BPv7 traffic, and valid BPv7 bundle headers without panicking on arbitrary non-CBOR payload bytes.
+- **CRC-16 and CRC-32 Verification**: Implemented in-tree standard CRC-16/X-25 and CRC-32C (Castagnoli) checksum verification and round-trip CBOR serialization.
+
 ### Added - Milestone RER-F-033 (CCSDS length-based framing for TCP streams)
 - **CCSDS Length-Based TCP Framing**: Added `framing: "ccsds"` support on TCP stream and endpoint configurations, parsing packet boundaries directly from the 6-byte CCSDS Space Packet primary header's Packet Data Length field plus 7 bytes instead of the default 4-byte length prefix (SPEC §14, §5, §8).
 - **1-Byte Defragmentation**: Reassembles Space Packets arriving across fragmented TCP reads delivering one byte at a time into complete individual Space Packets matching sent payloads.
