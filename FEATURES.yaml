@@ -704,6 +704,25 @@ items:
       - When a relay stream receives malformed CBOR or non-BPv7 traffic, the relay forwards the payload unmodified and records a diagnostic event with a status indicating unparsed traffic without stalling the forwarding thread.
       - In docs/CONFIGURATION.md, documentation for stream option inspection specifies that BPv7 support performs passive metadata inspection without bundle storage, routing, BPSec verification, or TCPCLv4 convergence layer framing.
 
+  - id: RER-F-034
+    order: 34
+    title: Separate CLI command documentation into dedicated USAGE guide
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-029]
+    spec_refs: [§7]
+    test_profile: standard
+    notes: 'Seperate the CLI command out of the Configuration document and put them in a new Document called USAGE Relevant code: docs/CONFIGURATION.md, crates/rer/tests/cli_tests.rs, crates/rer/src/cli.rs.'
+    acceptance:
+      - 'In docs/CONFIGURATION.md, searching for ## 8. Relay Execution and Validation CLI Usage returns no matching lines.'
+      - In docs/CONFIGURATION.md, searching for command headings rer run, rer validate, rer inspect, rer health, rer status, rer streams, rer metrics, rer test, and rer version returns no matching lines.
+      - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria reads the USAGE document and asserts that it contains commands rer run, rer validate, rer inspect, rer health, rer status, rer streams, rer metrics, rer test, and rer version.
+      - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria asserts that docs/CONFIGURATION.md does not contain rer health, rer status, or rer test.
+      - In README.md, the documentation list references the USAGE document alongside docs/CONFIGURATION.md and docs/SPEC.md.
+
   - id: RER-T-001
     kind: track
     order: 101
