@@ -344,3 +344,85 @@ fn test_smoke_test_script_content_and_safety_checks() {
     assert!(content.contains("Binary /usr/bin/rer successfully removed"));
     assert!(content.contains("preserved without silent data loss"));
 }
+
+#[test]
+fn test_install_documentation_acceptance_criteria() {
+    let readme_file = repo_root().join("README.md");
+    let readme_content = std::fs::read_to_string(&readme_file).expect("read README.md");
+
+    // Acceptance criterion 1: In README.md, Documentation Index includes link to INSTALL documenting installation procedures across supported deployment targets
+    assert!(
+        readme_content.contains(
+            "[`INSTALL`](INSTALL): Installation procedures across supported deployment targets."
+        ),
+        "README.md Documentation Index must link to INSTALL"
+    );
+
+    let install_file = repo_root().join("INSTALL");
+    assert!(install_file.exists(), "INSTALL document must exist");
+    let install_content = std::fs::read_to_string(&install_file).expect("read INSTALL");
+
+    // Acceptance criterion 2: In INSTALL, portable standalone section documents extracting rer-<version>-linux-<arch>.tar.gz with tar -xzf and running bin/rer with configuration /etc/rer/rer.yaml and systemd unit systemd/rer.service
+    assert!(
+        install_content.contains("rer-<version>-linux-<arch>.tar.gz"),
+        "INSTALL must document portable tarball pattern"
+    );
+    assert!(
+        install_content.contains("tar -xzf"),
+        "INSTALL must document tar -xzf command"
+    );
+    assert!(
+        install_content.contains("bin/rer"),
+        "INSTALL must document running bin/rer"
+    );
+    assert!(
+        install_content.contains("/etc/rer/rer.yaml"),
+        "INSTALL must document configuration path /etc/rer/rer.yaml"
+    );
+    assert!(
+        install_content.contains("systemd/rer.service"),
+        "INSTALL must document systemd/rer.service unit"
+    );
+
+    // Acceptance criterion 3: In INSTALL, Docker section provides commands to run the container image ghcr.io/emeraldsongold/rer:0.1.0 with options --read-only, --cap-drop=ALL, and --security-opt no-new-privileges:true, mapping port 5000:5000/udp
+    assert!(
+        install_content.contains("ghcr.io/emeraldsongold/rer:0.1.0"),
+        "INSTALL must document Docker container image"
+    );
+    assert!(
+        install_content.contains("--read-only"),
+        "INSTALL must specify --read-only docker option"
+    );
+    assert!(
+        install_content.contains("--cap-drop=ALL"),
+        "INSTALL must specify --cap-drop=ALL docker option"
+    );
+    assert!(
+        install_content.contains("--security-opt no-new-privileges:true"),
+        "INSTALL must specify --security-opt no-new-privileges:true docker option"
+    );
+    assert!(
+        install_content.contains("5000:5000/udp"),
+        "INSTALL must specify port mapping 5000:5000/udp"
+    );
+
+    // Acceptance criterion 4: In INSTALL, Docker Compose section provides startup commands using docker compose -f deploy/compose/docker-compose.single.yml up -d for single instances and docker compose -f deploy/compose/docker-compose.relay-chain.yml up -d for relay chains
+    assert!(
+        install_content
+            .contains("docker compose -f deploy/compose/docker-compose.single.yml up -d"),
+        "INSTALL must document single instance Compose startup command"
+    );
+    assert!(
+        install_content
+            .contains("docker compose -f deploy/compose/docker-compose.relay-chain.yml up -d"),
+        "INSTALL must document relay chain Compose startup command"
+    );
+
+    // Notes: apt, deb, portable, docker, docker-compose, and helm installs
+    assert!(install_content.contains("apt"));
+    assert!(install_content.contains("deb"));
+    assert!(install_content.contains("portable"));
+    assert!(install_content.contains("docker"));
+    assert!(install_content.contains("docker-compose"));
+    assert!(install_content.contains("helm"));
+}
