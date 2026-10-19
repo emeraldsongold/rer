@@ -296,6 +296,10 @@ pub struct StreamConfig {
     /// Optional CCSDS Space Packet parsing, validation, and sequence tracking configuration (SPEC §14). Off by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ccsds: Option<CcsdsConfig>,
+
+    /// Optional framing mode for TCP streams ("length_prefix" or "ccsds"). Defaults to length_prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
 }
 
 /// Configuration for CCSDS Space Packet parsing, validation, and sequence tracking (SPEC §14).
@@ -338,6 +342,10 @@ pub struct CcsdsConfig {
     /// When true, datagrams failing CCSDS validation are forwarded unchanged to destination. Defaults to false.
     #[serde(default, alias = "passthrough")]
     pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("length_prefix" or "ccsds").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
 }
 
 impl Default for CcsdsConfig {
@@ -350,7 +358,29 @@ impl Default for CcsdsConfig {
             filter_apids: None,
             ignore_idle_apid: true,
             passthrough_on_error: false,
+            framing: None,
         }
+    }
+}
+
+impl StreamConfig {
+    /// Returns the effective framing mode for the source endpoint.
+    #[must_use]
+    pub fn source_framing(&self) -> FramingMode {
+        self.source
+            .framing
+            .or(self.framing)
+            .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
+            .unwrap_or_default()
+    }
+
+    /// Returns the effective framing mode for a destination endpoint.
+    #[must_use]
+    pub fn destination_framing(&self, dest: &EndpointConfig) -> FramingMode {
+        dest.framing
+            .or(self.framing)
+            .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
+            .unwrap_or_default()
     }
 }
 
@@ -478,6 +508,32 @@ pub struct EndpointConfig {
     /// Connection mode ("listen" or "connect").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ConnectionMode>,
+
+    /// Optional framing mode for TCP endpoints ("length_prefix" or "ccsds"). Defaults to length_prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+/// Framing modes for TCP streams (SPEC §5, §14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FramingMode {
+    /// Standard 4-byte big-endian length prefix (default).
+    #[default]
+    #[serde(alias = "default", alias = "length_prefix", alias = "length_prefixed")]
+    LengthPrefix,
+    /// CCSDS Space Packet length-based framing (packet data length field + 7 bytes).
+    #[serde(alias = "CCSDS")]
+    Ccsds,
+}
+
+impl fmt::Display for FramingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LengthPrefix => write!(f, "length_prefix"),
+            Self::Ccsds => write!(f, "ccsds"),
+        }
+    }
 }
 
 /// Supported transport protocols (SPEC §5).

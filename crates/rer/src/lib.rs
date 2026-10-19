@@ -28,7 +28,7 @@ pub use ccsds::{
     CcsdsSequenceTracker, CCSDS_IDLE_APID, CCSDS_PRIMARY_HEADER_LEN, CCSDS_SEQUENCE_MODULUS,
 };
 pub use config::{
-    ByteOrder, CcsdsConfig, Config, DropPolicy, InspectionConfig, InstanceConfig,
+    ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode, InspectionConfig, InstanceConfig,
     LogicalInterfaceConfig, MetricsConfig, OperationalMode, SequenceConfig, StreamConfig,
     TestModeConfig, ValidationError, ValidationReport,
 };
@@ -37,7 +37,10 @@ pub use diagnostics::{
     DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, ManualClock,
     RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent, Stage, SystemClock,
 };
-pub use framing::{encode_frame, read_frame, write_frame};
+pub use framing::{
+    encode_frame, read_ccsds_frame, read_frame, read_frame_with_mode, write_ccsds_frame,
+    write_frame, write_frame_with_mode,
+};
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
 };
