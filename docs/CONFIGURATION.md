@@ -135,6 +135,35 @@ Configures parsing, validation, and sequence tracking for CCSDS Space Packets (C
 
 *Note: A configuration specifying both active CCSDS sequence tracking (`ccsds.track_sequences: true`) and generic sequence tracking (`sequence.enabled: true`) on the same stream is rejected by `rer validate` with a conflicting sequence tracking error.*
 
+### Packet Inspection and BPv7 Configuration (`InspectionConfig`, `Bpv7InspectionConfig`)
+
+Configures optional packet inspection previews and passive Bundle Protocol Version 7 (BPv7) primary block inspection (RFC 9171, SPEC §14, §8).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `hex_preview` | boolean | `false` | Enables hexadecimal payload preview in diagnostic events. |
+| `ascii_preview` | boolean | `false` | Enables ASCII payload preview in diagnostic events. |
+| `max_preview_bytes` | integer | `64` | Maximum length in bytes for payload previews (length-bounded). |
+| `bpv7` | object | `null` | Optional passive BPv7 bundle inspection settings (`Bpv7InspectionConfig`). Disabled by default. |
+
+#### BPv7 Passive Bundle Inspection (`Bpv7InspectionConfig`)
+
+When stream option inspection (`stream.inspection.bpv7`) is configured, RER performs passive inspection of BPv7 primary blocks on incoming datagrams and streams:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enables passive BPv7 inspection when the `bpv7` section is present. |
+| `max_inspect_bytes` | integer | `4096` | Maximum bytes of the payload to inspect for CBOR primary blocks (must be > 0). |
+| `extract_eids` | boolean | `true` | Extracts destination and source endpoint identifiers (EIDs, supporting `dtn:` and `ipn:` schemes). |
+
+**Scope and Non-Claims:**
+BPv7 support performs passive metadata inspection without bundle storage, routing, BPSec verification, or TCPCLv4 convergence layer framing:
+- **No Bundle Storage**: RER does not buffer or store bundles across contact opportunities or act as a DTN bundle storage agent.
+- **No Routing**: Forwarding decisions remain strictly transport-level according to RER stream configuration. RER does not interpret bundle routing tables or make bundle-layer routing decisions.
+- **No BPSec Verification**: Cryptographic validation of Bundle Protocol Security (RFC 9172) blocks (BIB/BCB) is not performed.
+- **No TCPCLv4 Framing**: RER does not implement RFC 9174 TCPCLv4 convergence layer session handshakes, contact headers, or session framing. Bundles forwarded over TCP use standard RER stream framing or transparent stream forwarding.
+- **Transparent and Non-Blocking**: Stream option inspection operates strictly in observation mode. Forwarded payload bytes are transmitted to destination sockets completely unmodified, and inspection diagnostics never block or stall forwarding threads. When a relay stream receives malformed CBOR or non-BPv7 traffic, the relay forwards the payload unmodified and records a diagnostic event with a status indicating unparsed traffic without stalling the forwarding thread.
+
 ### Endpoint Configuration (`EndpointConfig`)
 
 | Field | Type | Default | Description |
