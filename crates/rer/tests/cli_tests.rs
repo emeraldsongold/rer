@@ -395,60 +395,112 @@ fn test_cli_health_connection_failure_exit_1() {
 fn test_cli_docs_acceptance_criteria() {
     let config_md = std::fs::read_to_string(repo_root().join("docs").join("CONFIGURATION.md"))
         .expect("failed to read docs/CONFIGURATION.md");
+    let usage_md = std::fs::read_to_string(repo_root().join("docs").join("USAGE.md"))
+        .expect("failed to read docs/USAGE.md");
     let readme_md =
         std::fs::read_to_string(repo_root().join("README.md")).expect("failed to read README.md");
 
-    // Acceptance criterion 1: rer health with --socket, --timeout and --json
-    assert!(config_md.contains("rer health"));
-    assert!(config_md.contains("--socket"));
-    assert!(config_md.contains("--timeout"));
-    assert!(config_md.contains("--json"));
-    assert!(config_md.contains("exit code 0 on healthy status"));
-    assert!(config_md.contains("non-zero exit code on unhealthy status or connection failure"));
+    // Acceptance criterion: docs/CONFIGURATION.md does not contain ## 8. Relay Execution and Validation CLI Usage
+    assert!(
+        !config_md.contains("## 8. Relay Execution and Validation CLI Usage"),
+        "docs/CONFIGURATION.md must not contain ## 8. Relay Execution and Validation CLI Usage"
+    );
 
-    // Acceptance criterion 2: rer inspect with --config, --format, --json, --effective, --socket, --endpoint, --auth-token and --timeout
-    assert!(config_md.contains("rer inspect"));
-    assert!(config_md.contains("--config"));
-    assert!(config_md.contains("--format"));
-    assert!(config_md.contains("--effective"));
-    assert!(config_md.contains("--endpoint"));
-    assert!(config_md.contains("--auth-token"));
-    assert!(config_md.contains("Effective configuration output"));
-    assert!(config_md.contains("Sequence tracking inspection reports"));
+    // Acceptance criterion: docs/CONFIGURATION.md does not contain command headings for rer run, validate, inspect, health, status, streams, metrics, test, version
+    let command_headings = [
+        "rer run",
+        "rer validate",
+        "rer inspect",
+        "rer health",
+        "rer status",
+        "rer streams",
+        "rer metrics",
+        "rer test",
+        "rer version",
+    ];
+    for heading in &command_headings {
+        for line in config_md.lines() {
+            if line.trim_start().starts_with('#') {
+                assert!(
+                    !line.contains(heading),
+                    "docs/CONFIGURATION.md heading must not contain command '{heading}': {line}"
+                );
+            }
+        }
+    }
 
-    // Acceptance criterion 3: rer test and subcommands harness, generate and receive with options
-    assert!(config_md.contains("rer test"));
-    assert!(config_md.contains("harness"));
-    assert!(config_md.contains("generate"));
-    assert!(config_md.contains("receive"));
-    assert!(config_md.contains("--count"));
-    assert!(config_md.contains("--size"));
-    assert!(config_md.contains("--rate"));
-    assert!(config_md.contains("--burst"));
-    assert!(config_md.contains("--duration"));
-    assert!(config_md.contains("--seed"));
-    assert!(config_md.contains("--loss-rate"));
-    assert!(config_md.contains("--duplicate-rate"));
-    assert!(config_md.contains("--reorder-rate"));
-    assert!(config_md.contains("--target"));
-    assert!(config_md.contains("--bind"));
+    // Acceptance criterion: docs/CONFIGURATION.md does not contain rer health, rer status, or rer test
+    assert!(
+        !config_md.contains("rer health"),
+        "docs/CONFIGURATION.md must not contain 'rer health'"
+    );
+    assert!(
+        !config_md.contains("rer status"),
+        "docs/CONFIGURATION.md must not contain 'rer status'"
+    );
+    assert!(
+        !config_md.contains("rer test"),
+        "docs/CONFIGURATION.md must not contain 'rer test'"
+    );
 
-    // Acceptance criterion 4: rer run options --health-socket, --metrics-endpoint, RER_MGMT_SOCKET, RER_HEALTH_SOCKET
-    assert!(config_md.contains("rer run"));
-    assert!(config_md.contains("--health-socket"));
-    assert!(config_md.contains("--metrics-endpoint"));
-    assert!(config_md.contains("RER_MGMT_SOCKET"));
-    assert!(config_md.contains("RER_HEALTH_SOCKET"));
+    // Acceptance criterion: USAGE document contains commands rer run, rer validate, rer inspect, rer health, rer status, rer streams, rer metrics, rer test, and rer version
+    assert!(usage_md.contains("rer run"));
+    assert!(usage_md.contains("rer validate"));
+    assert!(usage_md.contains("rer inspect"));
+    assert!(usage_md.contains("rer health"));
+    assert!(usage_md.contains("rer status"));
+    assert!(usage_md.contains("rer streams"));
+    assert!(usage_md.contains("rer metrics"));
+    assert!(usage_md.contains("rer test"));
+    assert!(usage_md.contains("rer version"));
 
-    // Acceptance criterion 5: rer version, rer diagnose, rer capture, rer replay
-    assert!(config_md.contains("rer version"));
-    assert!(config_md.contains("rer diagnose"));
-    assert!(config_md.contains("rer capture"));
-    assert!(config_md.contains("rer replay"));
-    assert!(config_md.contains("prints binary version information and exits with status 0"));
-    assert!(config_md.contains("exit with status 1 as planned roadmap features"));
+    // Detailed options and flags documented in USAGE
+    assert!(usage_md.contains("--socket"));
+    assert!(usage_md.contains("--timeout"));
+    assert!(usage_md.contains("--json"));
+    assert!(usage_md.contains("exit code 0 on healthy status"));
+    assert!(usage_md.contains("non-zero exit code on unhealthy status or connection failure"));
 
-    // Acceptance criterion 6: README.md CLI summary
+    assert!(usage_md.contains("--config"));
+    assert!(usage_md.contains("--format"));
+    assert!(usage_md.contains("--effective"));
+    assert!(usage_md.contains("--endpoint"));
+    assert!(usage_md.contains("--auth-token"));
+    assert!(usage_md.contains("Effective configuration output"));
+    assert!(usage_md.contains("Sequence tracking inspection reports"));
+
+    assert!(usage_md.contains("harness"));
+    assert!(usage_md.contains("generate"));
+    assert!(usage_md.contains("receive"));
+    assert!(usage_md.contains("--count"));
+    assert!(usage_md.contains("--size"));
+    assert!(usage_md.contains("--rate"));
+    assert!(usage_md.contains("--burst"));
+    assert!(usage_md.contains("--duration"));
+    assert!(usage_md.contains("--seed"));
+    assert!(usage_md.contains("--loss-rate"));
+    assert!(usage_md.contains("--duplicate-rate"));
+    assert!(usage_md.contains("--reorder-rate"));
+    assert!(usage_md.contains("--target"));
+    assert!(usage_md.contains("--bind"));
+
+    assert!(usage_md.contains("--health-socket"));
+    assert!(usage_md.contains("--metrics-endpoint"));
+    assert!(usage_md.contains("RER_MGMT_SOCKET"));
+    assert!(usage_md.contains("RER_HEALTH_SOCKET"));
+
+    assert!(usage_md.contains("rer diagnose"));
+    assert!(usage_md.contains("rer capture"));
+    assert!(usage_md.contains("rer replay"));
+    assert!(usage_md.contains("prints binary version information and exits with status 0"));
+    assert!(usage_md.contains("exit with status 1 as planned roadmap features"));
+
+    // Acceptance criterion: README.md documentation list references USAGE document alongside CONFIGURATION.md and SPEC.md
+    assert!(readme_md.contains("docs/USAGE.md"));
+    assert!(readme_md.contains("docs/CONFIGURATION.md"));
+    assert!(readme_md.contains("docs/SPEC.md"));
+
+    // README.md CLI summary
     assert!(readme_md.contains("rer validate"));
     assert!(readme_md.contains("rer inspect"));
     assert!(readme_md.contains("rer run"));

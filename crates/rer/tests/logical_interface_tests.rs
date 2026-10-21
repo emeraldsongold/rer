@@ -8,25 +8,36 @@ use rer::framing;
 use rer::relay::Relay;
 
 fn get_available_port() -> u16 {
-    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral udp");
-    socket.local_addr().expect("local addr").port()
+    static COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    for _ in 0..200 {
+        let port = 37000 + (COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 8000);
+        if let Ok(s) = UdpSocket::bind(format!("127.0.0.1:{port}")) {
+            drop(s);
+            if TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
+                return port;
+            }
+        }
+    }
+    37500
 }
 
 #[test]
 fn test_paired_interface_independent_counters_and_endpoints() {
     let tx_src_port = get_available_port();
-    let tx_dst_port = get_available_port();
     let rx_src_port = get_available_port();
-    let rx_dst_port = get_available_port();
 
     // Destination receivers
-    let tx_receiver = UdpSocket::bind(format!("127.0.0.1:{}", tx_dst_port)).expect("bind tx dst");
+    let tx_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind tx dst");
+    let tx_dst_port = tx_receiver.local_addr().expect("local addr").port();
     tx_receiver
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let rx_receiver_listener =
-        TcpListener::bind(format!("127.0.0.1:{}", rx_dst_port)).expect("bind rx dst");
+    let rx_receiver_listener = TcpListener::bind("127.0.0.1:0").expect("bind rx dst");
+    let rx_dst_port = rx_receiver_listener
+        .local_addr()
+        .expect("local addr")
+        .port();
     rx_receiver_listener.set_nonblocking(true).unwrap();
 
     let yaml = format!(
@@ -153,11 +164,10 @@ instances:
 #[test]
 fn test_paired_interface_independent_errors_and_routing() {
     let tx_src_port = get_available_port();
-    let _tx_dst_port = get_available_port(); // Unused port; destination uses invalid broadcast
     let rx_src_port = get_available_port();
-    let rx_dst_port = get_available_port();
 
-    let rx_receiver = UdpSocket::bind(format!("127.0.0.1:{}", rx_dst_port)).expect("bind rx dst");
+    let rx_receiver = UdpSocket::bind("127.0.0.1:0").expect("bind rx dst");
+    let rx_dst_port = rx_receiver.local_addr().expect("local addr").port();
     rx_receiver
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
@@ -241,20 +251,20 @@ instances:
 
 #[test]
 fn test_single_directional_interfaces_tx_only_and_rx_only() {
-    let tx_src_port = get_available_port();
-    let tx_dst_port = get_available_port();
-    let rx_src_port = get_available_port();
-    let rx_dst_port = get_available_port();
-
-    let tx_dst = UdpSocket::bind(format!("127.0.0.1:{}", tx_dst_port)).unwrap();
+    let tx_dst = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let tx_dst_port = tx_dst.local_addr().unwrap().port();
     tx_dst
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let rx_dst = UdpSocket::bind(format!("127.0.0.1:{}", rx_dst_port)).unwrap();
+    let rx_dst = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let rx_dst_port = rx_dst.local_addr().unwrap().port();
     rx_dst
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
+
+    let tx_src_port = get_available_port();
+    let rx_src_port = get_available_port();
 
     let yaml = format!(
         r#"
@@ -320,46 +330,44 @@ instances:
 #[test]
 fn test_multiple_simultaneous_interfaces_in_one_instance() {
     let p_tx_src = get_available_port();
-    let p_tx_dst = get_available_port();
     let p_rx_src = get_available_port();
-    let p_rx_dst = get_available_port();
-
     let s_tx_src = get_available_port();
-    let s_tx_dst = get_available_port();
     let s_rx_src = get_available_port();
-    let s_rx_dst = get_available_port();
-
     let aux_src = get_available_port();
-    let aux_dst1 = get_available_port();
-    let aux_dst2 = get_available_port();
 
     // Bind all destination receivers
-    let r_p_tx = UdpSocket::bind(format!("127.0.0.1:{}", p_tx_dst)).unwrap();
+    let r_p_tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let p_tx_dst = r_p_tx.local_addr().unwrap().port();
     r_p_tx
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let r_p_rx = UdpSocket::bind(format!("127.0.0.1:{}", p_rx_dst)).unwrap();
+    let r_p_rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let p_rx_dst = r_p_rx.local_addr().unwrap().port();
     r_p_rx
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let r_s_tx = UdpSocket::bind(format!("127.0.0.1:{}", s_tx_dst)).unwrap();
+    let r_s_tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let s_tx_dst = r_s_tx.local_addr().unwrap().port();
     r_s_tx
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let r_s_rx = UdpSocket::bind(format!("127.0.0.1:{}", s_rx_dst)).unwrap();
+    let r_s_rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let s_rx_dst = r_s_rx.local_addr().unwrap().port();
     r_s_rx
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let r_aux1 = UdpSocket::bind(format!("127.0.0.1:{}", aux_dst1)).unwrap();
+    let r_aux1 = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let aux_dst1 = r_aux1.local_addr().unwrap().port();
     r_aux1
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let r_aux2 = UdpSocket::bind(format!("127.0.0.1:{}", aux_dst2)).unwrap();
+    let r_aux2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let aux_dst2 = r_aux2.local_addr().unwrap().port();
     r_aux2
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
@@ -489,15 +497,15 @@ instances:
 #[test]
 fn test_fanout_resilience_one_destination_failing_others_continue() {
     let src_port = get_available_port();
-    let dst1_port = get_available_port();
-    let dst2_port = get_available_port();
 
-    let receiver1 = UdpSocket::bind(format!("127.0.0.1:{}", dst1_port)).unwrap();
+    let receiver1 = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dst1_port = receiver1.local_addr().unwrap().port();
     receiver1
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let receiver2 = UdpSocket::bind(format!("127.0.0.1:{}", dst2_port)).unwrap();
+    let receiver2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dst2_port = receiver2.local_addr().unwrap().port();
     receiver2
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
@@ -572,16 +580,16 @@ instances:
 #[test]
 fn test_fanout_mixed_tcp_and_udp_resilience() {
     let src_port = get_available_port();
-    let udp_dst_port = get_available_port();
-    let tcp_healthy_dst_port = get_available_port();
     let tcp_failing_dst_port = get_available_port(); // No listener running!
 
-    let udp_receiver = UdpSocket::bind(format!("127.0.0.1:{}", udp_dst_port)).unwrap();
+    let udp_receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_dst_port = udp_receiver.local_addr().unwrap().port();
     udp_receiver
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    let tcp_listener = TcpListener::bind(format!("127.0.0.1:{}", tcp_healthy_dst_port)).unwrap();
+    let tcp_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp_healthy_dst_port = tcp_listener.local_addr().unwrap().port();
 
     let yaml = format!(
         r#"
