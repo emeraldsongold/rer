@@ -1,4 +1,7 @@
-//! Integration tests for BPv7 CBOR Primary Block parser (SPEC §14, §8, Task RER-F-036).
+use std::io::Write;
+use std::net::{TcpStream, UdpSocket};
+use std::thread;
+use std::time::Duration;
 
 use rer::bpv7::{
     evaluate_bpv7_payload, evaluate_bundle_header, evaluate_payload, parse_bpv7_primary_block,
@@ -6,6 +9,10 @@ use rer::bpv7::{
     CreationTimestamp, EndpointId, PrimaryBlock, BUNDLE_IS_FRAGMENT, BUNDLE_MUST_NOT_BE_FRAGMENTED,
     BUNDLE_PAYLOAD_IS_ADMIN_RECORD,
 };
+use rer::config::Config;
+use rer::diagnostics::DiagnosticStage;
+use rer::framing::encode_frame;
+use rer::relay::Relay;
 
 #[test]
 fn test_criterion1_parse_valid_cbor_primary_block_matching_rfc9171_reference_vectors() {
@@ -403,4 +410,477 @@ fn test_bundle_inspection_into_full_buffer_drops_without_blocking_or_panicking()
         snap.events[1].stage,
         rer::diagnostics::DiagnosticStage::BundleInspection
     );
+}
+
+fn pick_unused_port() -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral socket");
+    socket.local_addr().expect("local addr").port()
+}
+
+fn rfc9171_bundle_bytes() -> Vec<u8> {
+    let hex_bundle = "9f88070000820282020182028201018202820001821b00ff00bb0e20b4ea001a000927c08507020100410085010100004d48656c6f2c20576f726c642142ff";
+    (0..hex_bundle.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex_bundle[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn test_udp_forwarding_valid_bpv7_bundle_sends_exact_payload_unmodified() {
+    let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+    dest_sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = dest_sock.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "relay-udp-bpv7"
+    streams:
+      - id: "s-bpv7-udp"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          bpv7:
+            enabled: true
+"#
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = Relay::start(&config).expect("start relay");
+    thread::sleep(Duration::from_millis(30));
+
+    let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+    // Test 1: RFC 9171 reference bundle
+    let bundle1 = rfc9171_bundle_bytes();
+    sender
+        .send_to(&bundle1, format!("127.0.0.1:{listen_port}"))
+        .expect("send bundle1");
+
+    let mut buf = vec![0u8; 4096];
+    let (n1, _) = dest_sock.recv_from(&mut buf).expect("recv bundle1");
+    assert_eq!(
+        &buf[..n1],
+        &bundle1[..],
+        "received UDP datagram must match bundle bytes exactly unmodified"
+    );
+
+    // Test 2: Custom BPv7 primary block bundle
+    let primary = PrimaryBlock {
+        version: 7,
+        bundle_control_flags: 0,
+        crc_type: CrcType::None,
+        destination: EndpointId::dtn("node-dest/service"),
+        source: EndpointId::ipn(42, 100),
+        report_to: EndpointId::dtn_none(),
+        creation_timestamp: CreationTimestamp::new(1_000_000, 42),
+        lifetime: 3_600_000,
+        fragment_offset: None,
+        total_application_data_unit_length: None,
+        crc: None,
+        crc_valid: None,
+    };
+    let bundle2 = primary.to_cbor();
+    sender
+        .send_to(&bundle2, format!("127.0.0.1:{listen_port}"))
+        .expect("send bundle2");
+
+    let (n2, _) = dest_sock.recv_from(&mut buf).expect("recv bundle2");
+    assert_eq!(
+        &buf[..n2],
+        &bundle2[..],
+        "received UDP datagram must match bundle2 bytes exactly unmodified"
+    );
+
+    // Verify diagnostic buffer recorded bundle inspection events
+    let snap = relay.event_buffer().snapshot();
+    let bpv7_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == DiagnosticStage::BundleInspection)
+        .collect();
+    assert_eq!(
+        bpv7_events.len(),
+        2,
+        "expected 2 BundleInspection diagnostic events"
+    );
+
+    assert_eq!(
+        bpv7_events[0].bundle_destination.as_deref(),
+        Some("ipn:2.1")
+    );
+    assert_eq!(bpv7_events[0].bundle_source.as_deref(), Some("ipn:1.1"));
+    assert_eq!(bpv7_events[0].parse_status, Some(BundleParseStatus::Valid));
+
+    assert_eq!(
+        bpv7_events[1].bundle_destination.as_deref(),
+        Some("dtn://node-dest/service")
+    );
+    assert_eq!(bpv7_events[1].bundle_source.as_deref(), Some("ipn:42.100"));
+    assert_eq!(bpv7_events[1].parse_status, Some(BundleParseStatus::Valid));
+
+    relay.stop();
+}
+
+#[test]
+fn test_tcp_forwarding_bpv7_bundle_records_bundle_inspection_with_eids_and_forwards_unmodified() {
+    let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+    dest_sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = dest_sock.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "relay-tcp-bpv7"
+    streams:
+      - id: "s-bpv7-tcp"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          bpv7:
+            enabled: true
+            extract_eids: true
+"#
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = Relay::start(&config).expect("start relay");
+    thread::sleep(Duration::from_millis(40));
+
+    let mut client =
+        TcpStream::connect(format!("127.0.0.1:{listen_port}")).expect("connect to relay tcp");
+    client.set_nodelay(true).unwrap();
+
+    let raw_bundle = rfc9171_bundle_bytes();
+    let framed = encode_frame(&raw_bundle);
+    client
+        .write_all(&framed)
+        .expect("write framed bundle to tcp");
+    client.flush().expect("flush tcp");
+
+    // Check payload received at destination is unmodified
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = dest_sock.recv_from(&mut buf).expect("recv from dest");
+    assert_eq!(
+        &buf[..n],
+        &raw_bundle[..],
+        "forwarded payload bytes must be unmodified"
+    );
+
+    // Check BundleInspection diagnostic event was recorded with extracted EIDs
+    thread::sleep(Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let bi_event = snap
+        .events
+        .iter()
+        .find(|e| e.stage == DiagnosticStage::BundleInspection)
+        .expect("must record a BundleInspection diagnostic event");
+
+    assert_eq!(bi_event.bundle_destination.as_deref(), Some("ipn:2.1"));
+    assert_eq!(bi_event.bundle_source.as_deref(), Some("ipn:1.1"));
+    assert_eq!(bi_event.destination_endpoint.as_deref(), Some("ipn:2.1"));
+    assert_eq!(bi_event.source_endpoint.as_deref(), Some("ipn:1.1"));
+    assert_eq!(bi_event.dtn_timestamp, Some(0x00ff_00bb_0e20_b4ea));
+    assert_eq!(bi_event.bundle_lifetime, Some(600_000));
+    assert_eq!(bi_event.parse_status, Some(BundleParseStatus::Valid));
+
+    let bi = bi_event
+        .bundle_inspection
+        .as_ref()
+        .expect("structured bundle inspection present");
+    assert_eq!(bi.destination(), "ipn:2.1");
+    assert_eq!(bi.source(), "ipn:1.1");
+    assert_eq!(bi.parse_status(), BundleParseStatus::Valid);
+
+    relay.stop();
+}
+
+#[test]
+fn test_relay_stream_malformed_cbor_and_non_bpv7_traffic_forwards_unmodified_without_stalling() {
+    let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+    dest_sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = dest_sock.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "relay-unparsed-traffic"
+    streams:
+      - id: "s-unparsed"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          bpv7:
+            enabled: true
+"#
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = Relay::start(&config).expect("start relay");
+    thread::sleep(Duration::from_millis(40));
+
+    let mut client =
+        TcpStream::connect(format!("127.0.0.1:{listen_port}")).expect("connect to relay tcp");
+    client.set_nodelay(true).unwrap();
+
+    // 1. Malformed CBOR bytes
+    let malformed_cbor = vec![0x9f, 0x88, 0xff, 0xff];
+    let framed_malformed = encode_frame(&malformed_cbor);
+    client
+        .write_all(&framed_malformed)
+        .expect("write malformed cbor");
+    client.flush().expect("flush");
+
+    let mut buf = vec![0u8; 4096];
+    let (n1, _) = dest_sock.recv_from(&mut buf).expect("recv malformed cbor");
+    assert_eq!(
+        &buf[..n1],
+        &malformed_cbor[..],
+        "malformed payload forwarded unmodified"
+    );
+
+    // 2. Valid non-BPv7 CBOR (integer 42: [0x18, 0x2A])
+    let valid_cbor_not_bpv7 = vec![0x18, 0x2A];
+    let framed_cbor = encode_frame(&valid_cbor_not_bpv7);
+    client
+        .write_all(&framed_cbor)
+        .expect("write valid non-bpv7 cbor");
+    client.flush().expect("flush");
+
+    let (n2, _) = dest_sock
+        .recv_from(&mut buf)
+        .expect("recv valid non-bpv7 cbor");
+    assert_eq!(
+        &buf[..n2],
+        &valid_cbor_not_bpv7[..],
+        "non-bpv7 cbor forwarded unmodified"
+    );
+
+    // 3. Plain arbitrary non-CBOR text payload
+    let plain_text = b"plain-telemetry-non-cbor-data-stream".to_vec();
+    let framed_text = encode_frame(&plain_text);
+    client.write_all(&framed_text).expect("write plain text");
+    client.flush().expect("flush");
+
+    let (n3, _) = dest_sock.recv_from(&mut buf).expect("recv plain text");
+    assert_eq!(
+        &buf[..n3],
+        &plain_text[..],
+        "plain text forwarded unmodified"
+    );
+
+    // 4. Valid BPv7 bundle right after unparsed traffic to prove thread did not stall
+    let valid_bundle = rfc9171_bundle_bytes();
+    let framed_bundle = encode_frame(&valid_bundle);
+    client
+        .write_all(&framed_bundle)
+        .expect("write valid bundle");
+    client.flush().expect("flush");
+
+    let (n4, _) = dest_sock.recv_from(&mut buf).expect("recv valid bundle");
+    assert_eq!(
+        &buf[..n4],
+        &valid_bundle[..],
+        "valid bundle forwarded unmodified without stalling"
+    );
+
+    thread::sleep(Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let inspection_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == DiagnosticStage::BundleInspection)
+        .collect();
+
+    assert_eq!(inspection_events.len(), 4, "expected 4 inspection events");
+
+    // Malformed CBOR event
+    assert_eq!(
+        inspection_events[0].parse_status,
+        Some(BundleParseStatus::MalformedCbor)
+    );
+    assert!(inspection_events[0].parse_status.unwrap().is_malformed());
+
+    // Valid non-BPv7 CBOR event
+    assert_eq!(
+        inspection_events[1].parse_status,
+        Some(BundleParseStatus::NotBpv7)
+    );
+    assert!(inspection_events[1].parse_status.unwrap().is_not_bpv7());
+
+    // Plain text event (unparsed traffic: malformed cbor or not bpv7)
+    assert!(inspection_events[2].parse_status.is_some());
+    assert!(!inspection_events[2].parse_status.unwrap().is_valid());
+
+    // Valid bundle event
+    assert_eq!(
+        inspection_events[3].parse_status,
+        Some(BundleParseStatus::Valid)
+    );
+    assert_eq!(
+        inspection_events[3].bundle_destination.as_deref(),
+        Some("ipn:2.1")
+    );
+
+    relay.stop();
+}
+
+#[test]
+fn test_configuration_doc_specifies_bpv7_passive_inspection_without_storage_routing_bpsec_tcpclv4()
+{
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/CONFIGURATION.md"
+    ))
+    .expect("read docs/CONFIGURATION.md");
+
+    assert!(
+        doc.contains("passive metadata inspection without bundle storage, routing, BPSec verification, or TCPCLv4 convergence layer framing"),
+        "docs/CONFIGURATION.md must specify BPv7 passive inspection non-claims"
+    );
+    assert!(doc.contains("stream.inspection.bpv7") || doc.contains("inspection.bpv7"));
+    assert!(doc.contains("max_inspect_bytes"));
+    assert!(doc.contains("extract_eids"));
+}
+
+#[test]
+fn test_bpv7_inspection_disabled_preserves_behavior_no_bundle_inspection_event() {
+    let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+    dest_sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = dest_sock.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "relay-disabled-bpv7"
+    streams:
+      - id: "s-bpv7-disabled"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          bpv7:
+            enabled: false
+"#
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = Relay::start(&config).expect("start relay");
+    thread::sleep(Duration::from_millis(40));
+
+    let mut client =
+        TcpStream::connect(format!("127.0.0.1:{listen_port}")).expect("connect to relay tcp");
+    let bundle = rfc9171_bundle_bytes();
+    client
+        .write_all(&encode_frame(&bundle))
+        .expect("write frame");
+    client.flush().expect("flush");
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], &bundle[..]);
+
+    thread::sleep(Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let bpv7_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == DiagnosticStage::BundleInspection)
+        .collect();
+    assert!(
+        bpv7_events.is_empty(),
+        "disabled BPv7 inspection must not record BundleInspection events"
+    );
+
+    relay.stop();
+}
+
+#[test]
+fn test_bpv7_inspection_extract_eids_false_omits_eids() {
+    let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+    dest_sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = dest_sock.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "relay-no-eids"
+    streams:
+      - id: "s-no-eids"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          bpv7:
+            enabled: true
+            extract_eids: false
+"#
+    );
+
+    let config = Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = Relay::start(&config).expect("start relay");
+    thread::sleep(Duration::from_millis(40));
+
+    let mut client =
+        TcpStream::connect(format!("127.0.0.1:{listen_port}")).expect("connect to relay tcp");
+    let bundle = rfc9171_bundle_bytes();
+    client
+        .write_all(&encode_frame(&bundle))
+        .expect("write frame");
+    client.flush().expect("flush");
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+    assert_eq!(&buf[..n], &bundle[..]);
+
+    thread::sleep(Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let bi_event = snap
+        .events
+        .iter()
+        .find(|e| e.stage == DiagnosticStage::BundleInspection)
+        .expect("BundleInspection recorded");
+    assert_eq!(bi_event.bundle_destination, None);
+    assert_eq!(bi_event.bundle_source, None);
+    assert_eq!(bi_event.parse_status, Some(BundleParseStatus::Valid));
+
+    relay.stop();
 }

@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-038 (Passive BPv7 stream inspection and transparent relay forwarding)
+- **Transparent BPv7 Forwarding**: Forwarding UDP datagrams containing BPv7 bundles transmits exact payload bytes unmodified to destination sockets without byte alterations or buffering (SPEC §14, §8).
+- **Passive TCP BPv7 Stream Inspection**: Ingress TCP stream processing inspects BPv7 bundles, recording structured `BundleInspection` diagnostic events with extracted endpoint identifiers in the non-blocking diagnostic buffer while forwarding stream payloads unmodified.
+- **Graceful Unparsed Traffic Handling**: Malformed CBOR and valid non-BPv7 stream traffic forward payloads unmodified and record diagnostic events with status indicating unparsed traffic without blocking or stalling relay worker threads.
+- **Specification and Configuration Documentation**: Documented stream option inspection in `docs/CONFIGURATION.md` specifying passive metadata inspection without bundle storage, routing, BPSec verification, or TCPCLv4 convergence layer framing.
+
 ### Added - Milestone RER-F-037 (BPv7 inspection configuration and BundleInspection diagnostic event)
 - **BPv7 Stream Inspection Configuration**: Added optional `bpv7` subsection (`Bpv7InspectionConfig`) under stream packet inspection (`stream.inspection.bpv7`) supporting `enabled`, `max_inspect_bytes` (default 4096), and `extract_eids` (SPEC §14, §8). Omitting `bpv7` preserves existing preview and inspection behavior with `None`.
 - **Inspection Size Limit Validation**: Added validation in `rer validate` verifying that `max_inspect_bytes` is greater than 0, reporting an invalid inspection size limit error when set to 0.
