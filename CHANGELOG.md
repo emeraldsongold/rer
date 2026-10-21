@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-037 (BPv7 inspection configuration and BundleInspection diagnostic event)
+- **BPv7 Stream Inspection Configuration**: Added optional `bpv7` subsection (`Bpv7InspectionConfig`) under stream packet inspection (`stream.inspection.bpv7`) supporting `enabled`, `max_inspect_bytes` (default 4096), and `extract_eids` (SPEC §14, §8). Omitting `bpv7` preserves existing preview and inspection behavior with `None`.
+- **Inspection Size Limit Validation**: Added validation in `rer validate` verifying that `max_inspect_bytes` is greater than 0, reporting an invalid inspection size limit error when set to 0.
+- **Dedicated BundleInspection Diagnostic Event**: Introduced `BundleInspection` event model in `crates/rer/src/diagnostics.rs` capturing endpoint identifiers, DTN timestamp, lifetime, and parse status, serializing into JSON containing structured bundle metadata.
+- **Bounded Non-Blocking Event Emission**: Implemented non-blocking event emission into `DiagnosticBuffer`, ensuring events emitted into a full buffer are dropped cleanly without blocking forwarding threads or panicking.
+
 ### Added - Milestone RER-F-036 (In-tree CBOR parser for BPv7 primary blocks)
 - **Zero-Dependency CBOR BPv7 Primary Block Parser**: Added `parse_primary_block` and `PrimaryBlock` in `crates/rer/src/bpv7.rs` parsing RFC 9171 BPv7 primary bundle blocks and bundles with strict bounds checking, extracting bundle version 7, control flags, CRC type, destination EID, source node ID, report-to EID, creation timestamp, and lifetime (SPEC §14, §8).
 - **Multi-Scheme Endpoint Identifier Decoding**: Supported both `ipn:` and `dtn:` addressing schemes, returning decoded URI strings (e.g. `ipn:node.service`, `dtn://node/service`, and null endpoint `dtn:none`) with string dereferencing and comparison helpers.

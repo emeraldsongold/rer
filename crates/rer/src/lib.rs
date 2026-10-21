@@ -37,13 +37,14 @@ pub use ccsds::{
     CcsdsSequenceTracker, CCSDS_IDLE_APID, CCSDS_PRIMARY_HEADER_LEN, CCSDS_SEQUENCE_MODULUS,
 };
 pub use config::{
-    ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode, InspectionConfig, InstanceConfig,
-    LogicalInterfaceConfig, MetricsConfig, OperationalMode, SequenceConfig, StreamConfig,
-    TestModeConfig, ValidationError, ValidationReport,
+    Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
+    InspectionConfig, InstanceConfig, LogicalInterfaceConfig, MetricsConfig, OperationalMode,
+    SequenceConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
-    format_ascii_preview, format_hex_preview, Clock, DiagnosticBuffer, DiagnosticBufferBuilder,
-    DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, ManualClock,
+    format_ascii_preview, format_hex_preview, BundleInspection, BundleInspectionEvent,
+    BundleMetadata, Clock, DiagnosticBuffer, DiagnosticBufferBuilder, DiagnosticEvent,
+    DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, IntoDtnTimestamp, ManualClock,
     RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent, Stage, SystemClock,
 };
 pub use framing::{
