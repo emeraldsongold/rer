@@ -445,7 +445,7 @@ pub fn default_sequence_width() -> usize {
     4
 }
 
-/// Opt-in packet inspection and payload preview configuration (SPEC §8).
+/// Opt-in packet inspection and payload preview configuration (SPEC §8, §14).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InspectionConfig {
@@ -464,10 +464,49 @@ pub struct InspectionConfig {
         alias = "max_length"
     )]
     pub max_preview_bytes: usize,
+
+    /// Optional BPv7 passive bundle inspection configuration (SPEC §14, §8). Defaults to None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bpv7: Option<Bpv7InspectionConfig>,
 }
 
 pub fn default_max_preview_bytes() -> usize {
     64
+}
+
+pub fn default_max_inspect_bytes() -> usize {
+    4096
+}
+
+/// Opt-in BPv7 passive inspection configuration (SPEC §14, §8).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Bpv7InspectionConfig {
+    /// Whether BPv7 inspection is enabled. Defaults to true when bpv7 section is present.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of bytes to inspect for BPv7 headers. Defaults to 4096.
+    #[serde(
+        default = "default_max_inspect_bytes",
+        alias = "max_bytes",
+        alias = "max_inspect"
+    )]
+    pub max_inspect_bytes: usize,
+
+    /// Whether to extract destination and source endpoint identifiers (EIDs). Defaults to true.
+    #[serde(default = "default_true")]
+    pub extract_eids: bool,
+}
+
+impl Default for Bpv7InspectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_inspect_bytes: default_max_inspect_bytes(),
+            extract_eids: true,
+        }
+    }
 }
 
 impl Default for SequenceConfig {
@@ -491,6 +530,7 @@ impl Default for InspectionConfig {
             hex_preview: false,
             ascii_preview: false,
             max_preview_bytes: 64,
+            bpv7: None,
         }
     }
 }
@@ -953,6 +993,14 @@ impl Config {
                             path: format!("{}.inspection.max_preview_bytes", stream_prefix),
                             reason: "max_preview_bytes must be greater than 0".to_string(),
                         });
+                    }
+                    if let Some(ref bpv7) = insp.bpv7 {
+                        if bpv7.max_inspect_bytes == 0 {
+                            errors.push(ValidationError {
+                                path: format!("{}.inspection.bpv7.max_inspect_bytes", stream_prefix),
+                                reason: "invalid inspection size limit: max_inspect_bytes must be greater than 0".to_string(),
+                            });
+                        }
                     }
                 }
 

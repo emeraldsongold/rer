@@ -32,6 +32,30 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "Bpv7InspectionConfig": {
+      "description": "Opt-in BPv7 passive inspection configuration (SPEC §14, §8).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether BPv7 inspection is enabled. Defaults to true when bpv7 section is present.",
+          "default": true,
+          "type": "boolean"
+        },
+        "extract_eids": {
+          "description": "Whether to extract destination and source endpoint identifiers (EIDs). Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "max_inspect_bytes": {
+          "description": "Maximum number of bytes to inspect for BPv7 headers. Defaults to 4096.",
+          "default": 4096,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "BufferConfig": {
       "description": "Buffer and queue bounding configuration (SPEC §17).",
       "type": "object",
@@ -218,13 +242,24 @@
       ]
     },
     "InspectionConfig": {
-      "description": "Opt-in packet inspection and payload preview configuration (SPEC §8).",
+      "description": "Opt-in packet inspection and payload preview configuration (SPEC §8, §14).",
       "type": "object",
       "properties": {
         "ascii_preview": {
           "description": "Whether ASCII payload previews are enabled. Defaults to false (opt-in).",
           "default": false,
           "type": "boolean"
+        },
+        "bpv7": {
+          "description": "Optional BPv7 passive bundle inspection configuration (SPEC §14, §8). Defaults to None.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Bpv7InspectionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "hex_preview": {
           "description": "Whether hexadecimal payload previews are enabled. Defaults to false (opt-in).",

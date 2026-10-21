@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::bpv7::{BundleParseStatus, CreationTimestamp, PrimaryBlock};
 use crate::config::{ByteOrder, InspectionConfig, OperationalMode, SequenceConfig, TransportType};
 
 /// Stage in packet lifecycle or diagnostic event category (SPEC §8, stages 2–6, drops, failures, and health).
@@ -43,6 +44,9 @@ pub enum DiagnosticStage {
     /// Relay or stream health state transition.
     #[serde(rename = "health_transition")]
     HealthTransition,
+    /// Bundle Protocol (BPv7) passive inspection event (SPEC §14, §8).
+    #[serde(rename = "bundle_inspection")]
+    BundleInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -58,6 +62,7 @@ impl fmt::Display for DiagnosticStage {
             Self::Dropped => write!(f, "dropped"),
             Self::Failure => write!(f, "failure"),
             Self::HealthTransition => write!(f, "health_transition"),
+            Self::BundleInspection => write!(f, "bundle_inspection"),
         }
     }
 }
@@ -75,8 +80,423 @@ impl FromStr for DiagnosticStage {
             "dropped" => Ok(Self::Dropped),
             "failure" => Ok(Self::Failure),
             "health_transition" => Ok(Self::HealthTransition),
+            "bundle_inspection" => Ok(Self::BundleInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
+    }
+}
+
+/// Trait allowing flexible construction of DTN creation timestamps.
+pub trait IntoDtnTimestamp {
+    /// Converts into a tuple of `(time_milliseconds, sequence_number)`.
+    fn into_dtn_timestamp(self) -> (u64, u64);
+}
+
+impl IntoDtnTimestamp for u64 {
+    fn into_dtn_timestamp(self) -> (u64, u64) {
+        (self, 0)
+    }
+}
+
+impl IntoDtnTimestamp for CreationTimestamp {
+    fn into_dtn_timestamp(self) -> (u64, u64) {
+        (self.time, self.sequence_number)
+    }
+}
+
+impl IntoDtnTimestamp for (u64, u64) {
+    fn into_dtn_timestamp(self) -> (u64, u64) {
+        self
+    }
+}
+
+impl IntoDtnTimestamp for &(u64, u64) {
+    fn into_dtn_timestamp(self) -> (u64, u64) {
+        *self
+    }
+}
+
+const fn default_bundle_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::BundleInspection
+}
+
+/// Structured BPv7 bundle metadata extracted during passive packet inspection (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleMetadata {
+    /// Destination endpoint identifier URI.
+    pub destination: String,
+
+    /// Source node endpoint identifier URI.
+    pub source: String,
+
+    /// Destination endpoint identifier URI (redundant key for explicit access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_eid: Option<String>,
+
+    /// Source endpoint identifier URI (redundant key for explicit access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_eid: Option<String>,
+
+    /// DTN timestamp in milliseconds since DTN epoch (2000-01-01 00:00:00 UTC).
+    pub dtn_timestamp: u64,
+
+    /// Structured creation timestamp (time and sequence number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_timestamp: Option<CreationTimestamp>,
+
+    /// Sequence number unique to source node at timestamp millisecond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+
+    /// Bundle lifetime in milliseconds relative to creation time.
+    pub lifetime: u64,
+
+    /// Parse outcome status.
+    pub parse_status: BundleParseStatus,
+
+    /// Optional report-to endpoint identifier URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to: Option<String>,
+
+    /// Whether the bundle is a fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_fragment: Option<bool>,
+
+    /// Fragment offset in bytes if this bundle is a fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_offset: Option<u64>,
+
+    /// Total application data unit length in bytes if this bundle is a fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_application_data_unit_length: Option<u64>,
+
+    /// CRC verification outcome if CRC was present and computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc_valid: Option<bool>,
+}
+
+/// Diagnostic event representing a BPv7 passive inspection event (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `bundle_inspection`).
+    #[serde(default = "default_bundle_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// Destination endpoint identifier URI (e.g. `ipn:1.2` or `dtn://node/service`).
+    pub destination_eid: String,
+
+    /// Source node endpoint identifier URI.
+    pub source_eid: String,
+
+    /// Optional report-to endpoint identifier URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to_eid: Option<String>,
+
+    /// DTN creation timestamp in milliseconds since 2000-01-01 00:00:00 UTC.
+    #[serde(alias = "dtn_time", alias = "creation_time", alias = "timestamp")]
+    pub dtn_timestamp: u64,
+
+    /// Sequence number unique to the source node at this millisecond.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "sequence")]
+    pub sequence_number: Option<u64>,
+
+    /// Bundle lifetime in milliseconds relative to creation time.
+    #[serde(alias = "lifetime_ms")]
+    pub lifetime: u64,
+
+    /// Outcome status of parsing the BPv7 bundle headers.
+    #[serde(alias = "status")]
+    pub parse_status: BundleParseStatus,
+
+    /// Destination endpoint identifier URI (redundant key for `destination` access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+
+    /// Source endpoint identifier URI (redundant key for `source` access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// Structured creation timestamp (time and sequence number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_timestamp: Option<CreationTimestamp>,
+
+    /// Whether this bundle is a fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_fragment: Option<bool>,
+
+    /// Fragment offset in bytes if this bundle is a fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_offset: Option<u64>,
+
+    /// Total application data unit length in bytes if this bundle is a fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_application_data_unit_length: Option<u64>,
+
+    /// Verification status of bundle CRC if CRC was present and computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc_valid: Option<bool>,
+
+    /// Structured bundle metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_metadata: Option<BundleMetadata>,
+}
+
+pub type BundleInspectionEvent = BundleInspection;
+
+impl BundleInspection {
+    /// Creates a new `BundleInspection` event.
+    #[must_use]
+    pub fn new(
+        destination: impl Into<String>,
+        source: impl Into<String>,
+        dtn_timestamp: impl IntoDtnTimestamp,
+        lifetime: u64,
+        parse_status: BundleParseStatus,
+    ) -> Self {
+        let dest = destination.into();
+        let src = source.into();
+        let (ts, seq) = dtn_timestamp.into_dtn_timestamp();
+        let ct = CreationTimestamp::new(ts, seq);
+        let metadata = BundleMetadata {
+            destination: dest.clone(),
+            source: src.clone(),
+            destination_eid: Some(dest.clone()),
+            source_eid: Some(src.clone()),
+            dtn_timestamp: ts,
+            creation_timestamp: Some(ct),
+            sequence_number: Some(seq),
+            lifetime,
+            parse_status,
+            report_to: None,
+            is_fragment: None,
+            fragment_offset: None,
+            total_application_data_unit_length: None,
+            crc_valid: None,
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::BundleInspection,
+            destination_eid: dest.clone(),
+            source_eid: src.clone(),
+            report_to_eid: None,
+            dtn_timestamp: ts,
+            sequence_number: Some(seq),
+            lifetime,
+            parse_status,
+            destination: Some(dest),
+            source: Some(src),
+            creation_timestamp: Some(ct),
+            is_fragment: None,
+            fragment_offset: None,
+            total_application_data_unit_length: None,
+            crc_valid: None,
+            bundle_metadata: Some(metadata),
+        }
+    }
+
+    /// Destination endpoint identifier string.
+    #[must_use]
+    pub fn destination(&self) -> &str {
+        &self.destination_eid
+    }
+
+    /// Source endpoint identifier string.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source_eid
+    }
+
+    /// Destination endpoint identifier string.
+    #[must_use]
+    pub fn destination_eid(&self) -> &str {
+        &self.destination_eid
+    }
+
+    /// Source endpoint identifier string.
+    #[must_use]
+    pub fn source_eid(&self) -> &str {
+        &self.source_eid
+    }
+
+    /// DTN timestamp in milliseconds.
+    #[must_use]
+    pub fn dtn_timestamp(&self) -> u64 {
+        self.dtn_timestamp
+    }
+
+    /// Lifetime in milliseconds.
+    #[must_use]
+    pub fn lifetime(&self) -> u64 {
+        self.lifetime
+    }
+
+    /// Parse status.
+    #[must_use]
+    pub fn parse_status(&self) -> BundleParseStatus {
+        self.parse_status
+    }
+
+    /// Creates a `BundleInspection` from a parsed [`PrimaryBlock`] and parse status.
+    #[must_use]
+    pub fn from_primary_block(primary: &PrimaryBlock, parse_status: BundleParseStatus) -> Self {
+        let dest = primary.destination.to_string();
+        let src = primary.source.to_string();
+        let report = primary.report_to.to_string();
+        let ts = primary.creation_timestamp.time;
+        let seq = primary.creation_timestamp.sequence_number;
+        let is_frag = (primary.bundle_control_flags & crate::bpv7::BUNDLE_IS_FRAGMENT) != 0;
+        let mut insp = Self::new(dest, src, (ts, seq), primary.lifetime, parse_status);
+        insp.report_to_eid = Some(report.clone());
+        insp.is_fragment = Some(is_frag);
+        insp.fragment_offset = primary.fragment_offset;
+        insp.total_application_data_unit_length = primary.total_application_data_unit_length;
+        insp.crc_valid = primary.crc_valid;
+        if let Some(ref mut meta) = insp.bundle_metadata {
+            meta.report_to = Some(report);
+            meta.is_fragment = Some(is_frag);
+            meta.fragment_offset = primary.fragment_offset;
+            meta.total_application_data_unit_length = primary.total_application_data_unit_length;
+            meta.crc_valid = primary.crc_valid;
+        }
+        insp
+    }
+
+    /// Sets the destination endpoint identifier.
+    #[must_use]
+    pub fn with_destination(mut self, dest: impl Into<String>) -> Self {
+        let d = dest.into();
+        self.destination_eid = d.clone();
+        self.destination = Some(d.clone());
+        if let Some(ref mut m) = self.bundle_metadata {
+            m.destination_eid = Some(d.clone());
+            m.destination = d;
+        }
+        self
+    }
+
+    /// Sets the destination endpoint identifier.
+    #[must_use]
+    pub fn with_destination_eid(self, dest: impl Into<String>) -> Self {
+        self.with_destination(dest)
+    }
+
+    /// Sets the source endpoint identifier.
+    #[must_use]
+    pub fn with_source(mut self, src: impl Into<String>) -> Self {
+        let s = src.into();
+        self.source_eid = s.clone();
+        self.source = Some(s.clone());
+        if let Some(ref mut m) = self.bundle_metadata {
+            m.source_eid = Some(s.clone());
+            m.source = s;
+        }
+        self
+    }
+
+    /// Sets the source endpoint identifier.
+    #[must_use]
+    pub fn with_source_eid(self, src: impl Into<String>) -> Self {
+        self.with_source(src)
+    }
+
+    /// Sets the stream identifier.
+    #[must_use]
+    pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
+        self.stream_id = Some(stream_id.into());
+        self
+    }
+
+    /// Sets monotonic and wall-clock timestamps.
+    #[must_use]
+    pub fn with_timestamps(mut self, monotonic: u64, wall_clock: u64) -> Self {
+        self.monotonic_timestamp = Some(monotonic);
+        self.wall_clock_timestamp = Some(wall_clock);
+        self
+    }
+
+    /// Sets the DTN timestamp.
+    #[must_use]
+    pub fn with_dtn_timestamp(mut self, ts: impl IntoDtnTimestamp) -> Self {
+        let (t, seq) = ts.into_dtn_timestamp();
+        self.dtn_timestamp = t;
+        self.sequence_number = Some(seq);
+        self.creation_timestamp = Some(CreationTimestamp::new(t, seq));
+        if let Some(ref mut m) = self.bundle_metadata {
+            m.dtn_timestamp = t;
+            m.sequence_number = Some(seq);
+            m.creation_timestamp = Some(CreationTimestamp::new(t, seq));
+        }
+        self
+    }
+
+    /// Sets the bundle lifetime.
+    #[must_use]
+    pub fn with_lifetime(mut self, lifetime: u64) -> Self {
+        self.lifetime = lifetime;
+        if let Some(ref mut m) = self.bundle_metadata {
+            m.lifetime = lifetime;
+        }
+        self
+    }
+
+    /// Sets the parse status.
+    #[must_use]
+    pub fn with_parse_status(mut self, status: BundleParseStatus) -> Self {
+        self.parse_status = status;
+        if let Some(ref mut m) = self.bundle_metadata {
+            m.parse_status = status;
+        }
+        self
+    }
+
+    /// Sets the report-to endpoint identifier.
+    #[must_use]
+    pub fn with_report_to(mut self, report_to: impl Into<String>) -> Self {
+        let r = report_to.into();
+        if let Some(ref mut m) = self.bundle_metadata {
+            m.report_to = Some(r.clone());
+        }
+        self.report_to_eid = Some(r);
+        self
+    }
+}
+
+impl From<BundleInspection> for DiagnosticEvent {
+    fn from(bi: BundleInspection) -> Self {
+        let mono = bi.monotonic_timestamp.unwrap_or(0);
+        let wall = bi.wall_clock_timestamp.unwrap_or(0);
+        let stream = bi.stream_id.clone().unwrap_or_else(|| "bpv7".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::BundleInspection,
+            TransportType::Udp,
+            0,
+        );
+        event.destination_endpoint = Some(bi.destination_eid.clone());
+        event.source_endpoint = Some(bi.source_eid.clone());
+        event.bundle_destination = Some(bi.destination_eid.clone());
+        event.bundle_source = Some(bi.source_eid.clone());
+        event.dtn_timestamp = Some(bi.dtn_timestamp);
+        event.bundle_lifetime = Some(bi.lifetime);
+        event.parse_status = Some(bi.parse_status);
+        event.bundle_inspection = Some(bi);
+        event
     }
 }
 
@@ -154,6 +574,35 @@ pub struct DiagnosticEvent {
     /// Opt-in ASCII preview of payload bytes (SPEC §8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ascii_preview: Option<String>,
+
+    /// BPv7 destination endpoint identifier (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_destination: Option<String>,
+
+    /// BPv7 source endpoint identifier (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_source: Option<String>,
+
+    /// BPv7 DTN creation timestamp in milliseconds (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dtn_timestamp: Option<u64>,
+
+    /// BPv7 bundle lifetime in milliseconds (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_lifetime: Option<u64>,
+
+    /// BPv7 bundle parse evaluation status (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<BundleParseStatus>,
+
+    /// BPv7 bundle inspection metadata (SPEC §14, §8).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "bpv7",
+        alias = "bundle_metadata"
+    )]
+    pub bundle_inspection: Option<BundleInspection>,
 }
 
 impl DiagnosticEvent {
@@ -184,6 +633,12 @@ impl DiagnosticEvent {
             ccsds_flags: None,
             hex_preview: None,
             ascii_preview: None,
+            bundle_destination: None,
+            bundle_source: None,
+            dtn_timestamp: None,
+            bundle_lifetime: None,
+            parse_status: None,
+            bundle_inspection: None,
         }
     }
 
@@ -255,6 +710,86 @@ impl DiagnosticEvent {
     pub fn with_ascii_preview(mut self, ascii: impl Into<String>) -> Self {
         self.ascii_preview = Some(ascii.into());
         self
+    }
+
+    /// Sets the BPv7 destination endpoint identifier.
+    #[must_use]
+    pub fn with_bundle_destination(mut self, dest: impl Into<String>) -> Self {
+        let d = dest.into();
+        self.bundle_destination = Some(d.clone());
+        if let Some(ref mut insp) = self.bundle_inspection {
+            *insp = insp.clone().with_destination(d);
+        }
+        self
+    }
+
+    /// Sets the BPv7 source endpoint identifier.
+    #[must_use]
+    pub fn with_bundle_source(mut self, src: impl Into<String>) -> Self {
+        let s = src.into();
+        self.bundle_source = Some(s.clone());
+        if let Some(ref mut insp) = self.bundle_inspection {
+            *insp = insp.clone().with_source(s);
+        }
+        self
+    }
+
+    /// Sets the BPv7 DTN creation timestamp in milliseconds.
+    #[must_use]
+    pub fn with_dtn_timestamp(mut self, ts: impl IntoDtnTimestamp) -> Self {
+        let (t, _) = ts.into_dtn_timestamp();
+        self.dtn_timestamp = Some(t);
+        if let Some(ref mut insp) = self.bundle_inspection {
+            *insp = insp.clone().with_dtn_timestamp(t);
+        }
+        self
+    }
+
+    /// Sets the BPv7 bundle lifetime in milliseconds.
+    #[must_use]
+    pub fn with_bundle_lifetime(mut self, lifetime: u64) -> Self {
+        self.bundle_lifetime = Some(lifetime);
+        if let Some(ref mut insp) = self.bundle_inspection {
+            *insp = insp.clone().with_lifetime(lifetime);
+        }
+        self
+    }
+
+    /// Sets the BPv7 bundle parse evaluation status.
+    #[must_use]
+    pub fn with_parse_status(mut self, status: BundleParseStatus) -> Self {
+        self.parse_status = Some(status);
+        if let Some(ref mut insp) = self.bundle_inspection {
+            *insp = insp.clone().with_parse_status(status);
+        }
+        self
+    }
+
+    /// Attaches BPv7 bundle inspection metadata.
+    #[must_use]
+    pub fn with_bundle_inspection(mut self, inspection: BundleInspection) -> Self {
+        self.bundle_destination = Some(inspection.destination_eid.clone());
+        self.bundle_source = Some(inspection.source_eid.clone());
+        self.dtn_timestamp = Some(inspection.dtn_timestamp);
+        self.bundle_lifetime = Some(inspection.lifetime);
+        self.parse_status = Some(inspection.parse_status);
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::BundleInspection;
+        }
+        self.bundle_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a diagnostic event specifically for BPv7 bundle inspection.
+    #[must_use]
+    pub fn bundle_inspection(
+        destination: impl Into<String>,
+        source: impl Into<String>,
+        dtn_timestamp: impl IntoDtnTimestamp,
+        lifetime: u64,
+        parse_status: BundleParseStatus,
+    ) -> Self {
+        BundleInspection::new(destination, source, dtn_timestamp, lifetime, parse_status).into()
     }
 }
 
@@ -864,7 +1399,8 @@ impl DiagnosticBuffer {
     /// If a per-second rate limit is exceeded, it returns immediately with `false`
     /// and increments the dropped count.
     /// If the buffer is full, the oldest event is overwritten and the dropped count is incremented.
-    pub fn emit(&self, mut event: DiagnosticEvent) -> bool {
+    pub fn emit(&self, event: impl Into<DiagnosticEvent>) -> bool {
+        let mut event = event.into();
         let mut pending_event = None;
         if let Some(ts) = self.test_state() {
             if ts.current_mode() == OperationalMode::Test {
@@ -889,6 +1425,30 @@ impl DiagnosticBuffer {
         }
 
         res
+    }
+
+    /// Creates a [`BundleInspection`] event populated with buffer clock timestamps.
+    #[must_use]
+    pub fn create_bundle_inspection(
+        &self,
+        stream_id: impl Into<String>,
+        destination: impl Into<String>,
+        source: impl Into<String>,
+        dtn_timestamp: impl IntoDtnTimestamp,
+        lifetime: u64,
+        parse_status: BundleParseStatus,
+    ) -> BundleInspection {
+        let mut insp =
+            BundleInspection::new(destination, source, dtn_timestamp, lifetime, parse_status);
+        insp.stream_id = Some(stream_id.into());
+        insp.monotonic_timestamp = Some(self.clock.monotonic_nanos());
+        insp.wall_clock_timestamp = Some(self.clock.wall_clock_nanos());
+        insp
+    }
+
+    /// Emits a [`BundleInspection`] event into the diagnostic buffer.
+    pub fn emit_bundle_inspection(&self, inspection: BundleInspection) -> bool {
+        self.emit(inspection)
     }
 
     /// Creates a diagnostic event using the buffer's injected clock timestamps.
@@ -1395,6 +1955,7 @@ mod tests {
             (DiagnosticStage::Dropped, "\"dropped\""),
             (DiagnosticStage::Failure, "\"failure\""),
             (DiagnosticStage::HealthTransition, "\"health_transition\""),
+            (DiagnosticStage::BundleInspection, "\"bundle_inspection\""),
         ];
 
         for (stage, expected_json) in stages {
@@ -1410,6 +1971,117 @@ mod tests {
             let parsed: DiagnosticStage = display_str.parse().expect("failed to parse stage");
             assert_eq!(parsed, stage);
         }
+    }
+
+    #[test]
+    fn test_bundle_inspection_event_serialization_contains_structured_metadata() {
+        let event = BundleInspection::new(
+            "ipn:10.1",
+            "dtn://node-alpha/telemetry",
+            123_456_789u64,
+            86_400_000u64,
+            BundleParseStatus::Valid,
+        );
+
+        let json = serde_json::to_string(&event).expect("must serialize to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("must parse JSON");
+
+        // Verify endpoint identifiers
+        assert_eq!(val["destination"], "ipn:10.1");
+        assert_eq!(val["source"], "dtn://node-alpha/telemetry");
+        assert_eq!(val["destination_eid"], "ipn:10.1");
+        assert_eq!(val["source_eid"], "dtn://node-alpha/telemetry");
+
+        // Verify DTN timestamp
+        assert_eq!(val["dtn_timestamp"], 123_456_789);
+        assert_eq!(val["creation_timestamp"]["time"], 123_456_789);
+
+        // Verify lifetime and status
+        assert_eq!(val["lifetime"], 86_400_000);
+        assert_eq!(val["parse_status"], "valid");
+
+        // Verify structured bundle metadata nested object
+        assert!(val["bundle_metadata"].is_object());
+        assert_eq!(val["bundle_metadata"]["destination"], "ipn:10.1");
+        assert_eq!(
+            val["bundle_metadata"]["source"],
+            "dtn://node-alpha/telemetry"
+        );
+        assert_eq!(val["bundle_metadata"]["dtn_timestamp"], 123_456_789);
+        assert_eq!(val["bundle_metadata"]["lifetime"], 86_400_000);
+        assert_eq!(val["bundle_metadata"]["parse_status"], "valid");
+
+        // Also test serialization when converted to DiagnosticEvent
+        let diag_event: DiagnosticEvent = event.into();
+        let diag_json = serde_json::to_string(&diag_event).expect("must serialize DiagnosticEvent");
+        let diag_val: serde_json::Value =
+            serde_json::from_str(&diag_json).expect("must parse DiagnosticEvent JSON");
+        assert_eq!(diag_val["stage"], "bundle_inspection");
+        assert_eq!(diag_val["destination_endpoint"], "ipn:10.1");
+        assert_eq!(diag_val["source_endpoint"], "dtn://node-alpha/telemetry");
+        assert_eq!(diag_val["bundle_destination"], "ipn:10.1");
+        assert_eq!(diag_val["bundle_source"], "dtn://node-alpha/telemetry");
+        assert_eq!(diag_val["dtn_timestamp"], 123_456_789);
+        assert_eq!(diag_val["bundle_lifetime"], 86_400_000);
+        assert_eq!(diag_val["parse_status"], "valid");
+        assert!(diag_val["bundle_inspection"].is_object());
+    }
+
+    #[test]
+    fn test_emitting_bundle_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
+        let clock = Arc::new(ManualClock::new(100, 200));
+        let buffer = DiagnosticBuffer::with_clock(2, clock);
+        assert_eq!(buffer.capacity(), 2);
+
+        // Fill buffer to capacity
+        let ev1 = buffer.create_event("s1", DiagnosticStage::Received, TransportType::Udp, 100);
+        let ev2 = buffer.create_event("s1", DiagnosticStage::Accepted, TransportType::Udp, 100);
+        assert!(buffer.emit(ev1));
+        assert!(buffer.emit(ev2));
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.dropped_count(), 0);
+
+        // Emit BundleInspection into the full buffer
+        let bundle_ev = BundleInspection::new(
+            "ipn:1.1",
+            "dtn:none",
+            1000u64,
+            3600u64,
+            BundleParseStatus::Valid,
+        );
+
+        // This must drop without blocking or panicking
+        let emitted = buffer.emit(bundle_ev);
+        assert!(emitted);
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(
+            buffer.dropped_count(),
+            1,
+            "emitting into full buffer must increment dropped_count"
+        );
+
+        // Verify in snapshot that the oldest was dropped and buffer contains the bundle inspection
+        let snap = buffer.snapshot();
+        assert_eq!(snap.dropped_count, 1);
+        assert_eq!(snap.events.len(), 2);
+        assert_eq!(snap.events[1].stage, DiagnosticStage::BundleInspection);
+        assert_eq!(
+            snap.events[1].destination_endpoint.as_deref(),
+            Some("ipn:1.1")
+        );
+
+        // Also test with capacity 0 buffer
+        let zero_buf = DiagnosticBuffer::new(0);
+        let bundle_ev2 = BundleInspection::new(
+            "ipn:2.2",
+            "dtn:none",
+            2000u64,
+            7200u64,
+            BundleParseStatus::Valid,
+        );
+        let zero_emitted = zero_buf.emit(bundle_ev2);
+        assert!(!zero_emitted);
+        assert_eq!(zero_buf.dropped_count(), 1);
     }
 
     #[test]
