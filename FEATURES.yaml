@@ -815,6 +815,24 @@ items:
       - In crates/rer/tests/fault_injection_tests.rs, test_fault_injection_saturation asserts that calling FaultInjectionRunner::run(FaultType::Saturation) returns a FaultScenarioResult with field passed equal to true and field fault_events_count greater than 0.
       - In crates/rer/tests/fault_injection_tests.rs, calling FaultInjectionRunner::run_saturation with each of the three policies DropPolicy::DropOldest, DropPolicy::DropNewest, and DropPolicy::Reject returns a FaultScenarioResult with field passed equal to true and field fault_events_count greater than 0.
 
+  - id: RER-F-045
+    order: 45
+    title: MAVLink research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-006, RER-F-028, RER-F-010]
+    spec_refs: [§14, §8]
+    test_profile: fast
+    notes: 'Research and create a proposal to add support for protocol MAVLink Relevant code: docs/SPEC.md, crates/rer/src/config.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - A survey of MAVLink protocol versions 1 and 2 and existing open-source implementations documents framing, message formats, CRC validation, and library licenses.
+      - An integration proposal for stream inspection, message framing, and diagnostics in crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, and crates/rer/src/relay.rs is prepared for owner review.
+      - The proposal explicitly states that full MAVLink protocol compliance, autonomous vehicle control, and stateful autopilot session management are not claimed.
+      - The proposal identifies the smallest first implementation step for in-tree MAVLink packet header parsing and sequence tracking.
+
   - id: RER-T-001
     kind: track
     order: 101

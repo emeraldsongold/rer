@@ -53,6 +53,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 41 | RER-F-041 | Passive LTP stream inspection and transparent relay forwarding | BACKLOG | feature | medium | needs-impl-approval | RER-F-040 | §14, §8, §13 |
 | 42 | RER-F-042 | Deterministic contact schedule outage simulation for channel harness | BACKLOG | feature | medium | needs-impl-approval | RER-F-041 | §14, §8, §13 |
 | 43 | RER-F-043 | Deterministic queue saturation fault injection scenario | BACKLOG | test | low | needs-impl-approval | RER-F-017 | §13, §17 |
+| 45 | RER-F-045 | MAVLink research and integration proposal | BACKLOG | research | medium | needs-impl-approval | RER-F-006, RER-F-028, RER-F-010 | §14, §8 |
 
 ## Cross-cutting tracks
 
@@ -65,7 +66,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-039 → RER-F-040 → RER-F-041 → RER-F-042 → RER-F-043
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-039 → RER-F-040 → RER-F-041 → RER-F-042 → RER-F-043 → RER-F-045
 
 ## Owner approval gates
 
