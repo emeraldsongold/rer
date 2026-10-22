@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bpv7::{BundleParseStatus, CreationTimestamp, PrimaryBlock};
 use crate::config::{ByteOrder, InspectionConfig, OperationalMode, SequenceConfig, TransportType};
+use crate::ltp::{LtpParseStatus, LtpSegmentHeader, SegmentType};
 
 /// Stage in packet lifecycle or diagnostic event category (SPEC §8, stages 2–6, drops, failures, and health).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,6 +48,9 @@ pub enum DiagnosticStage {
     /// Bundle Protocol (BPv7) passive inspection event (SPEC §14, §8).
     #[serde(rename = "bundle_inspection")]
     BundleInspection,
+    /// Licklider Transmission Protocol (LTP) passive inspection event (SPEC §14, §8).
+    #[serde(rename = "ltp_inspection")]
+    LtpInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -63,6 +67,7 @@ impl fmt::Display for DiagnosticStage {
             Self::Failure => write!(f, "failure"),
             Self::HealthTransition => write!(f, "health_transition"),
             Self::BundleInspection => write!(f, "bundle_inspection"),
+            Self::LtpInspection => write!(f, "ltp_inspection"),
         }
     }
 }
@@ -81,6 +86,7 @@ impl FromStr for DiagnosticStage {
             "failure" => Ok(Self::Failure),
             "health_transition" => Ok(Self::HealthTransition),
             "bundle_inspection" => Ok(Self::BundleInspection),
+            "ltp_inspection" => Ok(Self::LtpInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -500,6 +506,299 @@ impl From<BundleInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_ltp_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::LtpInspection
+}
+
+/// Structured LTP segment metadata extracted during passive packet inspection (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtpMetadata {
+    /// Session Originator Engine ID.
+    pub session_originator: u64,
+
+    /// Session Originator Engine ID (redundant key for explicit engine ID access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_originator_engine_id: Option<u64>,
+
+    /// Unique session number.
+    pub session_number: u64,
+
+    /// LTP Segment Type.
+    pub segment_type: SegmentType,
+
+    /// Raw 4-bit segment type code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_type_code: Option<u8>,
+
+    /// Protocol version (0 for RFC 5326).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
+    /// Parse outcome status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<LtpParseStatus>,
+
+    /// Client Service ID (present in data segments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_service_id: Option<u64>,
+
+    /// Block byte offset (present in data segments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+
+    /// Client service data length in octets (present in data segments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+
+    /// Checkpoint serial number (present in checkpoint segments and RS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_serial_number: Option<u64>,
+
+    /// Report serial number (present in checkpoint segments, RS, and RAx).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_serial_number: Option<u64>,
+}
+
+/// Diagnostic event representing an LTP passive inspection event (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtpInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `ltp_inspection`).
+    #[serde(default = "default_ltp_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// Session Originator Engine ID.
+    #[serde(alias = "originator", alias = "engine_id")]
+    pub session_originator: u64,
+
+    /// Session Originator Engine ID (alias for engine_id access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_originator_engine_id: Option<u64>,
+
+    /// Unique session number assigned by sender.
+    #[serde(alias = "session")]
+    pub session_number: u64,
+
+    /// LTP Segment Type.
+    pub segment_type: SegmentType,
+
+    /// Parse outcome status of the LTP segment.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "status")]
+    pub parse_status: Option<LtpParseStatus>,
+
+    /// Protocol version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
+    /// Client service ID (present in data segments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_service_id: Option<u64>,
+
+    /// Block byte offset (present in data segments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+
+    /// Client service data length in octets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+
+    /// Checkpoint serial number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_serial_number: Option<u64>,
+
+    /// Report serial number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_serial_number: Option<u64>,
+
+    /// Structured LTP metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "ltp"
+    )]
+    pub ltp_metadata: Option<LtpMetadata>,
+}
+
+pub type LtpInspectionEvent = LtpInspection;
+
+impl LtpInspection {
+    /// Creates a new `LtpInspection` event.
+    #[must_use]
+    pub fn new(session_originator: u64, session_number: u64, segment_type: SegmentType) -> Self {
+        let metadata = LtpMetadata {
+            session_originator,
+            session_originator_engine_id: Some(session_originator),
+            session_number,
+            segment_type,
+            segment_type_code: Some(segment_type.code()),
+            version: Some(0),
+            parse_status: Some(LtpParseStatus::Valid),
+            client_service_id: None,
+            offset: None,
+            length: None,
+            checkpoint_serial_number: None,
+            report_serial_number: None,
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::LtpInspection,
+            session_originator,
+            session_originator_engine_id: Some(session_originator),
+            session_number,
+            segment_type,
+            parse_status: Some(LtpParseStatus::Valid),
+            version: Some(0),
+            client_service_id: None,
+            offset: None,
+            length: None,
+            checkpoint_serial_number: None,
+            report_serial_number: None,
+            ltp_metadata: Some(metadata),
+        }
+    }
+
+    /// Creates an `LtpInspection` from a parsed [`LtpSegmentHeader`] and parse status.
+    #[must_use]
+    pub fn from_segment_header(header: &LtpSegmentHeader, parse_status: LtpParseStatus) -> Self {
+        let mut insp = Self::new(
+            header.session_originator,
+            header.session_number,
+            header.segment_type,
+        );
+        insp.version = Some(header.version);
+        insp.parse_status = Some(parse_status);
+        insp.client_service_id = header.client_service_id;
+        insp.offset = header.offset;
+        insp.length = header.length;
+        insp.checkpoint_serial_number = header.checkpoint_serial_number;
+        insp.report_serial_number = header.report_serial_number;
+        if let Some(ref mut meta) = insp.ltp_metadata {
+            meta.version = Some(header.version);
+            meta.parse_status = Some(parse_status);
+            meta.client_service_id = header.client_service_id;
+            meta.offset = header.offset;
+            meta.length = header.length;
+            meta.checkpoint_serial_number = header.checkpoint_serial_number;
+            meta.report_serial_number = header.report_serial_number;
+        }
+        insp
+    }
+
+    /// Session Originator Engine ID.
+    #[must_use]
+    pub fn session_originator(&self) -> u64 {
+        self.session_originator
+    }
+
+    /// Session Originator Engine ID.
+    #[must_use]
+    pub fn session_originator_engine_id(&self) -> u64 {
+        self.session_originator
+    }
+
+    /// Session number.
+    #[must_use]
+    pub fn session_number(&self) -> u64 {
+        self.session_number
+    }
+
+    /// LTP Segment Type.
+    #[must_use]
+    pub fn segment_type(&self) -> SegmentType {
+        self.segment_type
+    }
+
+    /// Parse outcome status.
+    #[must_use]
+    pub fn parse_status(&self) -> Option<LtpParseStatus> {
+        self.parse_status
+    }
+
+    /// Sets the stream identifier.
+    #[must_use]
+    pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
+        self.stream_id = Some(stream_id.into());
+        self
+    }
+
+    /// Sets monotonic and wall-clock timestamps.
+    #[must_use]
+    pub fn with_timestamps(mut self, monotonic: u64, wall_clock: u64) -> Self {
+        self.monotonic_timestamp = Some(monotonic);
+        self.wall_clock_timestamp = Some(wall_clock);
+        self
+    }
+
+    /// Sets the parse status.
+    #[must_use]
+    pub fn with_parse_status(mut self, status: LtpParseStatus) -> Self {
+        self.parse_status = Some(status);
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.parse_status = Some(status);
+        }
+        self
+    }
+
+    /// Sets the client service ID.
+    #[must_use]
+    pub fn with_client_service_id(mut self, client_service_id: u64) -> Self {
+        self.client_service_id = Some(client_service_id);
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.client_service_id = Some(client_service_id);
+        }
+        self
+    }
+
+    /// Sets offset and length.
+    #[must_use]
+    pub fn with_offset_and_length(mut self, offset: u64, length: u64) -> Self {
+        self.offset = Some(offset);
+        self.length = Some(length);
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.offset = Some(offset);
+            meta.length = Some(length);
+        }
+        self
+    }
+}
+
+impl From<LtpInspection> for DiagnosticEvent {
+    fn from(li: LtpInspection) -> Self {
+        let mono = li.monotonic_timestamp.unwrap_or(0);
+        let wall = li.wall_clock_timestamp.unwrap_or(0);
+        let stream = li.stream_id.clone().unwrap_or_else(|| "ltp".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::LtpInspection,
+            TransportType::Udp,
+            0,
+        );
+        event.session_originator = Some(li.session_originator);
+        event.session_number = Some(li.session_number);
+        event.segment_type = Some(li.segment_type);
+        event.ltp_parse_status = li.parse_status;
+        event.ltp_metadata = li.ltp_metadata.clone();
+        event.ltp_inspection = Some(li);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -603,6 +902,30 @@ pub struct DiagnosticEvent {
         alias = "bundle_metadata"
     )]
     pub bundle_inspection: Option<BundleInspection>,
+
+    /// LTP session originator engine ID (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_originator: Option<u64>,
+
+    /// LTP session number (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_number: Option<u64>,
+
+    /// LTP segment type (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_type: Option<SegmentType>,
+
+    /// LTP parse evaluation status (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ltp_parse_status: Option<LtpParseStatus>,
+
+    /// LTP inspection metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "ltp")]
+    pub ltp_inspection: Option<LtpInspection>,
+
+    /// Structured LTP metadata (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ltp_metadata: Option<LtpMetadata>,
 }
 
 impl DiagnosticEvent {
@@ -639,6 +962,12 @@ impl DiagnosticEvent {
             bundle_lifetime: None,
             parse_status: None,
             bundle_inspection: None,
+            session_originator: None,
+            session_number: None,
+            segment_type: None,
+            ltp_parse_status: None,
+            ltp_inspection: None,
+            ltp_metadata: None,
         }
     }
 
@@ -790,6 +1119,98 @@ impl DiagnosticEvent {
         parse_status: BundleParseStatus,
     ) -> Self {
         BundleInspection::new(destination, source, dtn_timestamp, lifetime, parse_status).into()
+    }
+
+    /// Sets the LTP session originator engine ID.
+    #[must_use]
+    pub fn with_session_originator(mut self, originator: u64) -> Self {
+        self.session_originator = Some(originator);
+        if let Some(ref mut insp) = self.ltp_inspection {
+            insp.session_originator = originator;
+            insp.session_originator_engine_id = Some(originator);
+            if let Some(ref mut meta) = insp.ltp_metadata {
+                meta.session_originator = originator;
+                meta.session_originator_engine_id = Some(originator);
+            }
+        }
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.session_originator = originator;
+            meta.session_originator_engine_id = Some(originator);
+        }
+        self
+    }
+
+    /// Sets the LTP session number.
+    #[must_use]
+    pub fn with_session_number(mut self, session_number: u64) -> Self {
+        self.session_number = Some(session_number);
+        if let Some(ref mut insp) = self.ltp_inspection {
+            insp.session_number = session_number;
+            if let Some(ref mut meta) = insp.ltp_metadata {
+                meta.session_number = session_number;
+            }
+        }
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.session_number = session_number;
+        }
+        self
+    }
+
+    /// Sets the LTP segment type.
+    #[must_use]
+    pub fn with_segment_type(mut self, segment_type: SegmentType) -> Self {
+        self.segment_type = Some(segment_type);
+        if let Some(ref mut insp) = self.ltp_inspection {
+            insp.segment_type = segment_type;
+            if let Some(ref mut meta) = insp.ltp_metadata {
+                meta.segment_type = segment_type;
+            }
+        }
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.segment_type = segment_type;
+        }
+        self
+    }
+
+    /// Sets the LTP parse evaluation status.
+    #[must_use]
+    pub fn with_ltp_parse_status(mut self, status: LtpParseStatus) -> Self {
+        self.ltp_parse_status = Some(status);
+        if let Some(ref mut insp) = self.ltp_inspection {
+            insp.parse_status = Some(status);
+            if let Some(ref mut meta) = insp.ltp_metadata {
+                meta.parse_status = Some(status);
+            }
+        }
+        if let Some(ref mut meta) = self.ltp_metadata {
+            meta.parse_status = Some(status);
+        }
+        self
+    }
+
+    /// Attaches LTP segment inspection metadata.
+    #[must_use]
+    pub fn with_ltp_inspection(mut self, inspection: LtpInspection) -> Self {
+        self.session_originator = Some(inspection.session_originator);
+        self.session_number = Some(inspection.session_number);
+        self.segment_type = Some(inspection.segment_type);
+        self.ltp_parse_status = inspection.parse_status;
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::LtpInspection;
+        }
+        self.ltp_metadata = inspection.ltp_metadata.clone();
+        self.ltp_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a diagnostic event specifically for LTP segment inspection.
+    #[must_use]
+    pub fn ltp_inspection(
+        session_originator: u64,
+        session_number: u64,
+        segment_type: SegmentType,
+    ) -> Self {
+        LtpInspection::new(session_originator, session_number, segment_type).into()
     }
 }
 
@@ -1451,6 +1872,27 @@ impl DiagnosticBuffer {
         self.emit(inspection)
     }
 
+    /// Creates an [`LtpInspection`] event populated with buffer clock timestamps.
+    #[must_use]
+    pub fn create_ltp_inspection(
+        &self,
+        stream_id: impl Into<String>,
+        session_originator: u64,
+        session_number: u64,
+        segment_type: SegmentType,
+    ) -> LtpInspection {
+        let mut insp = LtpInspection::new(session_originator, session_number, segment_type);
+        insp.stream_id = Some(stream_id.into());
+        insp.monotonic_timestamp = Some(self.clock.monotonic_nanos());
+        insp.wall_clock_timestamp = Some(self.clock.wall_clock_nanos());
+        insp
+    }
+
+    /// Emits an [`LtpInspection`] event into the diagnostic buffer.
+    pub fn emit_ltp_inspection(&self, inspection: LtpInspection) -> bool {
+        self.emit(inspection)
+    }
+
     /// Creates a diagnostic event using the buffer's injected clock timestamps.
     #[must_use]
     pub fn create_event(
@@ -1956,6 +2398,7 @@ mod tests {
             (DiagnosticStage::Failure, "\"failure\""),
             (DiagnosticStage::HealthTransition, "\"health_transition\""),
             (DiagnosticStage::BundleInspection, "\"bundle_inspection\""),
+            (DiagnosticStage::LtpInspection, "\"ltp_inspection\""),
         ];
 
         for (stage, expected_json) in stages {
@@ -2080,6 +2523,83 @@ mod tests {
             BundleParseStatus::Valid,
         );
         let zero_emitted = zero_buf.emit(bundle_ev2);
+        assert!(!zero_emitted);
+        assert_eq!(zero_buf.dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_ltp_inspection_event_serialization_contains_structured_metadata() {
+        let event = LtpInspection::new(0xABC, 0x1234, SegmentType::RedData);
+
+        let json = serde_json::to_string(&event).expect("must serialize to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("must parse JSON");
+
+        // Verify session originator, session number, and segment type
+        assert_eq!(val["session_originator"], 0xABC);
+        assert_eq!(val["session_number"], 0x1234);
+        assert_eq!(val["segment_type"], "RedData");
+
+        // Verify structured LTP metadata nested object
+        assert!(
+            val["ltp_metadata"].is_object(),
+            "must contain structured LTP metadata"
+        );
+        assert_eq!(val["ltp_metadata"]["session_originator"], 0xABC);
+        assert_eq!(val["ltp_metadata"]["session_number"], 0x1234);
+        assert_eq!(val["ltp_metadata"]["segment_type"], "RedData");
+
+        // Also test serialization when converted to DiagnosticEvent
+        let diag_event: DiagnosticEvent = event.into();
+        let diag_json = serde_json::to_string(&diag_event).expect("must serialize DiagnosticEvent");
+        let diag_val: serde_json::Value =
+            serde_json::from_str(&diag_json).expect("must parse DiagnosticEvent JSON");
+        assert_eq!(diag_val["stage"], "ltp_inspection");
+        assert_eq!(diag_val["session_originator"], 0xABC);
+        assert_eq!(diag_val["session_number"], 0x1234);
+        assert_eq!(diag_val["segment_type"], "RedData");
+        assert!(diag_val["ltp_inspection"].is_object());
+        assert!(diag_val["ltp_metadata"].is_object());
+    }
+
+    #[test]
+    fn test_emitting_ltp_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
+        let clock = Arc::new(ManualClock::new(100, 200));
+        let buffer = DiagnosticBuffer::with_clock(2, clock);
+        assert_eq!(buffer.capacity(), 2);
+
+        // Fill buffer to capacity
+        let ev1 = buffer.create_event("s1", DiagnosticStage::Received, TransportType::Udp, 100);
+        let ev2 = buffer.create_event("s1", DiagnosticStage::Accepted, TransportType::Udp, 100);
+        assert!(buffer.emit(ev1));
+        assert!(buffer.emit(ev2));
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.dropped_count(), 0);
+
+        // Emit LtpInspection into the full buffer
+        let ltp_ev = LtpInspection::new(0xABC, 0x1234, SegmentType::RedData);
+
+        // This must drop without blocking or panicking
+        let emitted = buffer.emit(ltp_ev);
+        assert!(emitted);
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(
+            buffer.dropped_count(),
+            1,
+            "emitting into full buffer must increment dropped_count"
+        );
+
+        // Verify in snapshot that the oldest was dropped and buffer contains the LTP inspection
+        let snap = buffer.snapshot();
+        assert_eq!(snap.dropped_count, 1);
+        assert_eq!(snap.events.len(), 2);
+        assert_eq!(snap.events[1].stage, DiagnosticStage::LtpInspection);
+        assert_eq!(snap.events[1].session_originator, Some(0xABC));
+        assert_eq!(snap.events[1].session_number, Some(0x1234));
+
+        // Also test with capacity 0 buffer
+        let zero_buf = DiagnosticBuffer::new(0);
+        let ltp_ev2 = LtpInspection::new(0xDEF, 0x5678, SegmentType::Report);
+        let zero_emitted = zero_buf.emit(ltp_ev2);
         assert!(!zero_emitted);
         assert_eq!(zero_buf.dropped_count(), 1);
     }

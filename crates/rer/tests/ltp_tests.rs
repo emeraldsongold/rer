@@ -354,3 +354,163 @@ fn test_header_extensions_rfc5326() {
     assert_eq!(ext.value, vec![0xDE, 0xAD, 0xBE, 0xEF]);
     assert_eq!(seg.client_data(), b"abc");
 }
+
+#[test]
+fn test_config_inspection_without_ltp_defaults_to_none() {
+    let yaml = r#"
+version: "1"
+instances:
+  - id: "node1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+        inspection:
+          hex: true
+          max_preview_bytes: 32
+"#;
+    let config = rer::config::Config::from_yaml_str(yaml).expect("parse valid config");
+    let stream = &config.all_instances()[0].streams[0];
+    let insp = stream.inspection.as_ref().expect("inspection present");
+    assert!(insp.hex_preview);
+    assert_eq!(insp.max_preview_bytes, 32);
+    assert!(insp.ltp.is_none(), "ltp must default to None when omitted");
+}
+
+#[test]
+fn test_rer_validate_ltp_max_inspect_bytes_zero_returns_validation_error() {
+    let yaml = r#"
+version: "1"
+instances:
+  - id: "node-ltp"
+    streams:
+      - id: "ltp-stream"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:1113"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:1114"
+        inspection:
+          ltp:
+            max_inspect_bytes: 0
+"#;
+    let config = rer::config::Config::from_yaml_str(yaml).expect("parse YAML");
+    let errors = config.validate();
+    assert!(
+        errors.iter().any(|e| {
+            e.path.contains("inspection.ltp.max_inspect_bytes")
+                && e.reason.contains("invalid inspection size limit")
+        }),
+        "Expected validation error for invalid inspection size limit: {:?}",
+        errors
+    );
+
+    // Also verify via CLI `rer validate`
+    let temp_file = std::env::temp_dir().join(format!("test_ltp_zero_{}.yaml", std::process::id()));
+    std::fs::write(&temp_file, yaml).expect("write temp config");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rer"))
+        .arg("validate")
+        .arg(&temp_file)
+        .output()
+        .expect("run rer validate");
+    let _ = std::fs::remove_file(&temp_file);
+
+    assert!(
+        !output.status.success(),
+        "rer validate must exit non-zero for invalid inspection size limit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid inspection size limit") || stderr.contains("max_inspect_bytes"),
+        "stderr must report invalid inspection size limit: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_ltp_inspection_diagnostic_event_serializes_structured_metadata() {
+    let event = rer::diagnostics::LtpInspection::new(0xABC, 0x1234, rer::ltp::SegmentType::RedData);
+
+    let json_str = serde_json::to_string(&event).expect("serialize LtpInspection");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("parse JSON");
+
+    assert_eq!(val["session_originator"], 0xABC);
+    assert_eq!(val["session_number"], 0x1234);
+    assert_eq!(val["segment_type"], "RedData");
+
+    // Check structured LTP metadata representation
+    assert!(
+        val["ltp_metadata"].is_object(),
+        "must contain structured LTP metadata"
+    );
+    assert_eq!(val["ltp_metadata"]["session_originator"], 0xABC);
+    assert_eq!(val["ltp_metadata"]["session_number"], 0x1234);
+    assert_eq!(val["ltp_metadata"]["segment_type"], "RedData");
+
+    // Also verify when converted to DiagnosticEvent
+    let diag_ev: rer::diagnostics::DiagnosticEvent = event.into();
+    let diag_json = serde_json::to_string(&diag_ev).expect("serialize DiagnosticEvent");
+    let diag_val: serde_json::Value = serde_json::from_str(&diag_json).expect("parse JSON");
+    assert_eq!(diag_val["stage"], "ltp_inspection");
+    assert_eq!(diag_val["session_originator"], 0xABC);
+    assert_eq!(diag_val["session_number"], 0x1234);
+    assert_eq!(diag_val["segment_type"], "RedData");
+    assert!(diag_val["ltp_inspection"].is_object());
+    assert!(diag_val["ltp_metadata"].is_object());
+}
+
+#[test]
+fn test_ltp_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
+    let clock = std::sync::Arc::new(rer::diagnostics::ManualClock::new(1000, 2000));
+    let buffer = rer::diagnostics::DiagnosticBuffer::with_clock(2, clock);
+    assert_eq!(buffer.capacity(), 2);
+
+    // Fill buffer
+    let ev1 = buffer.create_event(
+        "s1",
+        rer::diagnostics::DiagnosticStage::Received,
+        rer::config::TransportType::Udp,
+        100,
+    );
+    let ev2 = buffer.create_event(
+        "s1",
+        rer::diagnostics::DiagnosticStage::Accepted,
+        rer::config::TransportType::Udp,
+        100,
+    );
+    assert!(buffer.emit(ev1));
+    assert!(buffer.emit(ev2));
+    assert_eq!(buffer.len(), 2);
+    assert_eq!(buffer.dropped_count(), 0);
+
+    // Emit LtpInspection into the full buffer
+    let ltp_ev =
+        rer::diagnostics::LtpInspection::new(0xABC, 0x1234, rer::ltp::SegmentType::RedData);
+
+    let emitted = buffer.emit(ltp_ev);
+    assert!(
+        emitted,
+        "non-blocking emit into full buffer succeeds by dropping oldest"
+    );
+    assert_eq!(buffer.len(), 2);
+    assert_eq!(
+        buffer.dropped_count(),
+        1,
+        "emitting into full buffer must increment dropped count"
+    );
+
+    let snap = buffer.snapshot();
+    assert_eq!(snap.dropped_count, 1);
+    assert_eq!(
+        snap.events[1].stage,
+        rer::diagnostics::DiagnosticStage::LtpInspection
+    );
+    assert_eq!(snap.events[1].session_originator, Some(0xABC));
+    assert_eq!(snap.events[1].session_number, Some(0x1234));
+}
