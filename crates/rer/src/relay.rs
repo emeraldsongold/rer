@@ -12,13 +12,14 @@ use crate::bpv7::{evaluate_bundle_header, BundleParseStatus};
 use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequenceTracker};
 use crate::config::{
     Bpv7InspectionConfig, CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig,
-    FramingMode, InstanceConfig, OperationalMode, StreamConfig, TransportType,
+    FramingMode, InstanceConfig, LtpInspectionConfig, OperationalMode, StreamConfig, TransportType,
 };
 use crate::diagnostics::{
     BundleInspection, DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState,
-    SequenceState, SequenceTracker, SequenceTrackingEvent,
+    LtpInspection, SequenceState, SequenceTracker, SequenceTrackingEvent,
 };
 use crate::framing;
+use crate::ltp::{evaluate_segment_header, LtpParseStatus, SegmentType};
 
 /// Default maximum queue size (packets) when not explicitly configured.
 pub const DEFAULT_MAX_QUEUE_SIZE: usize = 1024;
@@ -1061,6 +1062,103 @@ fn process_bpv7_ingress(payload: &[u8], ctx: &Bpv7IngressContext<'_>) -> Extract
     extracted
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LtpIngressContext<'a> {
+    ltp_cfg: Option<&'a LtpInspectionConfig>,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
+    transport: TransportType,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExtractedLtp {
+    session_originator: Option<u64>,
+    session_number: Option<u64>,
+    segment_type: Option<SegmentType>,
+    status: Option<LtpParseStatus>,
+    inspection: Option<LtpInspection>,
+}
+
+fn process_ltp_ingress(payload: &[u8], ctx: &LtpIngressContext<'_>) -> ExtractedLtp {
+    let LtpIngressContext {
+        ltp_cfg,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+
+    let Some(ltp_cfg) = ltp_cfg else {
+        return ExtractedLtp::default();
+    };
+    if !ltp_cfg.enabled {
+        return ExtractedLtp::default();
+    }
+
+    let max_bytes = ltp_cfg.max_inspect_bytes;
+    let inspect_data = if max_bytes > 0 && payload.len() > max_bytes {
+        &payload[..max_bytes]
+    } else {
+        payload
+    };
+
+    let (status, maybe_header) = evaluate_segment_header(inspect_data);
+
+    let (ev, extracted) = match maybe_header {
+        Some(header) => {
+            let mut insp = LtpInspection::from_segment_header(&header, status);
+            insp.stream_id = Some(stream_id.to_string());
+            insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+            insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+
+            let ext = ExtractedLtp {
+                session_originator: Some(header.session_originator),
+                session_number: Some(header.session_number),
+                segment_type: Some(header.segment_type),
+                status: Some(status),
+                inspection: Some(insp.clone()),
+            };
+
+            let mut ev: DiagnosticEvent = insp.into();
+            ev.transport = transport;
+            ev.payload_length = payload.len() as u64;
+            ev.source_endpoint = Some(src_endpoint.to_string());
+            ev.destination_endpoint = Some(primary_dest.to_string());
+            (ev, ext)
+        }
+        None => {
+            let ext = ExtractedLtp {
+                session_originator: None,
+                session_number: None,
+                segment_type: None,
+                status: Some(status),
+                inspection: None,
+            };
+
+            let mut ev = DiagnosticEvent::new(
+                event_buffer.clock().monotonic_nanos(),
+                event_buffer.clock().wall_clock_nanos(),
+                stream_id,
+                DiagnosticStage::LtpInspection,
+                transport,
+                payload.len() as u64,
+            );
+            ev.source_endpoint = Some(src_endpoint.to_string());
+            ev.destination_endpoint = Some(primary_dest.to_string());
+            ev.ltp_parse_status = Some(status);
+            ev.reason = Some(format!("unparsed traffic: {status}"));
+            (ev, ext)
+        }
+    };
+
+    event_buffer.emit(ev);
+
+    extracted
+}
+
 /// Active forwarding runner for a single stream (UDP or TCP).
 pub struct StreamRunner {
     pub stream_id: String,
@@ -1226,6 +1324,7 @@ impl StreamRunner {
                 let recv_ccsds_tracker = ccsds_tracker.as_ref().map(Arc::clone);
                 let recv_ccsds_config = stream.ccsds.clone();
                 let recv_bpv7_config = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
+                let recv_ltp_config = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
 
                 let recv_handle = thread::spawn(move || {
                     let mut buf = vec![0u8; 65536];
@@ -1261,6 +1360,18 @@ impl StreamRunner {
                                     payload_slice,
                                     &Bpv7IngressContext {
                                         bpv7_cfg: recv_bpv7_config.as_ref(),
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                );
+
+                                let ltp_info = process_ltp_ingress(
+                                    payload_slice,
+                                    &LtpIngressContext {
+                                        ltp_cfg: recv_ltp_config.as_ref(),
                                         event_buffer: &recv_event_buffer,
                                         stream_id: &recv_stream_id,
                                         src_endpoint: &src_endpoint,
@@ -1317,6 +1428,22 @@ impl StreamRunner {
                                     }
                                     if let Some(ref bi) = bpv7_info.inspection {
                                         ev.bundle_inspection = Some(bi.clone());
+                                    }
+                                    if let Some(orig) = ltp_info.session_originator {
+                                        ev.session_originator = Some(orig);
+                                    }
+                                    if let Some(sess) = ltp_info.session_number {
+                                        ev.session_number = Some(sess);
+                                    }
+                                    if let Some(st) = ltp_info.segment_type {
+                                        ev.segment_type = Some(st);
+                                    }
+                                    if let Some(status) = ltp_info.status {
+                                        ev.ltp_parse_status = Some(status);
+                                    }
+                                    if let Some(ref li) = ltp_info.inspection {
+                                        ev.ltp_inspection = Some(li.clone());
+                                        ev.ltp_metadata = li.ltp_metadata.clone();
                                     }
                                     if let Some(ref h) = hex_prev {
                                         ev = ev.with_hex_preview(h);
@@ -1517,6 +1644,7 @@ impl StreamRunner {
                 let ccsds_tracker_for_tcp = ccsds_tracker.as_ref().map(Arc::clone);
                 let ccsds_config_for_tcp = stream.ccsds.clone();
                 let bpv7_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
+                let ltp_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let recv_stream_id = stream_id.clone();
                 let recv_stats = Arc::clone(&stats);
                 let recv_shutdown = Arc::clone(&shutdown_flag);
@@ -1560,6 +1688,7 @@ impl StreamRunner {
                                             ccsds_tracker_for_tcp.as_ref().map(Arc::clone);
                                         let cl_ccsds_config = ccsds_config_for_tcp.clone();
                                         let cl_bpv7_config = bpv7_config_for_tcp.clone();
+                                        let cl_ltp_config = ltp_config_for_tcp.clone();
 
                                         let client_h = thread::spawn(move || {
                                             let src_endpoint = client_addr.to_string();
@@ -1603,6 +1732,18 @@ impl StreamRunner {
                                                             &payload,
                                                             &Bpv7IngressContext {
                                                                 bpv7_cfg: cl_bpv7_config.as_ref(),
+                                                                event_buffer: &cl_event_buffer,
+                                                                stream_id: &cl_stream_id,
+                                                                src_endpoint: &src_endpoint,
+                                                                primary_dest: &cl_primary_dest,
+                                                                transport: TransportType::Tcp,
+                                                            },
+                                                        );
+
+                                                        let ltp_info = process_ltp_ingress(
+                                                            &payload,
+                                                            &LtpIngressContext {
+                                                                ltp_cfg: cl_ltp_config.as_ref(),
                                                                 event_buffer: &cl_event_buffer,
                                                                 stream_id: &cl_stream_id,
                                                                 src_endpoint: &src_endpoint,
@@ -1668,6 +1809,22 @@ impl StreamRunner {
                                                             }
                                                             if let Some(ref bi) = bpv7_info.inspection {
                                                                 ev.bundle_inspection = Some(bi.clone());
+                                                            }
+                                                            if let Some(orig) = ltp_info.session_originator {
+                                                                ev.session_originator = Some(orig);
+                                                            }
+                                                            if let Some(sess) = ltp_info.session_number {
+                                                                ev.session_number = Some(sess);
+                                                            }
+                                                            if let Some(st) = ltp_info.segment_type {
+                                                                ev.segment_type = Some(st);
+                                                            }
+                                                            if let Some(status) = ltp_info.status {
+                                                                ev.ltp_parse_status = Some(status);
+                                                            }
+                                                            if let Some(ref li) = ltp_info.inspection {
+                                                                ev.ltp_inspection = Some(li.clone());
+                                                                ev.ltp_metadata = li.ltp_metadata.clone();
                                                             }
                                                             if let Some(ref h) = hex_prev {
                                                                 ev = ev.with_hex_preview(h);
@@ -1955,6 +2112,7 @@ impl StreamRunner {
                         let target_source_path = source_path.clone();
                         let conn_seq_tracker = Arc::clone(&recv_seq_tracker);
                         let conn_bpv7_config = bpv7_config_for_tcp.clone();
+                        let conn_ltp_config = ltp_config_for_tcp.clone();
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
@@ -2043,6 +2201,18 @@ impl StreamRunner {
                                                         },
                                                     );
 
+                                                    let ltp_info = process_ltp_ingress(
+                                                        &payload,
+                                                        &LtpIngressContext {
+                                                            ltp_cfg: conn_ltp_config.as_ref(),
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
+                                                    );
+
                                                     let (generic_seq, hex_prev, ascii_prev) = {
                                                         let mut tracker =
                                                             conn_seq_tracker.lock().unwrap();
@@ -2099,6 +2269,22 @@ impl StreamRunner {
                                                         }
                                                         if let Some(ref bi) = bpv7_info.inspection {
                                                             ev.bundle_inspection = Some(bi.clone());
+                                                        }
+                                                        if let Some(orig) = ltp_info.session_originator {
+                                                            ev.session_originator = Some(orig);
+                                                        }
+                                                        if let Some(sess) = ltp_info.session_number {
+                                                            ev.session_number = Some(sess);
+                                                        }
+                                                        if let Some(st) = ltp_info.segment_type {
+                                                            ev.segment_type = Some(st);
+                                                        }
+                                                        if let Some(status) = ltp_info.status {
+                                                            ev.ltp_parse_status = Some(status);
+                                                        }
+                                                        if let Some(ref li) = ltp_info.inspection {
+                                                            ev.ltp_inspection = Some(li.clone());
+                                                            ev.ltp_metadata = li.ltp_metadata.clone();
                                                         }
                                                         if let Some(ref h) = hex_prev {
                                                             ev = ev.with_hex_preview(h);
