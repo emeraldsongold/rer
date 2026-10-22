@@ -815,6 +815,24 @@ items:
       - In crates/rer/tests/fault_injection_tests.rs, test_fault_injection_saturation asserts that calling FaultInjectionRunner::run(FaultType::Saturation) returns a FaultScenarioResult with field passed equal to true and field fault_events_count greater than 0.
       - In crates/rer/tests/fault_injection_tests.rs, calling FaultInjectionRunner::run_saturation with each of the three policies DropPolicy::DropOldest, DropPolicy::DropNewest, and DropPolicy::Reject returns a FaultScenarioResult with field passed equal to true and field fault_events_count greater than 0.
 
+  - id: RER-F-044
+    order: 44
+    title: SRT research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-020]
+    spec_refs: [§14]
+    test_profile: fast
+    notes: 'Research and create a proposal to add support for protocol SRT Relevant code: docs/SPEC.md, FEATURES.yaml, docs/proposals/RER-F-020.md.'
+    acceptance:
+      - A survey of the SRT protocol standard in docs/proposals details packet formats, handshake sequence, and timer-based retransmission mechanisms.
+      - A review of existing open-source SRT implementations in docs/proposals evaluates license terms for compatibility with the Apache-2.0 license.
+      - An integration proposal in docs/proposals outlines modular inspection and diagnostics integration with crates/rer/src/relay.rs, crates/rer/src/config.rs, and crates/rer/src/diagnostics.rs.
+      - The proposal document in docs/proposals explicitly states that no full SRT protocol compliance or encryption engine is claimed.
+
   - id: RER-F-045
     order: 45
     title: MAVLink research and integration proposal

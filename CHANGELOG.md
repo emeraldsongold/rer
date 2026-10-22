@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-040 (LTP inspection configuration and LtpInspection diagnostic event)
+- **LTP Stream Inspection Configuration**: Added optional `ltp` subsection (`LtpInspectionConfig`) under stream packet inspection (`stream.inspection.ltp`) supporting `enabled` and `max_inspect_bytes` (default 4096) (SPEC §14, §8). Omitting `ltp` preserves existing preview and inspection behavior with `None`.
+- **Inspection Size Limit Validation**: Added validation in `rer validate` verifying that `max_inspect_bytes` is greater than 0, reporting an invalid inspection size limit error when set to 0.
+- **Dedicated LtpInspection Diagnostic Event**: Introduced `LtpInspection` event model in `crates/rer/src/diagnostics.rs` capturing session originator engine ID, session number, and segment type, serializing into JSON containing structured LTP metadata.
+- **Bounded Non-Blocking Event Emission**: Implemented non-blocking event emission into `DiagnosticBuffer`, ensuring events emitted into a full buffer are dropped cleanly without blocking forwarding threads or panicking.
+
 ### Added - Milestone RER-F-039 (In-tree SDNV and LTP segment header parser)
 - **Zero-Dependency SDNV Codec**: Implemented in-tree variable-length Self-Delimiting Numeric Value (SDNV) decoding and encoding (`decode_sdnv` and `encode_sdnv`) matching RFC 5326 §2, with strict truncation protection returning `LtpParseError::Truncated` when the input buffer ends before continuation bits clear, and overflow detection for 64-bit integer boundaries.
 - **In-Tree LTP Segment Header Parser**: Implemented `parse_segment`, `parse_segment_header`, and `parse_data_segment` in `crates/rer/src/ltp.rs` (RFC 5326, SPEC §14, §8), extracting version 0, segment type, session originator engine ID, session number, client service ID, offset, and length.
