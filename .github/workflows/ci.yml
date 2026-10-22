@@ -58,9 +58,36 @@ jobs:
         if: steps.detect.outputs.cargo == 'true'
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
-      - name: cargo test
+      # cargo-nextest runs each test in its own process and writes a JUnit report (.config/nextest.toml, profile ci). The
+      # report is uploaded as the `test-report` artifact, which the RER pipeline reads to name failing and flaky tests.
+      # The version is pinned like cargo-deny below; the cache keeps the build to the first run.
+      - uses: actions/cache@v4
         if: steps.detect.outputs.cargo == 'true'
-        run: cargo test --all-features --locked
+        with:
+          path: ~/.cargo/bin/cargo-nextest
+          key: cargo-nextest-${{ runner.os }}-0.9.148
+
+      - name: install cargo-nextest
+        if: steps.detect.outputs.cargo == 'true'
+        run: command -v cargo-nextest >/dev/null || cargo install cargo-nextest --locked --version 0.9.148
+
+      - name: cargo nextest run
+        if: steps.detect.outputs.cargo == 'true'
+        run: cargo nextest run --all-features --locked --profile ci
+
+      # nextest does not run documentation tests.
+      - name: cargo test --doc
+        if: steps.detect.outputs.cargo == 'true'
+        run: cargo test --doc --all-features --locked
+
+      - name: upload test report
+        if: always() && steps.detect.outputs.cargo == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 30
 
   deps:
     runs-on: ubuntu-latest

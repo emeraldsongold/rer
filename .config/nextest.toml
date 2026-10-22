@@ -1,0 +1,15 @@
+# cargo-nextest settings. CI runs `cargo nextest run --profile ci` (.github/workflows/ci.yml); local runs and
+# `cargo test` are unaffected.
+
+[profile.ci]
+# A test that fails and then passes is reported as flaky (`<flakyFailure>` in the JUnit report) and does not fail the
+# job, so one unlucky test no longer turns `main` red. A test that fails every attempt still fails it.
+retries = 2
+# Run every test even after a failure, so one report names all of them.
+fail-fast = false
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml and uploaded as the `test-report` artifact.
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
