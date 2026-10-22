@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-039 (In-tree SDNV and LTP segment header parser)
+- **Zero-Dependency SDNV Codec**: Implemented in-tree variable-length Self-Delimiting Numeric Value (SDNV) decoding and encoding (`decode_sdnv` and `encode_sdnv`) matching RFC 5326 §2, with strict truncation protection returning `LtpParseError::Truncated` when the input buffer ends before continuation bits clear, and overflow detection for 64-bit integer boundaries.
+- **In-Tree LTP Segment Header Parser**: Implemented `parse_segment`, `parse_segment_header`, and `parse_data_segment` in `crates/rer/src/ltp.rs` (RFC 5326, SPEC §14, §8), extracting version 0, segment type, session originator engine ID, session number, client service ID, offset, and length.
+- **LTP Checkpoint Metadata Extraction**: Extracted checkpoint serial numbers and report serial numbers from LTP checkpoint segments (types 1, 2, and 3).
+- **LTP Protocol Version Enforcement**: Enforced strict version checking distinguishing non-zero LTP version numbers from valid LTP version 0 via `LtpParseError::InvalidVersion`.
+- **Non-Panicking Payload Evaluation**: Added `evaluate_payload` and `LtpParseStatus` distinguishing valid LTP segments from arbitrary non-LTP payloads, malformed segments, and truncated input without panicking.
+
 ### Added - Milestone RER-F-038 (Passive BPv7 stream inspection and transparent relay forwarding)
 - **Transparent BPv7 Forwarding**: Forwarding UDP datagrams containing BPv7 bundles transmits exact payload bytes unmodified to destination sockets without byte alterations or buffering (SPEC §14, §8).
 - **Passive TCP BPv7 Stream Inspection**: Ingress TCP stream processing inspects BPv7 bundles, recording structured `BundleInspection` diagnostic events with extracted endpoint identifiers in the non-blocking diagnostic buffer while forwarding stream payloads unmodified.
