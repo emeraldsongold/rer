@@ -266,6 +266,17 @@
           "default": false,
           "type": "boolean"
         },
+        "ltp": {
+          "description": "Optional LTP passive segment inspection configuration (SPEC §14, §8). Defaults to None.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LtpInspectionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "max_preview_bytes": {
           "description": "Maximum length in bytes for previews (length-bounded). Defaults to 64 bytes.",
           "default": 64,
@@ -431,6 +442,25 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LtpInspectionConfig": {
+      "description": "Opt-in LTP passive inspection configuration (SPEC §14, §8).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether LTP inspection is enabled. Defaults to true when ltp section is present.",
+          "default": true,
+          "type": "boolean"
+        },
+        "max_inspect_bytes": {
+          "description": "Maximum number of bytes to inspect for LTP headers. Defaults to 4096.",
+          "default": 4096,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false
