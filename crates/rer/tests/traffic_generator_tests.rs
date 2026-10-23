@@ -303,6 +303,7 @@ fn test_simulation_harness_with_deterministic_impairments() {
             reorder_rate: 0.1,
             delay_ms: 0,
             jitter_ms: 0,
+            ..Default::default()
         }),
         use_relay: true,
         relay_queue_capacity: None,
@@ -341,6 +342,7 @@ fn test_simulation_channel_in_memory_reproducibility() {
         reorder_rate: 0.2,
         delay_ms: 0,
         jitter_ms: 0,
+        ..Default::default()
     };
 
     let mut ch1 = SimulatedChannel::new(imp_cfg.clone());
@@ -398,6 +400,7 @@ fn test_simulation_harness_duplicate_scenario() {
             reorder_rate: 0.0,
             delay_ms: 0,
             jitter_ms: 0,
+            ..Default::default()
         }),
         use_relay: true,
         relay_queue_capacity: None,

@@ -1337,6 +1337,7 @@ fn run_harness_cli(args: HarnessArgs) -> ExitCode {
                 reorder_rate: args.reorder_rate,
                 delay_ms: 0,
                 jitter_ms: 0,
+                ..Default::default()
             })
         } else {
             None

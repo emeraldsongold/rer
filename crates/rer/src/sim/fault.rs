@@ -140,6 +140,7 @@ impl FaultInjectionRunner {
                 reorder_rate: 0.0,
                 delay_ms: 0,
                 jitter_ms: 0,
+                ..Default::default()
             };
             let mut channel = SimulatedChannel::new(config);
             let _ = channel.forward_udp_loop(&proxy_socket, &forward_addr, stop_flag);
@@ -206,6 +207,7 @@ impl FaultInjectionRunner {
                 reorder_rate: 0.0,
                 delay_ms,
                 jitter_ms: 0,
+                ..Default::default()
             };
             let mut channel = SimulatedChannel::new(config);
             let _ = channel.forward_udp_loop(&proxy_socket, &forward_addr, stop_flag);
@@ -283,6 +285,7 @@ impl FaultInjectionRunner {
                 reorder_rate: 0.0,
                 delay_ms,
                 jitter_ms,
+                ..Default::default()
             };
             let mut channel = SimulatedChannel::new(config);
             let _ = channel.forward_udp_loop(&proxy_socket, &forward_addr, stop_flag);
@@ -357,6 +360,7 @@ impl FaultInjectionRunner {
                 reorder_rate,
                 delay_ms: 0,
                 jitter_ms: 0,
+                ..Default::default()
             };
             let mut channel = SimulatedChannel::new(config);
             let _ = channel.forward_udp_loop(&proxy_socket, &forward_addr, stop_flag);
