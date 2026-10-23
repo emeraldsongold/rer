@@ -135,9 +135,9 @@ Configures parsing, validation, and sequence tracking for CCSDS Space Packets (C
 
 *Note: A configuration specifying both active CCSDS sequence tracking (`ccsds.track_sequences: true`) and generic sequence tracking (`sequence.enabled: true`) on the same stream is rejected by `rer validate` with a conflicting sequence tracking error.*
 
-### Packet Inspection and BPv7 Configuration (`InspectionConfig`, `Bpv7InspectionConfig`)
+### Packet Inspection and Protocol Inspection Configuration (`InspectionConfig`, `Bpv7InspectionConfig`, `LtpInspectionConfig`)
 
-Configures optional packet inspection previews and passive Bundle Protocol Version 7 (BPv7) primary block inspection (RFC 9171, SPEC §14, §8).
+Configures optional packet inspection previews and passive protocol inspection for Bundle Protocol Version 7 (BPv7, RFC 9171) and Licklider Transmission Protocol (LTP, RFC 5326) (SPEC §14, §8).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -145,6 +145,7 @@ Configures optional packet inspection previews and passive Bundle Protocol Versi
 | `ascii_preview` | boolean | `false` | Enables ASCII payload preview in diagnostic events. |
 | `max_preview_bytes` | integer | `64` | Maximum length in bytes for payload previews (length-bounded). |
 | `bpv7` | object | `null` | Optional passive BPv7 bundle inspection settings (`Bpv7InspectionConfig`). Disabled by default. |
+| `ltp` | object | `null` | Optional passive LTP segment inspection settings (`LtpInspectionConfig`). Disabled by default. |
 
 #### BPv7 Passive Bundle Inspection (`Bpv7InspectionConfig`)
 
@@ -163,6 +164,23 @@ BPv7 support performs passive metadata inspection without bundle storage, routin
 - **No BPSec Verification**: Cryptographic validation of Bundle Protocol Security (RFC 9172) blocks (BIB/BCB) is not performed.
 - **No TCPCLv4 Framing**: RER does not implement RFC 9174 TCPCLv4 convergence layer session handshakes, contact headers, or session framing. Bundles forwarded over TCP use standard RER stream framing or transparent stream forwarding.
 - **Transparent and Non-Blocking**: Stream option inspection operates strictly in observation mode. Forwarded payload bytes are transmitted to destination sockets completely unmodified, and inspection diagnostics never block or stall forwarding threads. When a relay stream receives malformed CBOR or non-BPv7 traffic, the relay forwards the payload unmodified and records a diagnostic event with a status indicating unparsed traffic without stalling the forwarding thread.
+
+#### LTP Passive Segment Inspection (`LtpInspectionConfig`)
+
+When stream option inspection (`stream.inspection.ltp`) is configured, RER performs passive inspection of Licklider Transmission Protocol (LTP) segment headers on incoming datagrams (RFC 5326, CCSDS 734.1-B-1, SPEC §14, §8):
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enables passive LTP inspection when the `ltp` section is present. |
+| `max_inspect_bytes` | integer | `4096` | Maximum bytes of the payload to inspect for LTP headers (must be > 0). |
+
+**Scope and Non-Claims:**
+LTP support performs passive metadata inspection without session management, retransmissions, or timer handling:
+- **No Session Management**: RER does not maintain LTP session states, block reassembly buffers, or transmission state machines.
+- **No Retransmissions**: RER does not track report segments, report-acknowledgments, or issue retransmissions of red-part data.
+- **No Timer Handling**: RER does not manage countdown timers, compute one-way light times, or execute timer suspension/resumption during contact outages.
+- **Explicit Stream Configuration Required**: Inspection is strictly opt-in per stream (`stream.inspection.ltp`). RER does not automatically enable LTP inspection based merely on UDP port 1113 (`ltp-deepspace`). A stream on port 1113 without explicit inspection configuration forwards datagrams transparently without emitting LTP inspection events.
+- **Transparent and Non-Blocking**: Stream option inspection operates strictly in observation mode. Forwarded payload bytes are transmitted to destination sockets completely unmodified, and inspection diagnostics never block or stall forwarding threads. When an inspected stream receives non-LTP datagram traffic or malformed LTP segments, the relay forwards the payload unmodified and records a diagnostic event indicating unparsed traffic without interrupting relay operation.
 
 ### Endpoint Configuration (`EndpointConfig`)
 

@@ -514,3 +514,306 @@ fn test_ltp_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
     assert_eq!(snap.events[1].session_originator, Some(0xABC));
     assert_eq!(snap.events[1].session_number, Some(0x1234));
 }
+
+fn pick_unused_port() -> u16 {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral socket");
+    socket.local_addr().expect("local addr").port()
+}
+
+fn sample_valid_ltp_segment(engine_id: u64, session_num: u64, client_data: &[u8]) -> Vec<u8> {
+    let mut raw = vec![0x00]; // version 0, RedData
+    raw.extend_from_slice(&encode_sdnv(engine_id));
+    raw.extend_from_slice(&encode_sdnv(session_num));
+    raw.push(0x00); // 0 extensions
+    raw.extend_from_slice(&encode_sdnv(1)); // Client service ID 1 (BP)
+    raw.extend_from_slice(&encode_sdnv(0)); // Offset 0
+    raw.extend_from_slice(&encode_sdnv(client_data.len() as u64)); // Length
+    raw.extend_from_slice(client_data);
+    raw
+}
+
+#[test]
+fn test_udp_forwarding_valid_ltp_segment_sends_byte_identically_and_records_ltp_inspection() {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = receiver.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "ltp-relay"
+    streams:
+      - id: "s-ltp"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          ltp:
+            enabled: true
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = rer::relay::Relay::start(&config).expect("start relay");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    let ltp_bytes = sample_valid_ltp_segment(42, 1234, b"deep space test payload 12345");
+
+    sender
+        .send_to(&ltp_bytes, format!("127.0.0.1:{listen_port}"))
+        .expect("send ltp packet");
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = receiver.recv_from(&mut buf).expect("receive ltp packet");
+
+    // Acceptance criterion 1: sends exact datagram payload bytes byte-identically
+    assert_eq!(
+        &buf[..n],
+        &ltp_bytes[..],
+        "forwarded UDP datagram payload bytes must match byte-identically"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let ltp_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == rer::diagnostics::DiagnosticStage::LtpInspection)
+        .collect();
+
+    // Acceptance criterion 2: records an LtpInspection diagnostic event with extracted session identifier
+    assert_eq!(
+        ltp_events.len(),
+        1,
+        "expected exactly 1 LtpInspection event"
+    );
+    let ev = ltp_events[0];
+    assert_eq!(ev.stage, rer::diagnostics::DiagnosticStage::LtpInspection);
+    assert_eq!(ev.session_originator, Some(42));
+    assert_eq!(ev.session_number, Some(1234));
+    assert_eq!(ev.segment_type, Some(SegmentType::RedData));
+    assert_eq!(ev.ltp_parse_status, Some(LtpParseStatus::Valid));
+    assert_eq!(ev.payload_length, ltp_bytes.len() as u64);
+
+    let insp = ev
+        .ltp_inspection
+        .as_ref()
+        .expect("ltp_inspection structured metadata present");
+    assert_eq!(insp.session_originator, 42);
+    assert_eq!(insp.session_number, 1234);
+    assert_eq!(insp.segment_type, SegmentType::RedData);
+    assert_eq!(insp.parse_status, Some(LtpParseStatus::Valid));
+
+    relay.stop();
+}
+
+#[test]
+fn test_udp_forwarding_non_ltp_traffic_forwards_unmodified_and_records_unparsed_event() {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = receiver.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "ltp-unparsed-test"
+    streams:
+      - id: "s-unparsed"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          ltp:
+            enabled: true
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = rer::relay::Relay::start(&config).expect("start relay");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    let mut buf = vec![0u8; 4096];
+
+    // 1. Non-LTP datagram traffic
+    let non_ltp_data = b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
+    sender
+        .send_to(non_ltp_data, format!("127.0.0.1:{listen_port}"))
+        .expect("send non-ltp");
+
+    let (n1, _) = receiver.recv_from(&mut buf).expect("recv non-ltp");
+    assert_eq!(
+        &buf[..n1],
+        non_ltp_data,
+        "non-LTP payload must be forwarded unmodified"
+    );
+
+    // 2. Malformed LTP traffic (invalid version 15)
+    let malformed_ltp = vec![0xF0, 0x01, 0x01, 0x00];
+    sender
+        .send_to(&malformed_ltp, format!("127.0.0.1:{listen_port}"))
+        .expect("send malformed ltp");
+
+    let (n2, _) = receiver.recv_from(&mut buf).expect("recv malformed ltp");
+    assert_eq!(
+        &buf[..n2],
+        &malformed_ltp[..],
+        "malformed LTP payload must be forwarded unmodified"
+    );
+
+    // 3. Valid LTP segment right after unparsed traffic to prove relay operation was NOT interrupted
+    let valid_ltp = sample_valid_ltp_segment(99, 888, b"valid ltp after unparsed traffic");
+    sender
+        .send_to(&valid_ltp, format!("127.0.0.1:{listen_port}"))
+        .expect("send valid ltp");
+
+    let (n3, _) = receiver.recv_from(&mut buf).expect("recv valid ltp");
+    assert_eq!(
+        &buf[..n3],
+        &valid_ltp[..],
+        "valid LTP segment must be forwarded unmodified"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let ltp_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == rer::diagnostics::DiagnosticStage::LtpInspection)
+        .collect();
+
+    // Acceptance criterion 3: records diagnostic events indicating unparsed traffic without interrupting relay
+    assert_eq!(ltp_events.len(), 3, "expected 3 inspection events");
+
+    // Event 0: non-LTP traffic
+    assert_eq!(
+        ltp_events[0].stage,
+        rer::diagnostics::DiagnosticStage::LtpInspection
+    );
+    assert!(
+        ltp_events[0]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("unparsed traffic"),
+        "event must indicate unparsed traffic"
+    );
+    assert!(
+        ltp_events[0]
+            .ltp_parse_status
+            .expect("status present")
+            .is_not_ltp()
+            || ltp_events[0].ltp_parse_status.unwrap().is_malformed()
+    );
+    assert_eq!(ltp_events[0].session_originator, None);
+    assert_eq!(ltp_events[0].session_number, None);
+
+    // Event 1: malformed LTP traffic
+    assert!(
+        ltp_events[1]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("unparsed traffic"),
+        "event must indicate unparsed traffic"
+    );
+    assert!(!ltp_events[1].ltp_parse_status.unwrap().is_valid());
+    assert_eq!(ltp_events[1].session_originator, None);
+    assert_eq!(ltp_events[1].session_number, None);
+
+    // Event 2: valid LTP segment
+    assert_eq!(ltp_events[2].session_originator, Some(99));
+    assert_eq!(ltp_events[2].session_number, Some(888));
+    assert_eq!(ltp_events[2].ltp_parse_status, Some(LtpParseStatus::Valid));
+
+    relay.stop();
+}
+
+#[test]
+fn test_udp_stream_on_port_1113_without_explicit_inspection_forwards_without_ltp_events() {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = receiver.local_addr().expect("dest addr").port();
+
+    // Try port 1113; if in use in the test environment, fall back to ephemeral port
+    let listen_port = match std::net::UdpSocket::bind("127.0.0.1:1113") {
+        Ok(s) => {
+            drop(s);
+            1113
+        }
+        Err(_) => pick_unused_port(),
+    };
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "port-1113-no-inspection"
+    streams:
+      - id: "s-uninspected-1113"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = rer::relay::Relay::start(&config).expect("start relay");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    let valid_ltp = sample_valid_ltp_segment(555, 999, b"ltp segment to port 1113");
+
+    sender
+        .send_to(&valid_ltp, format!("127.0.0.1:{listen_port}"))
+        .expect("send valid ltp");
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = receiver.recv_from(&mut buf).expect("recv packet");
+
+    // Acceptance criterion 4: forwards datagrams byte-identically without emitting LtpInspection diagnostic events
+    assert_eq!(
+        &buf[..n],
+        &valid_ltp[..],
+        "payload must be forwarded byte-identically"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let ltp_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| {
+            e.stage == rer::diagnostics::DiagnosticStage::LtpInspection
+                || e.ltp_inspection.is_some()
+        })
+        .collect();
+
+    assert!(
+        ltp_events.is_empty(),
+        "stream without explicit inspection configuration must NOT emit LtpInspection events, found: {:?}",
+        ltp_events
+    );
+
+    relay.stop();
+}
