@@ -87,10 +87,10 @@ pub use sim::{
     BenchmarkDefinition, BenchmarkResult, BenchmarkRunner, CorrelationSummary, DivergencePoint,
     DivergenceType, EnvironmentInfo, FaultInjectionRunner, FaultScenarioResult, FaultType,
     GeneratorConfig, GeneratorStats, HarnessConfig, HopObservation, HopType, ImpairmentConfig,
-    LongDurationConfig, LongDurationReport, LongDurationRunner, MemoryStabilityReport, Packet,
-    QueueStabilityReport, ReceiverReport, RelayHopConfig, ReorderedPacket, SimulatedChannel,
-    SimulationHarness, StabilitySample, TestController, TestOutcome, TestReceiver, TopologyConfig,
-    TopologyHarness, TopologyReport, TrafficGenerator,
+    LongDurationConfig, LongDurationReport, LongDurationRunner, MemoryStabilityReport,
+    OutageSchedule, OutageWindow, Packet, QueueStabilityReport, ReceiverReport, RelayHopConfig,
+    ReorderedPacket, SimulatedChannel, SimulationHarness, StabilitySample, TestController,
+    TestOutcome, TestReceiver, TopologyConfig, TopologyHarness, TopologyReport, TrafficGenerator,
 };
 
 /// Returns the current version of RER.

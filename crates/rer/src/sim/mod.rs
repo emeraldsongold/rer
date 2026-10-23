@@ -21,7 +21,7 @@ pub use benchmarks::{
     default_benchmark_suite, BaselineComparison, BenchmarkDefinition, BenchmarkResult,
     BenchmarkRunner, EnvironmentInfo,
 };
-pub use channel::{ImpairmentConfig, SimulatedChannel};
+pub use channel::{ImpairmentConfig, OutageSchedule, OutageWindow, SimulatedChannel};
 pub use fault::{FaultInjectionRunner, FaultScenarioResult, FaultType};
 pub use generator::{GeneratorConfig, GeneratorStats, SplitMix64, TrafficGenerator};
 pub use harness::{HarnessConfig, SimulationHarness};

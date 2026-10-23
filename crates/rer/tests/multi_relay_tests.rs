@@ -158,6 +158,7 @@ fn test_identify_first_point_of_divergence_gap_on_link() {
         delay_ms: 0,
         jitter_ms: 0,
         seed: 42,
+        ..Default::default()
     };
 
     config
@@ -192,6 +193,7 @@ fn test_identify_first_point_of_divergence_duplicate_on_link() {
         delay_ms: 0,
         jitter_ms: 0,
         seed: 99,
+        ..Default::default()
     };
 
     config
