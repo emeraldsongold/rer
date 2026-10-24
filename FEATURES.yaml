@@ -1002,6 +1002,25 @@ items:
       - In crates/rer/src/relay.rs, receiving a malformed MAVLink packet on an inspected stream configured with option passthrough_on_error forwards the payload unmodified to destination endpoints while recording a validation failure event.
       - In crates/rer/src/relay.rs, forwarding traffic on a stream without MAVLink inspection configured delivers datagrams byte-identically without invoking MAVLink parsing overhead.
 
+  - id: RER-F-054
+    order: 54
+    title: MQTT research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-045]
+    spec_refs: [§14, §8]
+    test_profile: fast
+    notes: 'Research and create a proposal to add support for protocol MQTT Relevant code: docs/SPEC.md, crates/rer/src/config.rs, crates/rer/src/framing.rs.'
+    acceptance:
+      - A survey of MQTT protocol specifications covering MQTT v3.1.1, MQTT v5.0, and MQTT-SN in docs/proposals details packet fixed headers, variable-length remaining length encoding, and packet types.
+      - A review of existing open-source MQTT implementations in docs/proposals evaluates library licenses for compatibility with the Apache-2.0 license.
+      - An integration proposal in docs/proposals outlines modular inspection, stream framing, and diagnostics integration with crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, and crates/rer/src/relay.rs.
+      - The proposal document in docs/proposals explicitly states that full MQTT broker functionality, topic subscription filtering, and message persistence are not claimed.
+      - The proposal identifies the smallest first implementation step for in-tree MQTT fixed header parsing and packet length extraction.
+
   - id: RER-T-001
     kind: track
     order: 101
