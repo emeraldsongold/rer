@@ -1002,6 +1002,25 @@ items:
       - In crates/rer/src/relay.rs, receiving a malformed MAVLink packet on an inspected stream configured with option passthrough_on_error forwards the payload unmodified to destination endpoints while recording a validation failure event.
       - In crates/rer/src/relay.rs, forwarding traffic on a stream without MAVLink inspection configured delivers datagrams byte-identically without invoking MAVLink parsing overhead.
 
+  - id: RER-F-055
+    order: 55
+    title: KISS and AX.25 research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-045]
+    spec_refs: [§14, §8]
+    test_profile: fast
+    notes: 'Research and create a proposal to add support for protocol KISS/AX.25 Relevant code: docs/SPEC.md, crates/rer/src/framing.rs, crates/rer/src/config.rs.'
+    acceptance:
+      - A survey of the KISS framing protocol and AX.25 packet specifications in docs/proposals details FEND byte delimiting, escape sequences, callsign address encoding, control fields, and PID types.
+      - A review of existing open-source KISS and AX.25 implementations in docs/proposals evaluates license terms for compatibility with the Apache-2.0 license.
+      - An integration proposal in docs/proposals outlines modular stream inspection, TCP framing, and diagnostic events for crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs, and crates/rer/src/relay.rs.
+      - The proposal document in docs/proposals explicitly states that full AX.25 connected-mode state machines, TNC modem hardware control, and physical-layer modulation are not claimed.
+      - The proposal in docs/proposals identifies the smallest first implementation step for in-tree KISS frame encoding and decoding.
+
   - id: RER-T-001
     kind: track
     order: 101
