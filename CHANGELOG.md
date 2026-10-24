@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Milestone RER-F-046 (In-tree SRT packet header parser)
+- **In-Tree SRT Header Parser**: Implemented zero-dependency in-tree 16-byte fixed SRT header parsing (`parse_header`, `parse_srt_header`, `parse_data_packet`, `parse_control_packet`) in `crates/rer/src/srt.rs` (SPEC §14, §8), distinguishing data packets from control packets via packet type bit 0/1.
+- **Data Packet Metadata Extraction**: Extracted 31-bit packet sequence number, 26-bit message number, timestamp, destination socket ID, packet position flags, in-order flag, encryption flags, and retransmission flag.
+- **Control Packet Header Extraction**: Extracted 15-bit control type, 32-bit type-specific information, timestamp, and destination socket ID.
+- **Handshake Packet Parser**: Implemented SRT Handshake control packet parsing extracting handshake type (Induction, Conclusion, Agreement, Done, Waveahand), protocol version (UDT 4, SRT 5), initial sequence number, socket IDs, SYN cookie, and optional handshake extension records such as Stream ID (SID).
+- **Truncated Input and Malformed Protection**: Strict bounds checking returning `SrtParseError::TruncatedHeader` on buffers shorter than 16 bytes.
+- **Non-Panicking Payload Evaluation**: Added `evaluate_payload`, `evaluate_srt_payload`, and `SrtParseStatus` distinguishing valid SRT traffic from arbitrary non-SRT payloads, malformed structures, and truncated packets without panicking.
+
 ### Added - Milestone RER-F-040 (LTP inspection configuration and LtpInspection diagnostic event)
 - **LTP Stream Inspection Configuration**: Added optional `ltp` subsection (`LtpInspectionConfig`) under stream packet inspection (`stream.inspection.ltp`) supporting `enabled` and `max_inspect_bytes` (default 4096) (SPEC §14, §8). Omitting `ltp` preserves existing preview and inspection behavior with `None`.
 - **Inspection Size Limit Validation**: Added validation in `rer validate` verifying that `max_inspect_bytes` is greater than 0, reporting an invalid inspection size limit error when set to 0.
