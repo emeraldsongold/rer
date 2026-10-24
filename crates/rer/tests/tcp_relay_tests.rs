@@ -474,7 +474,20 @@ instances:
             .unwrap();
     }
 
-    thread::sleep(Duration::from_millis(100));
+    // Wait for relay to detect outage and record destination error
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while relay
+        .stream_stats("s-mid")
+        .map(|s| s.destination_errors)
+        .unwrap_or(0)
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for relay to detect destination outage"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 
     // Phase 3: Destination comes back up on same port
     let listener2 =
@@ -494,7 +507,8 @@ instances:
                 assert!(msg.starts_with("phase2-"));
                 received_phase2 += 1;
             }
-            _ => break,
+            Ok(None) => break,
+            Err(e) => panic!("error reading reconnected frame: {}", e),
         }
     }
 
