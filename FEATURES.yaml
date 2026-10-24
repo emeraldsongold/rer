@@ -851,6 +851,80 @@ items:
       - The proposal explicitly states that full MAVLink protocol compliance, autonomous vehicle control, and stateful autopilot session management are not claimed.
       - The proposal identifies the smallest first implementation step for in-tree MAVLink packet header parsing and sequence tracking.
 
+  - id: RER-F-046
+    order: 46
+    title: In-tree SRT packet header parser
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-044]
+    spec_refs: [§8, §13, §14]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. Implement RER-F-044 as an optional SRT (Secure Reliable Transport) packet inspection feature, improving debugging without compromising RER''s core relay functionality. Requirements Parse the 16-byte SRT header, distinguishing data and control packets. Extract available metadata, including sequence numbers, socket IDs, and control types. Integrate with InspectionConfig and the existing non-blocking diagnostics buffer. Inspection must be disabled by default, avoid unnecessary allocations, and never block forwarding. Extend the impairment harness to test SRT traffic under deterministic packet loss, reordering, and jitter, using external SRT endpoints where practical. Add tests for valid packets, truncated headers, malformed extensions, unknown types, boundary conditions, and byte-for-byte forwarding. Recommendations Treat packets as untrusted input. Enforce bounds checks and prevent panics, excessive processing, and diagnostic-buffer exhaustion. Distinguish observed metadata from inferred connection state. Passive inspection cannot verify successful handshakes, encryption, or retransmission recovery. Avoid logging encryption keys or unnecessarily exposing sensitive identifiers. Benchmark throughput and latency with inspection enabled and disabled. Keep SRT termination, encryption management, and full protocol implementation out of scope; consider them separately if justified. Acceptance Criteria: Inspection is opt-in; existing relay behavior remains unchanged; packets are forwarded unmodified; malformed traffic cannot crash the relay; diagnostics remain bounded and non-blocking; and automated tests pass. Implement the minimal parser first, followed by diagnostics integration and impairment testing. This delivers practical debugging value while controlling complexity. Relevant code: crates/rer/src/config.rs, docs/proposals/RER-F-044.md, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/srt.rs, parsing a 16-byte buffer with packet type bit 0 extracts data packet sequence number, message number, timestamp, and destination socket ID.
+      - In crates/rer/src/srt.rs, parsing a 16-byte buffer with packet type bit 1 extracts control type, type-specific information, timestamp, and destination socket ID.
+      - In crates/rer/src/srt.rs, parsing an input buffer shorter than 16 bytes returns an error indicating truncated header.
+      - In crates/rer/src/srt.rs, parsing an SRT Handshake control packet extracts handshake type, protocol version, and initial sequence number.
+      - In crates/rer/src/srt.rs, evaluating arbitrary non-SRT payload bytes returns a parse status distinguishing non-SRT traffic from valid SRT packets without panicking.
+
+  - id: RER-F-047
+    order: 47
+    title: SRT inspection configuration and SrtInspection diagnostic event
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-046]
+    spec_refs: [§8, §13, §14]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. Implement RER-F-044 as an optional SRT (Secure Reliable Transport) packet inspection feature, improving debugging without compromising RER''s core relay functionality. Requirements Parse the 16-byte SRT header, distinguishing data and control packets. Extract available metadata, including sequence numbers, socket IDs, and control types. Integrate with InspectionConfig and the existing non-blocking diagnostics buffer. Inspection must be disabled by default, avoid unnecessary allocations, and never block forwarding. Extend the impairment harness to test SRT traffic under deterministic packet loss, reordering, and jitter, using external SRT endpoints where practical. Add tests for valid packets, truncated headers, malformed extensions, unknown types, boundary conditions, and byte-for-byte forwarding. Recommendations Treat packets as untrusted input. Enforce bounds checks and prevent panics, excessive processing, and diagnostic-buffer exhaustion. Distinguish observed metadata from inferred connection state. Passive inspection cannot verify successful handshakes, encryption, or retransmission recovery. Avoid logging encryption keys or unnecessarily exposing sensitive identifiers. Benchmark throughput and latency with inspection enabled and disabled. Keep SRT termination, encryption management, and full protocol implementation out of scope; consider them separately if justified. Acceptance Criteria: Inspection is opt-in; existing relay behavior remains unchanged; packets are forwarded unmodified; malformed traffic cannot crash the relay; diagnostics remain bounded and non-blocking; and automated tests pass. Implement the minimal parser first, followed by diagnostics integration and impairment testing. This delivers practical debugging value while controlling complexity. Relevant code: crates/rer/src/config.rs, docs/proposals/RER-F-044.md, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - Deserializing a configuration YAML containing stream option inspection without option srt defaults to None and preserves existing inspection behavior.
+      - Running rer validate on a configuration with option srt and option max_inspect_bytes set to 0 returns a validation error reporting an invalid inspection size limit.
+      - In crates/rer/src/diagnostics.rs, creating an SrtInspection diagnostic event with destination socket ID, timestamp, and packet kind serializes into JSON containing the structured SRT metadata.
+      - In crates/rer/src/diagnostics.rs, emitting an SrtInspection diagnostic event into a full DiagnosticBuffer drops the event without blocking or panicking.
+
+  - id: RER-F-048
+    order: 48
+    title: Passive SRT stream inspection and transparent relay forwarding
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-047]
+    spec_refs: [§8, §13, §14]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. Implement RER-F-044 as an optional SRT (Secure Reliable Transport) packet inspection feature, improving debugging without compromising RER''s core relay functionality. Requirements Parse the 16-byte SRT header, distinguishing data and control packets. Extract available metadata, including sequence numbers, socket IDs, and control types. Integrate with InspectionConfig and the existing non-blocking diagnostics buffer. Inspection must be disabled by default, avoid unnecessary allocations, and never block forwarding. Extend the impairment harness to test SRT traffic under deterministic packet loss, reordering, and jitter, using external SRT endpoints where practical. Add tests for valid packets, truncated headers, malformed extensions, unknown types, boundary conditions, and byte-for-byte forwarding. Recommendations Treat packets as untrusted input. Enforce bounds checks and prevent panics, excessive processing, and diagnostic-buffer exhaustion. Distinguish observed metadata from inferred connection state. Passive inspection cannot verify successful handshakes, encryption, or retransmission recovery. Avoid logging encryption keys or unnecessarily exposing sensitive identifiers. Benchmark throughput and latency with inspection enabled and disabled. Keep SRT termination, encryption management, and full protocol implementation out of scope; consider them separately if justified. Acceptance Criteria: Inspection is opt-in; existing relay behavior remains unchanged; packets are forwarded unmodified; malformed traffic cannot crash the relay; diagnostics remain bounded and non-blocking; and automated tests pass. Implement the minimal parser first, followed by diagnostics integration and impairment testing. This delivers practical debugging value while controlling complexity. Relevant code: crates/rer/src/config.rs, docs/proposals/RER-F-044.md, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a UDP datagram on a stream with option srt configured sends the exact datagram payload bytes unmodified to destination sockets.
+      - In crates/rer/src/relay.rs, forwarding a UDP datagram containing a valid SRT data packet records an SrtInspection diagnostic event with extracted sequence number in the diagnostic buffer while forwarding the datagram unmodified.
+      - When an inspected stream receives non-SRT or truncated datagrams, the relay forwards the payload unmodified and records a diagnostic event indicating unparsed traffic without interrupting relay operation.
+      - A UDP stream without option srt configured forwards datagrams byte-identically without emitting SrtInspection diagnostic events.
+      - In docs/CONFIGURATION.md, documentation for stream option inspection specifies that SRT support performs passive metadata inspection without stream termination, encryption management, or retransmission recovery.
+
+  - id: RER-F-049
+    order: 49
+    title: Channel impairment testing harness for SRT traffic
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-048]
+    spec_refs: [§8, §13, §14]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. Implement RER-F-044 as an optional SRT (Secure Reliable Transport) packet inspection feature, improving debugging without compromising RER''s core relay functionality. Requirements Parse the 16-byte SRT header, distinguishing data and control packets. Extract available metadata, including sequence numbers, socket IDs, and control types. Integrate with InspectionConfig and the existing non-blocking diagnostics buffer. Inspection must be disabled by default, avoid unnecessary allocations, and never block forwarding. Extend the impairment harness to test SRT traffic under deterministic packet loss, reordering, and jitter, using external SRT endpoints where practical. Add tests for valid packets, truncated headers, malformed extensions, unknown types, boundary conditions, and byte-for-byte forwarding. Recommendations Treat packets as untrusted input. Enforce bounds checks and prevent panics, excessive processing, and diagnostic-buffer exhaustion. Distinguish observed metadata from inferred connection state. Passive inspection cannot verify successful handshakes, encryption, or retransmission recovery. Avoid logging encryption keys or unnecessarily exposing sensitive identifiers. Benchmark throughput and latency with inspection enabled and disabled. Keep SRT termination, encryption management, and full protocol implementation out of scope; consider them separately if justified. Acceptance Criteria: Inspection is opt-in; existing relay behavior remains unchanged; packets are forwarded unmodified; malformed traffic cannot crash the relay; diagnostics remain bounded and non-blocking; and automated tests pass. Implement the minimal parser first, followed by diagnostics integration and impairment testing. This delivers practical debugging value while controlling complexity. Relevant code: crates/rer/src/config.rs, docs/proposals/RER-F-044.md, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/sim/channel.rs, forwarding SRT packets through forward_udp_loop with configured option loss_rate drops datagrams deterministically according to the configured PRNG seed.
+      - In crates/rer/src/sim/channel.rs, forwarding SRT packets through forward_udp_loop with configured option reorder_rate reorders consecutive datagrams while preserving payload byte integrity of delivered packets.
+      - In crates/rer/src/sim/channel.rs, forwarding SRT packets through forward_udp_loop with configured option jitter_ms applies variable transmission delay to datagrams without corrupting packet headers.
+      - In crates/rer/src/sim/channel.rs, processing identical sequences of SRT datagrams across two SimulatedChannel instances initialized with identical PRNG seed produces identical packet output sequences.
+
   - id: RER-T-001
     kind: track
     order: 101
