@@ -59,6 +59,10 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 47 | RER-F-047 | SRT inspection configuration and SrtInspection diagnostic event | BACKLOG | feature | low | needs-impl-approval | RER-F-046 | §8, §13, §14 |
 | 48 | RER-F-048 | Passive SRT stream inspection and transparent relay forwarding | BACKLOG | feature | medium | needs-impl-approval | RER-F-047 | §8, §13, §14 |
 | 49 | RER-F-049 | Channel impairment testing harness for SRT traffic | BACKLOG | feature | medium | needs-impl-approval | RER-F-048 | §8, §13, §14 |
+| 50 | RER-F-050 | In-tree MAVLink packet header parser | BACKLOG | feature | low | needs-impl-approval | RER-F-045 | §8, §14 |
+| 51 | RER-F-051 | Per-source MAVLink sequence tracking and diagnostic integration | BACKLOG | feature | medium | needs-impl-approval | RER-F-050 | §8, §14 |
+| 52 | RER-F-052 | Native MAVLink TCP framing support | BACKLOG | feature | medium | needs-impl-approval | RER-F-051 | §8, §14 |
+| 53 | RER-F-053 | MAVLink relay integration and performance benchmarks | BACKLOG | feature | medium | needs-impl-approval | RER-F-052 | §8, §14 |
 
 ## Cross-cutting tracks
 
@@ -71,7 +75,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-039 → RER-F-040 → RER-F-041 → RER-F-042 → RER-F-043 → RER-F-044 → RER-F-045 → RER-F-046 → RER-F-047 → RER-F-048 → RER-F-049
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-039 → RER-F-040 → RER-F-041 → RER-F-042 → RER-F-043 → RER-F-044 → RER-F-045 → RER-F-046 → RER-F-047 → RER-F-048 → RER-F-049 → RER-F-050 → RER-F-051 → RER-F-052 → RER-F-053
 
 ## Owner approval gates
 
