@@ -925,6 +925,83 @@ items:
       - In crates/rer/src/sim/channel.rs, forwarding SRT packets through forward_udp_loop with configured option jitter_ms applies variable transmission delay to datagrams without corrupting packet headers.
       - In crates/rer/src/sim/channel.rs, processing identical sequences of SRT datagrams across two SimulatedChannel instances initialized with identical PRNG seed produces identical packet output sequences.
 
+  - id: RER-F-050
+    order: 50
+    title: In-tree MAVLink packet header parser
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-045]
+    spec_refs: [§8, §14]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. Implement RER-F-045 as an optional, zero-dependency MAVLink inspection and framing module supporting MAVLink 1 and 2. Requirements Parse MAVLink headers, message IDs, system/component IDs, sequence numbers, and optional signatures without modifying forwarded packets. Track sequence continuity independently per (sysid, compid) to prevent false packet-loss alerts on multiplexed streams. Support native MAVLink TCP framing using self-delimiting frames, configurable alongside existing framing modes. Integrate metadata and sequence-loss events with RER''s existing diagnostics system. Keep inspection opt-in and non-blocking. Add comprehensive tests for both versions, signed packets, truncated/malformed frames, sequence wraparound, multiplexed sources, and TCP streams split across reads. Recommendations Preserve byte-for-byte forwarding; malformed input must never crash or stall the relay. Treat unknown MAVLink 2 incompatibility flags as an inspection/validation warning, not permission to silently alter or drop traffic. Do not claim CRC verification without the correct dialect-specific CRC_EXTRA definitions. Distinguish sequence gaps from confirmed packet loss; duplicates, reordering, and counter wraparound require careful handling. Benchmark throughput and memory overhead. Keep autopilot control, message modification, and signing-key management out of scope. Acceptance Criteria: MAVLink 1/2 parsing works correctly, per-source sequence tracking produces accurate diagnostics, TCP framing handles fragmented and coalesced frames, malformed traffic is handled safely, and existing relay behavior remains unchanged when inspection is disabled. Implement the parser first, followed by sequence tracking, TCP framing, and integration tests. This provides useful UAV telemetry debugging while preserving RER''s role as a transparent engineering relay. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/mavlink.rs, parsing a buffer beginning with magic byte 0xFE extracts MAVLink 1 sequence number, system ID, component ID, 8-bit message ID, and total packet length calculated as payload length plus 8 bytes.
+      - In crates/rer/src/mavlink.rs, parsing a buffer beginning with magic byte 0xFD without signature flag extracts MAVLink 2 sequence number, system ID, component ID, 24-bit little-endian message ID, and total packet length calculated as payload length plus 12 bytes.
+      - In crates/rer/src/mavlink.rs, parsing a buffer beginning with magic byte 0xFD with incompatibility flag bit 0 set calculates total packet length as payload length plus 25 bytes.
+      - In crates/rer/src/mavlink.rs, parsing an input buffer whose first byte is neither 0xFE nor 0xFD returns an error indicating an invalid magic marker.
+      - In crates/rer/src/mavlink.rs, parsing an input buffer shorter than minimal header length or shorter than declared total packet length returns an error indicating a truncated packet.
+      - In crates/rer/src/mavlink.rs, evaluating a MAVLink 2 packet with unknown incompatibility flag bits returns a parse warning while preserving extracted header metadata.
+
+  - id: RER-F-051
+    order: 51
+    title: Per-source MAVLink sequence tracking and diagnostic integration
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-050]
+    spec_refs: [§8, §14]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. Implement RER-F-045 as an optional, zero-dependency MAVLink inspection and framing module supporting MAVLink 1 and 2. Requirements Parse MAVLink headers, message IDs, system/component IDs, sequence numbers, and optional signatures without modifying forwarded packets. Track sequence continuity independently per (sysid, compid) to prevent false packet-loss alerts on multiplexed streams. Support native MAVLink TCP framing using self-delimiting frames, configurable alongside existing framing modes. Integrate metadata and sequence-loss events with RER''s existing diagnostics system. Keep inspection opt-in and non-blocking. Add comprehensive tests for both versions, signed packets, truncated/malformed frames, sequence wraparound, multiplexed sources, and TCP streams split across reads. Recommendations Preserve byte-for-byte forwarding; malformed input must never crash or stall the relay. Treat unknown MAVLink 2 incompatibility flags as an inspection/validation warning, not permission to silently alter or drop traffic. Do not claim CRC verification without the correct dialect-specific CRC_EXTRA definitions. Distinguish sequence gaps from confirmed packet loss; duplicates, reordering, and counter wraparound require careful handling. Benchmark throughput and memory overhead. Keep autopilot control, message modification, and signing-key management out of scope. Acceptance Criteria: MAVLink 1/2 parsing works correctly, per-source sequence tracking produces accurate diagnostics, TCP framing handles fragmented and coalesced frames, malformed traffic is handled safely, and existing relay behavior remains unchanged when inspection is disabled. Implement the parser first, followed by sequence tracking, TCP framing, and integration tests. This provides useful UAV telemetry debugging while preserving RER''s role as a transparent engineering relay. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/mavlink.rs, sequence tracking maintains 8-bit sequence counters modulo 256 independently for two distinct system and component identifier sources, detecting a sequence gap on one source without altering continuity state on the other source.
+      - In crates/rer/src/mavlink.rs, sequence tracking receiving a duplicate sequence number for an existing source increments duplicate counters and identifies duplicate packets without dropping traffic.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent containing MAVLink system ID, component ID, sequence number, and 24-bit message ID produces a JSON object containing the structured MAVLink metadata fields.
+      - Running rer validate on a configuration where both option mavlink sequence tracking and option sequence tracking are enabled on the same stream returns a validation error reporting conflicting sequence tracking.
+      - Deserializing a configuration YAML containing a stream without option mavlink defaults to None and preserves existing relay configuration behavior.
+
+  - id: RER-F-052
+    order: 52
+    title: Native MAVLink TCP framing support
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-051]
+    spec_refs: [§8, §14]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. Implement RER-F-045 as an optional, zero-dependency MAVLink inspection and framing module supporting MAVLink 1 and 2. Requirements Parse MAVLink headers, message IDs, system/component IDs, sequence numbers, and optional signatures without modifying forwarded packets. Track sequence continuity independently per (sysid, compid) to prevent false packet-loss alerts on multiplexed streams. Support native MAVLink TCP framing using self-delimiting frames, configurable alongside existing framing modes. Integrate metadata and sequence-loss events with RER''s existing diagnostics system. Keep inspection opt-in and non-blocking. Add comprehensive tests for both versions, signed packets, truncated/malformed frames, sequence wraparound, multiplexed sources, and TCP streams split across reads. Recommendations Preserve byte-for-byte forwarding; malformed input must never crash or stall the relay. Treat unknown MAVLink 2 incompatibility flags as an inspection/validation warning, not permission to silently alter or drop traffic. Do not claim CRC verification without the correct dialect-specific CRC_EXTRA definitions. Distinguish sequence gaps from confirmed packet loss; duplicates, reordering, and counter wraparound require careful handling. Benchmark throughput and memory overhead. Keep autopilot control, message modification, and signing-key management out of scope. Acceptance Criteria: MAVLink 1/2 parsing works correctly, per-source sequence tracking produces accurate diagnostics, TCP framing handles fragmented and coalesced frames, malformed traffic is handled safely, and existing relay behavior remains unchanged when inspection is disabled. Implement the parser first, followed by sequence tracking, TCP framing, and integration tests. This provides useful UAV telemetry debugging while preserving RER''s role as a transparent engineering relay. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering a MAVLink 1 or MAVLink 2 frame fragmented across multiple 1-byte reads reassembles the complete frame matching the original transmitted bytes.
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering two concatenated MAVLink frames in a single read buffer yields the two frames individually at their calculated frame length boundaries.
+      - In crates/rer/src/framing.rs, reading a MAVLink TCP frame declaring a length that exceeds the configured maximum frame size returns an invalid data error without panicking.
+      - In crates/rer/src/framing.rs, writing a MAVLink frame using write_frame_with_mode transmits raw packet bytes without prepending a 4-byte length prefix.
+      - In crates/rer/src/config.rs, configuring option framing with value mavlink deserializes into FramingMode::Mavlink.
+
+  - id: RER-F-053
+    order: 53
+    title: MAVLink relay integration and performance benchmarks
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-052]
+    spec_refs: [§8, §14]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. Implement RER-F-045 as an optional, zero-dependency MAVLink inspection and framing module supporting MAVLink 1 and 2. Requirements Parse MAVLink headers, message IDs, system/component IDs, sequence numbers, and optional signatures without modifying forwarded packets. Track sequence continuity independently per (sysid, compid) to prevent false packet-loss alerts on multiplexed streams. Support native MAVLink TCP framing using self-delimiting frames, configurable alongside existing framing modes. Integrate metadata and sequence-loss events with RER''s existing diagnostics system. Keep inspection opt-in and non-blocking. Add comprehensive tests for both versions, signed packets, truncated/malformed frames, sequence wraparound, multiplexed sources, and TCP streams split across reads. Recommendations Preserve byte-for-byte forwarding; malformed input must never crash or stall the relay. Treat unknown MAVLink 2 incompatibility flags as an inspection/validation warning, not permission to silently alter or drop traffic. Do not claim CRC verification without the correct dialect-specific CRC_EXTRA definitions. Distinguish sequence gaps from confirmed packet loss; duplicates, reordering, and counter wraparound require careful handling. Benchmark throughput and memory overhead. Keep autopilot control, message modification, and signing-key management out of scope. Acceptance Criteria: MAVLink 1/2 parsing works correctly, per-source sequence tracking produces accurate diagnostics, TCP framing handles fragmented and coalesced frames, malformed traffic is handled safely, and existing relay behavior remains unchanged when inspection is disabled. Implement the parser first, followed by sequence tracking, TCP framing, and integration tests. This provides useful UAV telemetry debugging while preserving RER''s role as a transparent engineering relay. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a UDP datagram on a stream with MAVLink inspection enabled forwards the exact datagram payload bytes unmodified to destination endpoints while recording sequence metadata in diagnostic events.
+      - In crates/rer/tests/mavlink_integration_tests.rs, forwarding multiplexed MAVLink streams from two distinct system and component identifier pairs preserves independent sequence continuity counters without emitting false sequence gap events.
+      - In crates/rer/src/relay.rs, receiving a malformed or truncated MAVLink packet on an inspected stream drops the packet by default, increments dropped packet counters, and emits a dropped diagnostic event.
+      - In crates/rer/src/relay.rs, receiving a malformed MAVLink packet on an inspected stream configured with option passthrough_on_error forwards the payload unmodified to destination endpoints while recording a validation failure event.
+      - In crates/rer/src/relay.rs, forwarding traffic on a stream without MAVLink inspection configured delivers datagrams byte-identically without invoking MAVLink parsing overhead.
+
   - id: RER-T-001
     kind: track
     order: 101
