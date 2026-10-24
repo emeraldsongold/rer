@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use rer::config::DropPolicy;
 use rer::sim::{
     default_benchmark_suite, BenchmarkResult, BenchmarkRunner, EnvironmentInfo,
     FaultInjectionRunner, FaultType, LongDurationConfig, LongDurationRunner,
@@ -184,6 +185,42 @@ fn test_fault_injection_saturation() {
         FaultInjectionRunner::run(FaultType::Saturation).expect("run saturation fault scenario");
     assert!(res.passed, "Saturation scenario details: {}", res.details);
     assert_eq!(res.scenario, FaultType::Saturation);
+    assert!(res.fault_events_count > 0);
+
+    for policy in [
+        DropPolicy::DropOldest,
+        DropPolicy::DropNewest,
+        DropPolicy::Reject,
+    ] {
+        let res = FaultInjectionRunner::run_saturation(48, 60, 10, policy)
+            .expect("run saturation fault scenario with policy");
+        assert!(
+            res.passed,
+            "Saturation scenario for policy {:?} details: {}",
+            policy, res.details
+        );
+        assert_eq!(res.scenario, FaultType::Saturation);
+        assert!(res.fault_events_count > 0);
+    }
+}
+
+#[test]
+fn test_fault_injection_saturation_policies() {
+    for policy in [
+        DropPolicy::DropOldest,
+        DropPolicy::DropNewest,
+        DropPolicy::Reject,
+    ] {
+        let res = FaultInjectionRunner::run_saturation(48, 60, 10, policy)
+            .expect("run saturation fault scenario with policy");
+        assert!(
+            res.passed,
+            "Saturation scenario for policy {:?} details: {}",
+            policy, res.details
+        );
+        assert_eq!(res.scenario, FaultType::Saturation);
+        assert!(res.fault_events_count > 0);
+    }
 }
 
 #[test]

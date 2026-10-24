@@ -612,8 +612,10 @@ instances:
         policy: DropPolicy,
     ) -> io::Result<FaultScenarioResult> {
         let start = Instant::now();
-        let dest_socket = UdpSocket::bind("127.0.0.1:0")?;
-        let dest_port = dest_socket.local_addr()?.port();
+        let dest_port = {
+            let l = TcpListener::bind("127.0.0.1:0")?;
+            l.local_addr()?.port()
+        }; // Port is bound then dropped so destination is initially down
 
         let relay_socket = UdpSocket::bind("127.0.0.1:0")?;
         let relay_port = relay_socket.local_addr()?.port();
@@ -636,7 +638,7 @@ instances:
           transport: "udp"
           address: "127.0.0.1:{relay_port}"
         destination:
-          transport: "udp"
+          transport: "tcp"
           address: "127.0.0.1:{dest_port}"
         buffer:
           max_queue_size: {queue_size}
@@ -649,7 +651,7 @@ instances:
         let relay = Relay::start(&cfg)
             .map_err(|e| io::Error::other(format!("relay start error: {}", e)))?;
 
-        // Send intense burst with unthrottled sender
+        // Hold the forwarder back until sender finishes emitting count packets
         let sender = UdpSocket::bind("127.0.0.1:0")?;
         let target = format!("127.0.0.1:{}", relay_port);
         for i in 0..count {
@@ -657,8 +659,60 @@ instances:
             let _ = sender.send_to(pkt.as_bytes(), &target);
         }
 
-        // Allow queue draining to dest
-        thread::sleep(Duration::from_millis(200));
+        // Wait for relay ingress to process the emitted packets
+        let ingress_deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < ingress_deadline {
+            if let Some(s) = relay.stream_stats("sat-stream") {
+                if s.received_packets >= count {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        // Now bring destination listener up to release the forwarder and drain queue
+        let dest_listener = TcpListener::bind(format!("127.0.0.1:{}", dest_port))?;
+        dest_listener.set_nonblocking(true)?;
+
+        let accept_deadline = Instant::now() + Duration::from_millis(2000);
+        let mut accepted_stream = None;
+        while Instant::now() < accept_deadline {
+            match dest_listener.accept() {
+                Ok((s, _)) => {
+                    s.set_nonblocking(false)?;
+                    accepted_stream = Some(s);
+                    break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let (mut stream, _) = match accepted_stream {
+            Some(s) => (s, ()),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for forwarder to connect to destination",
+                ))
+            }
+        };
+
+        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+        // Drain forwarded packets from stream
+        let mut received = 0;
+        let shutdown = AtomicBool::new(false);
+        while let Ok(Some(_)) = crate::framing::read_frame(&mut stream, 65536, &shutdown) {
+            received += 1;
+            if received >= queue_size as u64 {
+                break;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(50));
 
         let stats = relay.stream_stats("sat-stream");
         let drops = stats.map(|s| s.drops_queue_full).unwrap_or(0);
@@ -666,7 +720,7 @@ instances:
         let tx = stats.map(|s| s.forwarded_packets).unwrap_or(0);
         relay.stop();
 
-        let passed = rx > 0 && tx > 0;
+        let passed = rx > 0 && tx > 0 && drops > 0;
 
         Ok(FaultScenarioResult {
             scenario: FaultType::Saturation,
