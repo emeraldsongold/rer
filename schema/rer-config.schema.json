@@ -283,6 +283,17 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        },
+        "srt": {
+          "description": "Optional SRT passive inspection configuration (SPEC §14, §8). Defaults to None.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SrtInspectionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -602,6 +613,30 @@
         "width": {
           "description": "Width of the sequence field in bytes (1, 2, 4, or 8). Defaults to 4.",
           "default": 4,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SrtInspectionConfig": {
+      "description": "Opt-in SRT passive inspection configuration (SPEC §14, §8).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether SRT inspection is enabled. Defaults to true when srt section is present.",
+          "default": true,
+          "type": "boolean"
+        },
+        "extract_stream_id": {
+          "description": "Whether to extract Stream ID (SID) strings from handshake extension records. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "max_inspect_bytes": {
+          "description": "Maximum number of bytes to inspect for SRT headers and extensions. Defaults to 512.",
+          "default": 512,
           "type": "integer",
           "format": "uint",
           "minimum": 0.0

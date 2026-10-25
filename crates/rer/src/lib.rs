@@ -41,15 +41,15 @@ pub use ccsds::{
 pub use config::{
     Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
     InspectionConfig, InstanceConfig, LogicalInterfaceConfig, LtpInspectionConfig, MetricsConfig,
-    OperationalMode, SequenceConfig, StreamConfig, TestModeConfig, ValidationError,
-    ValidationReport,
+    OperationalMode, SequenceConfig, SrtInspectionConfig, StreamConfig, TestModeConfig,
+    ValidationError, ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, BundleInspection, BundleInspectionEvent,
     BundleMetadata, Clock, DiagnosticBuffer, DiagnosticBufferBuilder, DiagnosticEvent,
     DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, IntoDtnTimestamp, LtpInspection,
     LtpInspectionEvent, LtpMetadata, ManualClock, RateLimiter, SequenceState, SequenceTracker,
-    SequenceTrackingEvent, Stage, SystemClock,
+    SequenceTrackingEvent, SrtInspection, SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
 };
 pub use framing::{
     encode_frame, read_ccsds_frame, read_frame, read_frame_with_mode, write_ccsds_frame,

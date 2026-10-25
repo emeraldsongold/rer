@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use crate::bpv7::{BundleParseStatus, CreationTimestamp, PrimaryBlock};
 use crate::config::{ByteOrder, InspectionConfig, OperationalMode, SequenceConfig, TransportType};
 use crate::ltp::{LtpParseStatus, LtpSegmentHeader, SegmentType};
+use crate::srt::{
+    PacketPosition, SrtControlHeader, SrtControlType, SrtDataHeader, SrtHeader, SrtPacketKind,
+    SrtParseStatus,
+};
 
 /// Stage in packet lifecycle or diagnostic event category (SPEC §8, stages 2–6, drops, failures, and health).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,6 +55,9 @@ pub enum DiagnosticStage {
     /// Licklider Transmission Protocol (LTP) passive inspection event (SPEC §14, §8).
     #[serde(rename = "ltp_inspection")]
     LtpInspection,
+    /// Secure Reliable Transport (SRT) passive inspection event (SPEC §14, §8).
+    #[serde(rename = "srt_inspection")]
+    SrtInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -68,6 +75,7 @@ impl fmt::Display for DiagnosticStage {
             Self::HealthTransition => write!(f, "health_transition"),
             Self::BundleInspection => write!(f, "bundle_inspection"),
             Self::LtpInspection => write!(f, "ltp_inspection"),
+            Self::SrtInspection => write!(f, "srt_inspection"),
         }
     }
 }
@@ -87,6 +95,7 @@ impl FromStr for DiagnosticStage {
             "health_transition" => Ok(Self::HealthTransition),
             "bundle_inspection" => Ok(Self::BundleInspection),
             "ltp_inspection" => Ok(Self::LtpInspection),
+            "srt_inspection" => Ok(Self::SrtInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -799,6 +808,464 @@ impl From<LtpInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_srt_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::SrtInspection
+}
+
+/// Structured SRT metadata extracted during passive packet inspection (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrtMetadata {
+    /// 32-bit Destination Socket ID.
+    pub destination_socket_id: u32,
+
+    /// 32-bit timestamp in microseconds.
+    pub timestamp_us: u32,
+
+    /// 32-bit timestamp in microseconds (redundant key for explicit timestamp access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u32>,
+
+    /// SRT packet kind (data or control).
+    pub packet_kind: SrtPacketKind,
+
+    /// SRT packet kind (redundant key for explicit packet_type access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_type: Option<SrtPacketKind>,
+
+    /// 31-bit sequence number (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u32>,
+
+    /// 26-bit message number (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_number: Option<u32>,
+
+    /// Packet position flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_position: Option<PacketPosition>,
+
+    /// In-order delivery flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_order: Option<bool>,
+
+    /// Retransmitted packet flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retransmitted: Option<bool>,
+
+    /// Key-based encryption flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_flag: Option<u8>,
+
+    /// Control packet type (for control packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_type: Option<SrtControlType>,
+
+    /// Control subtype / extension / reserved (for control packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<u16>,
+
+    /// Type-specific information (for control packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_specific_info: Option<u32>,
+
+    /// Handshake type integer (for handshake packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_type: Option<u32>,
+
+    /// Sender SRT socket ID (for handshake packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_socket_id: Option<u32>,
+
+    /// Anti-spoofing challenge cookie (for handshake packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syn_cookie: Option<u32>,
+
+    /// Stream ID string from handshake extensions (SRT_CMD_SID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Parse outcome status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<SrtParseStatus>,
+}
+
+/// Diagnostic event representing an SRT passive inspection event (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrtInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `srt_inspection`).
+    #[serde(default = "default_srt_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// 32-bit Destination Socket ID.
+    #[serde(alias = "dest_socket_id", alias = "socket_id")]
+    pub destination_socket_id: u32,
+
+    /// 32-bit timestamp in microseconds.
+    pub timestamp: u32,
+
+    /// 32-bit timestamp in microseconds (redundant key for timestamp_us access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_us: Option<u32>,
+
+    /// SRT Packet Kind (Data or Control).
+    pub packet_kind: SrtPacketKind,
+
+    /// SRT Packet Kind (redundant key for packet_type access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_type: Option<SrtPacketKind>,
+
+    /// Parse outcome status of the SRT packet.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "status")]
+    pub parse_status: Option<SrtParseStatus>,
+
+    /// 31-bit sequence number (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u32>,
+
+    /// 26-bit message number (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_number: Option<u32>,
+
+    /// Packet position flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_position: Option<PacketPosition>,
+
+    /// In-order delivery flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_order: Option<bool>,
+
+    /// Retransmitted packet flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retransmitted: Option<bool>,
+
+    /// Key-based encryption flag (for data packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_flag: Option<u8>,
+
+    /// Control packet type (for control packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_type: Option<SrtControlType>,
+
+    /// Subtype / extension / reserved (for control packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<u16>,
+
+    /// Type-specific information (for control packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_specific_info: Option<u32>,
+
+    /// Handshake type integer (for handshake packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_type: Option<u32>,
+
+    /// Sender SRT socket ID (for handshake packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_socket_id: Option<u32>,
+
+    /// SYN cookie (for handshake packets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syn_cookie: Option<u32>,
+
+    /// Stream ID from handshake extension records (SRT_CMD_SID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id_extension: Option<String>,
+
+    /// Structured SRT metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "srt"
+    )]
+    pub srt_metadata: Option<SrtMetadata>,
+}
+
+pub type SrtInspectionEvent = SrtInspection;
+
+impl SrtInspection {
+    /// Creates a new `SrtInspection` event with destination socket ID, timestamp, and packet kind.
+    #[must_use]
+    pub fn new(destination_socket_id: u32, timestamp: u32, packet_kind: SrtPacketKind) -> Self {
+        let metadata = SrtMetadata {
+            destination_socket_id,
+            timestamp_us: timestamp,
+            timestamp: Some(timestamp),
+            packet_kind,
+            packet_type: Some(packet_kind),
+            sequence_number: None,
+            message_number: None,
+            packet_position: None,
+            in_order: None,
+            retransmitted: None,
+            encryption_flag: None,
+            control_type: None,
+            subtype: None,
+            type_specific_info: None,
+            handshake_type: None,
+            srt_socket_id: None,
+            syn_cookie: None,
+            stream_id: None,
+            parse_status: Some(SrtParseStatus::Valid),
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::SrtInspection,
+            destination_socket_id,
+            timestamp,
+            timestamp_us: Some(timestamp),
+            packet_kind,
+            packet_type: Some(packet_kind),
+            parse_status: Some(SrtParseStatus::Valid),
+            sequence_number: None,
+            message_number: None,
+            packet_position: None,
+            in_order: None,
+            retransmitted: None,
+            encryption_flag: None,
+            control_type: None,
+            subtype: None,
+            type_specific_info: None,
+            handshake_type: None,
+            srt_socket_id: None,
+            syn_cookie: None,
+            stream_id_extension: None,
+            srt_metadata: Some(metadata),
+        }
+    }
+
+    /// Creates an `SrtInspection` from a parsed [`SrtHeader`] and parse status.
+    #[must_use]
+    pub fn from_header(header: &SrtHeader, parse_status: SrtParseStatus) -> Self {
+        let mut insp = Self::new(
+            header.destination_socket_id,
+            header.timestamp,
+            header.packet_kind,
+        );
+        insp.parse_status = Some(parse_status);
+        insp.sequence_number = header.sequence_number;
+        insp.message_number = header.message_number;
+        insp.packet_position = header.packet_position;
+        insp.in_order = header.in_order;
+        insp.retransmitted = header.retransmitted;
+        insp.encryption_flag = header.encryption_flag;
+        insp.control_type = header.control_type;
+        insp.subtype = header.subtype;
+        insp.type_specific_info = header.type_specific_info;
+        insp.handshake_type = header.handshake_type;
+        insp.srt_socket_id = header.srt_socket_id;
+        insp.syn_cookie = header.syn_cookie;
+        insp.stream_id_extension = header.stream_id.clone();
+        if let Some(ref mut meta) = insp.srt_metadata {
+            meta.parse_status = Some(parse_status);
+            meta.sequence_number = header.sequence_number;
+            meta.message_number = header.message_number;
+            meta.packet_position = header.packet_position;
+            meta.in_order = header.in_order;
+            meta.retransmitted = header.retransmitted;
+            meta.encryption_flag = header.encryption_flag;
+            meta.control_type = header.control_type;
+            meta.subtype = header.subtype;
+            meta.type_specific_info = header.type_specific_info;
+            meta.handshake_type = header.handshake_type;
+            meta.srt_socket_id = header.srt_socket_id;
+            meta.syn_cookie = header.syn_cookie;
+            meta.stream_id = header.stream_id.clone();
+        }
+        insp
+    }
+
+    /// Creates an `SrtInspection` from a parsed [`SrtDataHeader`] and parse status.
+    #[must_use]
+    pub fn from_data_header(header: &SrtDataHeader, parse_status: SrtParseStatus) -> Self {
+        let mut insp = Self::new(
+            header.destination_socket_id,
+            header.timestamp,
+            SrtPacketKind::Data,
+        );
+        insp.parse_status = Some(parse_status);
+        insp.sequence_number = Some(header.sequence_number);
+        insp.message_number = Some(header.message_number);
+        insp.packet_position = Some(header.packet_position);
+        insp.in_order = Some(header.in_order);
+        insp.retransmitted = Some(header.retransmitted);
+        insp.encryption_flag = Some(header.encryption_flag);
+        if let Some(ref mut meta) = insp.srt_metadata {
+            meta.parse_status = Some(parse_status);
+            meta.sequence_number = Some(header.sequence_number);
+            meta.message_number = Some(header.message_number);
+            meta.packet_position = Some(header.packet_position);
+            meta.in_order = Some(header.in_order);
+            meta.retransmitted = Some(header.retransmitted);
+            meta.encryption_flag = Some(header.encryption_flag);
+        }
+        insp
+    }
+
+    /// Creates an `SrtInspection` from a parsed [`SrtControlHeader`] and parse status.
+    #[must_use]
+    pub fn from_control_header(header: &SrtControlHeader, parse_status: SrtParseStatus) -> Self {
+        let mut insp = Self::new(
+            header.destination_socket_id,
+            header.timestamp,
+            SrtPacketKind::Control,
+        );
+        insp.parse_status = Some(parse_status);
+        insp.control_type = Some(header.control_type);
+        insp.subtype = Some(header.subtype);
+        insp.type_specific_info = Some(header.type_specific_info);
+        if let Some(ref mut meta) = insp.srt_metadata {
+            meta.parse_status = Some(parse_status);
+            meta.control_type = Some(header.control_type);
+            meta.subtype = Some(header.subtype);
+            meta.type_specific_info = Some(header.type_specific_info);
+        }
+        insp
+    }
+
+    /// Destination Socket ID.
+    #[must_use]
+    pub fn destination_socket_id(&self) -> u32 {
+        self.destination_socket_id
+    }
+
+    /// Timestamp in microseconds.
+    #[must_use]
+    pub fn timestamp(&self) -> u32 {
+        self.timestamp
+    }
+
+    /// Timestamp in microseconds.
+    #[must_use]
+    pub fn timestamp_us(&self) -> u32 {
+        self.timestamp
+    }
+
+    /// SRT packet kind (Data or Control).
+    #[must_use]
+    pub fn packet_kind(&self) -> SrtPacketKind {
+        self.packet_kind
+    }
+
+    /// SRT packet kind (Data or Control).
+    #[must_use]
+    pub fn packet_type(&self) -> SrtPacketKind {
+        self.packet_kind
+    }
+
+    /// Parse outcome status.
+    #[must_use]
+    pub fn parse_status(&self) -> Option<SrtParseStatus> {
+        self.parse_status
+    }
+
+    /// Sets the stream identifier.
+    #[must_use]
+    pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
+        self.stream_id = Some(stream_id.into());
+        self
+    }
+
+    /// Sets monotonic and wall-clock timestamps.
+    #[must_use]
+    pub fn with_timestamps(mut self, monotonic: u64, wall_clock: u64) -> Self {
+        self.monotonic_timestamp = Some(monotonic);
+        self.wall_clock_timestamp = Some(wall_clock);
+        self
+    }
+
+    /// Sets the parse status.
+    #[must_use]
+    pub fn with_parse_status(mut self, status: SrtParseStatus) -> Self {
+        self.parse_status = Some(status);
+        if let Some(ref mut meta) = self.srt_metadata {
+            meta.parse_status = Some(status);
+        }
+        self
+    }
+
+    /// Sets sequence number.
+    #[must_use]
+    pub fn with_sequence_number(mut self, seq: u32) -> Self {
+        self.sequence_number = Some(seq);
+        if let Some(ref mut meta) = self.srt_metadata {
+            meta.sequence_number = Some(seq);
+        }
+        self
+    }
+
+    /// Sets message number.
+    #[must_use]
+    pub fn with_message_number(mut self, msg: u32) -> Self {
+        self.message_number = Some(msg);
+        if let Some(ref mut meta) = self.srt_metadata {
+            meta.message_number = Some(msg);
+        }
+        self
+    }
+
+    /// Sets control type.
+    #[must_use]
+    pub fn with_control_type(mut self, ct: SrtControlType) -> Self {
+        self.control_type = Some(ct);
+        if let Some(ref mut meta) = self.srt_metadata {
+            meta.control_type = Some(ct);
+        }
+        self
+    }
+
+    /// Sets stream ID string extension.
+    #[must_use]
+    pub fn with_stream_id_extension(mut self, sid: impl Into<String>) -> Self {
+        let s = sid.into();
+        self.stream_id_extension = Some(s.clone());
+        if let Some(ref mut meta) = self.srt_metadata {
+            meta.stream_id = Some(s);
+        }
+        self
+    }
+}
+
+impl From<SrtInspection> for DiagnosticEvent {
+    fn from(insp: SrtInspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp.stream_id.clone().unwrap_or_else(|| "srt".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::SrtInspection,
+            TransportType::Udp,
+            0,
+        );
+        event.destination_socket_id = Some(insp.destination_socket_id);
+        event.srt_timestamp = Some(insp.timestamp);
+        event.srt_timestamp_us = Some(insp.timestamp);
+        event.srt_packet_kind = Some(insp.packet_kind);
+        event.srt_packet_type = Some(insp.packet_kind);
+        event.srt_control_type = insp.control_type;
+        event.srt_parse_status = insp.parse_status;
+        event.srt_sequence_number = insp.sequence_number;
+        event.srt_metadata = insp.srt_metadata.clone();
+        event.srt_inspection = Some(insp);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -926,6 +1393,46 @@ pub struct DiagnosticEvent {
     /// Structured LTP metadata (SPEC §14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ltp_metadata: Option<LtpMetadata>,
+
+    /// SRT destination socket ID (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_socket_id: Option<u32>,
+
+    /// SRT timestamp in microseconds (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_timestamp: Option<u32>,
+
+    /// SRT timestamp in microseconds (alias for timestamp access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_timestamp_us: Option<u32>,
+
+    /// SRT packet kind (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_packet_kind: Option<SrtPacketKind>,
+
+    /// SRT packet kind (alias for packet_type access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_packet_type: Option<SrtPacketKind>,
+
+    /// SRT control type (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_control_type: Option<SrtControlType>,
+
+    /// SRT sequence number (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_sequence_number: Option<u32>,
+
+    /// SRT parse evaluation status (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_parse_status: Option<SrtParseStatus>,
+
+    /// SRT inspection metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "srt")]
+    pub srt_inspection: Option<SrtInspection>,
+
+    /// Structured SRT metadata (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_metadata: Option<SrtMetadata>,
 }
 
 impl DiagnosticEvent {
@@ -968,6 +1475,16 @@ impl DiagnosticEvent {
             ltp_parse_status: None,
             ltp_inspection: None,
             ltp_metadata: None,
+            destination_socket_id: None,
+            srt_timestamp: None,
+            srt_timestamp_us: None,
+            srt_packet_kind: None,
+            srt_packet_type: None,
+            srt_control_type: None,
+            srt_sequence_number: None,
+            srt_parse_status: None,
+            srt_inspection: None,
+            srt_metadata: None,
         }
     }
 
@@ -1211,6 +1728,51 @@ impl DiagnosticEvent {
         segment_type: SegmentType,
     ) -> Self {
         LtpInspection::new(session_originator, session_number, segment_type).into()
+    }
+
+    /// Sets the SRT destination socket ID.
+    #[must_use]
+    pub fn with_destination_socket_id(mut self, socket_id: u32) -> Self {
+        self.destination_socket_id = Some(socket_id);
+        if let Some(ref mut insp) = self.srt_inspection {
+            insp.destination_socket_id = socket_id;
+            if let Some(ref mut meta) = insp.srt_metadata {
+                meta.destination_socket_id = socket_id;
+            }
+        }
+        if let Some(ref mut meta) = self.srt_metadata {
+            meta.destination_socket_id = socket_id;
+        }
+        self
+    }
+
+    /// Attaches SRT packet inspection metadata.
+    #[must_use]
+    pub fn with_srt_inspection(mut self, inspection: SrtInspection) -> Self {
+        self.destination_socket_id = Some(inspection.destination_socket_id);
+        self.srt_timestamp = Some(inspection.timestamp);
+        self.srt_timestamp_us = Some(inspection.timestamp);
+        self.srt_packet_kind = Some(inspection.packet_kind);
+        self.srt_packet_type = Some(inspection.packet_kind);
+        self.srt_control_type = inspection.control_type;
+        self.srt_parse_status = inspection.parse_status;
+        self.srt_sequence_number = inspection.sequence_number;
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::SrtInspection;
+        }
+        self.srt_metadata = inspection.srt_metadata.clone();
+        self.srt_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a diagnostic event specifically for SRT packet inspection.
+    #[must_use]
+    pub fn srt_inspection(
+        destination_socket_id: u32,
+        timestamp: u32,
+        packet_kind: SrtPacketKind,
+    ) -> Self {
+        SrtInspection::new(destination_socket_id, timestamp, packet_kind).into()
     }
 }
 
@@ -1890,6 +2452,27 @@ impl DiagnosticBuffer {
 
     /// Emits an [`LtpInspection`] event into the diagnostic buffer.
     pub fn emit_ltp_inspection(&self, inspection: LtpInspection) -> bool {
+        self.emit(inspection)
+    }
+
+    /// Creates an [`SrtInspection`] event populated with buffer clock timestamps.
+    #[must_use]
+    pub fn create_srt_inspection(
+        &self,
+        stream_id: impl Into<String>,
+        destination_socket_id: u32,
+        timestamp: u32,
+        packet_kind: SrtPacketKind,
+    ) -> SrtInspection {
+        let mut insp = SrtInspection::new(destination_socket_id, timestamp, packet_kind);
+        insp.stream_id = Some(stream_id.into());
+        insp.monotonic_timestamp = Some(self.clock.monotonic_nanos());
+        insp.wall_clock_timestamp = Some(self.clock.wall_clock_nanos());
+        insp
+    }
+
+    /// Emits an [`SrtInspection`] event into the diagnostic buffer.
+    pub fn emit_srt_inspection(&self, inspection: SrtInspection) -> bool {
         self.emit(inspection)
     }
 
@@ -2600,6 +3183,84 @@ mod tests {
         let zero_buf = DiagnosticBuffer::new(0);
         let ltp_ev2 = LtpInspection::new(0xDEF, 0x5678, SegmentType::Report);
         let zero_emitted = zero_buf.emit(ltp_ev2);
+        assert!(!zero_emitted);
+        assert_eq!(zero_buf.dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_srt_inspection_event_serialization_contains_structured_metadata() {
+        let event = SrtInspection::new(0x2A, 123_456, SrtPacketKind::Data);
+
+        let json = serde_json::to_string(&event).expect("must serialize to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("must parse JSON");
+
+        // Verify destination socket ID, timestamp, and packet kind
+        assert_eq!(val["destination_socket_id"], 0x2A);
+        assert_eq!(val["timestamp"], 123_456);
+        assert_eq!(val["packet_kind"], "data");
+
+        // Verify structured SRT metadata nested object
+        assert!(
+            val["srt_metadata"].is_object(),
+            "must contain structured SRT metadata"
+        );
+        assert_eq!(val["srt_metadata"]["destination_socket_id"], 0x2A);
+        assert_eq!(val["srt_metadata"]["timestamp_us"], 123_456);
+        assert_eq!(val["srt_metadata"]["packet_kind"], "data");
+
+        // Also test serialization when converted to DiagnosticEvent
+        let diag_event: DiagnosticEvent = event.into();
+        let diag_json = serde_json::to_string(&diag_event).expect("must serialize DiagnosticEvent");
+        let diag_val: serde_json::Value =
+            serde_json::from_str(&diag_json).expect("must parse DiagnosticEvent JSON");
+        assert_eq!(diag_val["stage"], "srt_inspection");
+        assert_eq!(diag_val["destination_socket_id"], 0x2A);
+        assert_eq!(diag_val["srt_timestamp"], 123_456);
+        assert_eq!(diag_val["srt_packet_kind"], "data");
+        assert!(diag_val["srt_inspection"].is_object());
+        assert!(diag_val["srt_metadata"].is_object());
+    }
+
+    #[test]
+    fn test_emitting_srt_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
+        let clock = Arc::new(ManualClock::new(100, 200));
+        let buffer = DiagnosticBuffer::with_clock(2, clock);
+        assert_eq!(buffer.capacity(), 2);
+
+        // Fill buffer to capacity
+        let ev1 = buffer.create_event("s1", DiagnosticStage::Received, TransportType::Udp, 100);
+        let ev2 = buffer.create_event("s1", DiagnosticStage::Accepted, TransportType::Udp, 100);
+        assert!(buffer.emit(ev1));
+        assert!(buffer.emit(ev2));
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.dropped_count(), 0);
+
+        // Emit SrtInspection into the full buffer
+        let srt_ev = SrtInspection::new(0x2A, 123_456, SrtPacketKind::Data);
+
+        // This must drop without blocking or panicking
+        let emitted = buffer.emit(srt_ev);
+        assert!(emitted);
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(
+            buffer.dropped_count(),
+            1,
+            "emitting into full buffer must increment dropped_count"
+        );
+
+        // Verify in snapshot that the oldest was dropped and buffer contains the SRT inspection
+        let snap = buffer.snapshot();
+        assert_eq!(snap.dropped_count, 1);
+        assert_eq!(snap.events.len(), 2);
+        assert_eq!(snap.events[1].stage, DiagnosticStage::SrtInspection);
+        assert_eq!(snap.events[1].destination_socket_id, Some(0x2A));
+        assert_eq!(snap.events[1].srt_timestamp, Some(123_456));
+        assert_eq!(snap.events[1].srt_packet_kind, Some(SrtPacketKind::Data));
+
+        // Also test with capacity 0 buffer
+        let zero_buf = DiagnosticBuffer::new(0);
+        let srt_ev2 = SrtInspection::new(0x2B, 654_321, SrtPacketKind::Control);
+        let zero_emitted = zero_buf.emit(srt_ev2);
         assert!(!zero_emitted);
         assert_eq!(zero_buf.dropped_count(), 1);
     }

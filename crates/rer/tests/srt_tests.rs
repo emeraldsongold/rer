@@ -503,3 +503,163 @@ fn test_evaluate_valid_packets() {
     let hs_pkt = hs.to_packet_bytes(500, 0);
     assert_eq!(evaluate_payload(&hs_pkt), SrtParseStatus::Valid);
 }
+
+#[test]
+fn test_deserializing_config_yaml_without_srt_defaults_to_none_and_preserves_inspection() {
+    let yaml = r#"
+version: "1"
+instances:
+  - id: "node1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+        inspection:
+          hex: true
+          max_preview_bytes: 32
+"#;
+    let config = rer::config::Config::from_yaml_str(yaml).expect("parse valid config");
+    let stream = &config.all_instances()[0].streams[0];
+    let insp = stream.inspection.as_ref().expect("inspection present");
+    assert!(insp.hex_preview);
+    assert_eq!(insp.max_preview_bytes, 32);
+    assert!(insp.srt.is_none(), "srt must default to None when omitted");
+}
+
+#[test]
+fn test_rer_validate_srt_max_inspect_bytes_zero_returns_validation_error() {
+    let yaml = r#"
+version: "1"
+instances:
+  - id: "node-srt"
+    streams:
+      - id: "srt-stream"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:10000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:10001"
+        inspection:
+          srt:
+            max_inspect_bytes: 0
+"#;
+    let config = rer::config::Config::from_yaml_str(yaml).expect("parse YAML");
+    let errors = config.validate();
+    assert!(
+        errors.iter().any(|e| {
+            e.path.contains("inspection.srt.max_inspect_bytes")
+                && e.reason.contains("invalid inspection size limit")
+        }),
+        "Expected validation error for invalid inspection size limit: {:?}",
+        errors
+    );
+
+    // Also verify via CLI `rer validate`
+    let temp_file = std::env::temp_dir().join(format!("test_srt_zero_{}.yaml", std::process::id()));
+    std::fs::write(&temp_file, yaml).expect("write temp config");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rer"))
+        .arg("validate")
+        .arg(&temp_file)
+        .output()
+        .expect("run rer validate");
+    let _ = std::fs::remove_file(&temp_file);
+
+    assert!(
+        !output.status.success(),
+        "rer validate must exit non-zero for invalid inspection size limit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid inspection size limit") || stderr.contains("max_inspect_bytes"),
+        "stderr must report invalid inspection size limit: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_srt_inspection_diagnostic_event_serializes_structured_metadata() {
+    let event = rer::diagnostics::SrtInspection::new(0x2A, 123_456, SrtPacketKind::Data);
+
+    let json_str = serde_json::to_string(&event).expect("serialize SrtInspection");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("parse JSON");
+
+    assert_eq!(val["destination_socket_id"], 0x2A);
+    assert_eq!(val["timestamp"], 123_456);
+    assert_eq!(val["packet_kind"], "data");
+
+    // Check structured SRT metadata representation
+    assert!(
+        val["srt_metadata"].is_object(),
+        "must contain structured SRT metadata"
+    );
+    assert_eq!(val["srt_metadata"]["destination_socket_id"], 0x2A);
+    assert_eq!(val["srt_metadata"]["timestamp_us"], 123_456);
+    assert_eq!(val["srt_metadata"]["packet_kind"], "data");
+
+    // Also verify when converted to DiagnosticEvent
+    let diag_ev: rer::diagnostics::DiagnosticEvent = event.into();
+    let diag_json = serde_json::to_string(&diag_ev).expect("serialize DiagnosticEvent");
+    let diag_val: serde_json::Value = serde_json::from_str(&diag_json).expect("parse JSON");
+    assert_eq!(diag_val["stage"], "srt_inspection");
+    assert_eq!(diag_val["destination_socket_id"], 0x2A);
+    assert_eq!(diag_val["srt_timestamp"], 123_456);
+    assert_eq!(diag_val["srt_packet_kind"], "data");
+    assert!(diag_val["srt_inspection"].is_object());
+    assert!(diag_val["srt_metadata"].is_object());
+}
+
+#[test]
+fn test_srt_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
+    let clock = std::sync::Arc::new(rer::diagnostics::ManualClock::new(1000, 2000));
+    let buffer = rer::diagnostics::DiagnosticBuffer::with_clock(2, clock);
+    assert_eq!(buffer.capacity(), 2);
+
+    // Fill buffer
+    let ev1 = buffer.create_event(
+        "s1",
+        rer::diagnostics::DiagnosticStage::Received,
+        rer::config::TransportType::Udp,
+        100,
+    );
+    let ev2 = buffer.create_event(
+        "s1",
+        rer::diagnostics::DiagnosticStage::Accepted,
+        rer::config::TransportType::Udp,
+        100,
+    );
+    assert!(buffer.emit(ev1));
+    assert!(buffer.emit(ev2));
+    assert_eq!(buffer.len(), 2);
+    assert_eq!(buffer.dropped_count(), 0);
+
+    // Emit SrtInspection into the full buffer
+    let srt_ev = rer::diagnostics::SrtInspection::new(0x2A, 123_456, SrtPacketKind::Data);
+
+    let emitted = buffer.emit(srt_ev);
+    assert!(
+        emitted,
+        "non-blocking emit into full buffer succeeds by dropping oldest"
+    );
+    assert_eq!(buffer.len(), 2);
+    assert_eq!(
+        buffer.dropped_count(),
+        1,
+        "emitting into full buffer must increment dropped count"
+    );
+
+    let snap = buffer.snapshot();
+    assert_eq!(snap.dropped_count, 1);
+    assert_eq!(
+        snap.events[1].stage,
+        rer::diagnostics::DiagnosticStage::SrtInspection
+    );
+    assert_eq!(snap.events[1].destination_socket_id, Some(0x2A));
+    assert_eq!(snap.events[1].srt_timestamp, Some(123_456));
+    assert_eq!(snap.events[1].srt_packet_kind, Some(SrtPacketKind::Data));
+}
