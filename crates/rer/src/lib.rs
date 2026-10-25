@@ -18,6 +18,7 @@ pub mod replay;
 pub mod secret;
 pub mod signals;
 pub mod sim;
+pub mod srt;
 
 pub use bpv7::{
     compute_crc16_x25, compute_crc32c, evaluate_bpv7_payload, evaluate_bundle_header,
@@ -91,6 +92,21 @@ pub use sim::{
     OutageSchedule, OutageWindow, Packet, QueueStabilityReport, ReceiverReport, RelayHopConfig,
     ReorderedPacket, SimulatedChannel, SimulationHarness, StabilitySample, TestController,
     TestOutcome, TestReceiver, TopologyConfig, TopologyHarness, TopologyReport, TrafficGenerator,
+};
+pub use srt::{
+    encode_control_header, encode_data_header, evaluate_header, evaluate_srt_header,
+    evaluate_srt_payload, parse_control_header, parse_control_packet, parse_data_header,
+    parse_data_packet, parse_handshake, parse_handshake_control, parse_header, parse_packet,
+    parse_srt_control_packet, parse_srt_data_packet, parse_srt_handshake, parse_srt_header,
+    parse_srt_packet, PacketPosition, SrtControlHeader, SrtControlPacket, SrtControlType,
+    SrtDataHeader, SrtDataPacket, SrtHandshake, SrtHandshakeControl, SrtHandshakePacket,
+    SrtHandshakeType, SrtHeader, SrtPacket, SrtPacketKind, SrtPacketType, SrtParseError,
+    SrtParseStatus, SRT_CMD_ACK, SRT_CMD_ACKACK, SRT_CMD_CONGESTION, SRT_CMD_DROPREQ,
+    SRT_CMD_HANDSHAKE, SRT_CMD_HSREQ, SRT_CMD_HSRSP, SRT_CMD_KEEPALIVE, SRT_CMD_KMREQ,
+    SRT_CMD_KMRSP, SRT_CMD_NAK, SRT_CMD_PEERERROR, SRT_CMD_SHUTDOWN, SRT_CMD_SID, SRT_CMD_USER,
+    SRT_HANDSHAKE_MIN_LEN, SRT_HANDSHAKE_PAYLOAD_LEN, SRT_HEADER_LEN, SRT_HS_AGREEMENT,
+    SRT_HS_CONCLUSION, SRT_HS_DONE, SRT_HS_INDUCTION, SRT_HS_WAVEAHAND, SRT_VERSION_5,
+    UDT_VERSION_4,
 };
 
 /// Returns the current version of RER.
