@@ -363,8 +363,20 @@ instances:
             .expect("send datagram");
     }
 
-    // Give relay a moment to attempt connection, fail, and enter backoff
-    thread::sleep(Duration::from_millis(100));
+    // Wait for relay to detect outage and record destination error
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while relay
+        .stream_stats("s-reconnect")
+        .map(|s| s.destination_errors)
+        .unwrap_or(0)
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for relay to detect destination outage at startup"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 
     let stats_before = relay.stream_stats("s-reconnect").expect("stats");
     assert!(
