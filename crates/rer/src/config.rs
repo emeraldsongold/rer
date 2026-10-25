@@ -472,6 +472,10 @@ pub struct InspectionConfig {
     /// Optional LTP passive segment inspection configuration (SPEC §14, §8). Defaults to None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ltp: Option<LtpInspectionConfig>,
+
+    /// Optional SRT passive inspection configuration (SPEC §14, §8). Defaults to None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt: Option<SrtInspectionConfig>,
 }
 
 pub fn default_max_preview_bytes() -> usize {
@@ -539,6 +543,41 @@ impl Default for LtpInspectionConfig {
     }
 }
 
+pub fn default_srt_max_inspect_bytes() -> usize {
+    512
+}
+
+/// Opt-in SRT passive inspection configuration (SPEC §14, §8).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SrtInspectionConfig {
+    /// Whether SRT inspection is enabled. Defaults to true when srt section is present.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of bytes to inspect for SRT headers and extensions. Defaults to 512.
+    #[serde(
+        default = "default_srt_max_inspect_bytes",
+        alias = "max_bytes",
+        alias = "max_inspect"
+    )]
+    pub max_inspect_bytes: usize,
+
+    /// Whether to extract Stream ID (SID) strings from handshake extension records. Defaults to true.
+    #[serde(default = "default_true")]
+    pub extract_stream_id: bool,
+}
+
+impl Default for SrtInspectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_inspect_bytes: default_srt_max_inspect_bytes(),
+            extract_stream_id: true,
+        }
+    }
+}
+
 impl Default for SequenceConfig {
     fn default() -> Self {
         Self {
@@ -562,6 +601,7 @@ impl Default for InspectionConfig {
             max_preview_bytes: 64,
             bpv7: None,
             ltp: None,
+            srt: None,
         }
     }
 }
@@ -1037,6 +1077,14 @@ impl Config {
                         if ltp.max_inspect_bytes == 0 {
                             errors.push(ValidationError {
                                 path: format!("{}.inspection.ltp.max_inspect_bytes", stream_prefix),
+                                reason: "invalid inspection size limit: max_inspect_bytes must be greater than 0".to_string(),
+                            });
+                        }
+                    }
+                    if let Some(ref srt) = insp.srt {
+                        if srt.max_inspect_bytes == 0 {
+                            errors.push(ValidationError {
+                                path: format!("{}.inspection.srt.max_inspect_bytes", stream_prefix),
                                 reason: "invalid inspection size limit: max_inspect_bytes must be greater than 0".to_string(),
                             });
                         }
