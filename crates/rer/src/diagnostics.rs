@@ -1260,6 +1260,9 @@ impl From<SrtInspection> for DiagnosticEvent {
         event.srt_control_type = insp.control_type;
         event.srt_parse_status = insp.parse_status;
         event.srt_sequence_number = insp.sequence_number;
+        if let Some(seq) = insp.sequence_number {
+            event.sequence_number = Some(seq as u64);
+        }
         event.srt_metadata = insp.srt_metadata.clone();
         event.srt_inspection = Some(insp);
         event
@@ -1757,6 +1760,9 @@ impl DiagnosticEvent {
         self.srt_control_type = inspection.control_type;
         self.srt_parse_status = inspection.parse_status;
         self.srt_sequence_number = inspection.sequence_number;
+        if let Some(seq) = inspection.sequence_number {
+            self.sequence_number = Some(seq as u64);
+        }
         if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
             self.stage = DiagnosticStage::SrtInspection;
         }

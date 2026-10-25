@@ -663,3 +663,402 @@ fn test_srt_inspection_into_full_buffer_drops_without_blocking_or_panicking() {
     assert_eq!(snap.events[1].srt_timestamp, Some(123_456));
     assert_eq!(snap.events[1].srt_packet_kind, Some(SrtPacketKind::Data));
 }
+
+fn pick_unused_port() -> u16 {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral socket");
+    let port = socket.local_addr().expect("local addr").port();
+    drop(socket);
+    port
+}
+
+fn sample_valid_srt_data_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
+    let hdr = encode_data_header(
+        seq,
+        PacketPosition::Single,
+        true,
+        0,
+        false,
+        1,
+        123_456,
+        1001,
+    );
+    let mut pkt = Vec::with_capacity(SRT_HEADER_LEN + payload.len());
+    pkt.extend_from_slice(&hdr);
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+#[test]
+fn test_criterion1_and_2_udp_forwarding_valid_srt_data_packet_sends_exact_bytes_and_records_srt_inspection(
+) {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = receiver.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "srt-relay-test"
+    streams:
+      - id: "s-srt-udp"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          srt:
+            enabled: true
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = rer::relay::Relay::start(&config).expect("start relay");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    let srt_packet = sample_valid_srt_data_packet(42, b"hello SRT live video payload 12345");
+
+    sender
+        .send_to(&srt_packet, format!("127.0.0.1:{listen_port}"))
+        .expect("send srt packet");
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = receiver.recv_from(&mut buf).expect("receive srt packet");
+
+    // Acceptance criterion 1: sends exact datagram payload bytes unmodified to destination sockets
+    assert_eq!(
+        &buf[..n],
+        &srt_packet[..],
+        "forwarded UDP datagram payload bytes must match byte-identically"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let srt_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == rer::diagnostics::DiagnosticStage::SrtInspection)
+        .collect();
+
+    // Acceptance criterion 2: records an SrtInspection diagnostic event with extracted sequence number
+    assert_eq!(
+        srt_events.len(),
+        1,
+        "expected exactly 1 SrtInspection event"
+    );
+    let ev = srt_events[0];
+    assert_eq!(ev.stage, rer::diagnostics::DiagnosticStage::SrtInspection);
+    assert_eq!(ev.srt_sequence_number, Some(42));
+    assert_eq!(ev.sequence_number, Some(42));
+    assert_eq!(ev.destination_socket_id, Some(1001));
+    assert_eq!(ev.srt_packet_kind, Some(SrtPacketKind::Data));
+    assert_eq!(ev.srt_parse_status, Some(SrtParseStatus::Valid));
+    assert_eq!(ev.payload_length, srt_packet.len() as u64);
+
+    let insp = ev
+        .srt_inspection
+        .as_ref()
+        .expect("srt_inspection structured metadata present");
+    assert_eq!(insp.sequence_number, Some(42));
+    assert_eq!(insp.destination_socket_id, 1001);
+    assert_eq!(insp.packet_kind, SrtPacketKind::Data);
+    assert_eq!(insp.parse_status, Some(SrtParseStatus::Valid));
+
+    relay.stop();
+}
+
+#[test]
+fn test_criterion3_udp_forwarding_non_srt_or_truncated_datagrams_forwards_unmodified_and_records_unparsed_event(
+) {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = receiver.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "srt-unparsed-test"
+    streams:
+      - id: "s-unparsed"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        inspection:
+          srt:
+            enabled: true
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = rer::relay::Relay::start(&config).expect("start relay");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    let mut buf = vec![0u8; 4096];
+
+    // 1. Non-SRT traffic (HTTP GET header)
+    let non_srt_data = b"GET /live/stream HTTP/1.1\r\nHost: example.org\r\n\r\n";
+    sender
+        .send_to(non_srt_data, format!("127.0.0.1:{listen_port}"))
+        .expect("send non-srt");
+
+    let (n1, _) = receiver.recv_from(&mut buf).expect("recv non-srt");
+    assert_eq!(
+        &buf[..n1],
+        non_srt_data,
+        "non-SRT payload must be forwarded unmodified"
+    );
+
+    // 2. Truncated datagram (< 16 bytes)
+    let truncated_data = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+    sender
+        .send_to(&truncated_data, format!("127.0.0.1:{listen_port}"))
+        .expect("send truncated");
+
+    let (n2, _) = receiver.recv_from(&mut buf).expect("recv truncated");
+    assert_eq!(
+        &buf[..n2],
+        &truncated_data[..],
+        "truncated payload must be forwarded unmodified"
+    );
+
+    // 3. Malformed SRT data packet (reserved encryption flag 0b11)
+    let mut malformed_srt = sample_valid_srt_data_packet(10, b"malformed encryption");
+    malformed_srt[4] = 0x18; // KK = 0b11
+    sender
+        .send_to(&malformed_srt, format!("127.0.0.1:{listen_port}"))
+        .expect("send malformed srt");
+
+    let (n3, _) = receiver.recv_from(&mut buf).expect("recv malformed srt");
+    assert_eq!(
+        &buf[..n3],
+        &malformed_srt[..],
+        "malformed SRT payload must be forwarded unmodified"
+    );
+
+    // 4. Valid SRT packet right after unparsed traffic to prove relay operation was NOT interrupted
+    let valid_srt = sample_valid_srt_data_packet(999, b"valid SRT packet after unparsed traffic");
+    sender
+        .send_to(&valid_srt, format!("127.0.0.1:{listen_port}"))
+        .expect("send valid srt");
+
+    let (n4, _) = receiver.recv_from(&mut buf).expect("recv valid srt");
+    assert_eq!(
+        &buf[..n4],
+        &valid_srt[..],
+        "valid SRT packet must be forwarded unmodified"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let srt_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| e.stage == rer::diagnostics::DiagnosticStage::SrtInspection)
+        .collect();
+
+    // Acceptance criterion 3: records diagnostic events indicating unparsed traffic without interrupting relay
+    assert_eq!(srt_events.len(), 4, "expected 4 inspection events");
+
+    // Event 0: non-SRT traffic
+    assert_eq!(
+        srt_events[0].stage,
+        rer::diagnostics::DiagnosticStage::SrtInspection
+    );
+    assert!(
+        srt_events[0]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("unparsed traffic"),
+        "event 0 must indicate unparsed traffic"
+    );
+    assert!(
+        srt_events[0]
+            .srt_parse_status
+            .expect("status present")
+            .is_not_srt()
+            || srt_events[0].srt_parse_status.unwrap().is_malformed()
+    );
+    assert_eq!(srt_events[0].srt_sequence_number, None);
+
+    // Event 1: truncated datagram
+    assert!(
+        srt_events[1]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("unparsed traffic"),
+        "event 1 must indicate unparsed traffic"
+    );
+    assert_eq!(
+        srt_events[1].srt_parse_status,
+        Some(SrtParseStatus::Truncated)
+    );
+    assert_eq!(srt_events[1].srt_sequence_number, None);
+
+    // Event 2: malformed SRT packet
+    assert!(
+        srt_events[2]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("unparsed traffic"),
+        "event 2 must indicate unparsed traffic"
+    );
+    assert_eq!(
+        srt_events[2].srt_parse_status,
+        Some(SrtParseStatus::MalformedSrt)
+    );
+    assert_eq!(srt_events[2].srt_sequence_number, None);
+
+    // Event 3: valid SRT packet following unparsed traffic
+    assert_eq!(srt_events[3].srt_parse_status, Some(SrtParseStatus::Valid));
+    assert_eq!(srt_events[3].srt_sequence_number, Some(999));
+    assert_eq!(srt_events[3].sequence_number, Some(999));
+
+    relay.stop();
+}
+
+#[test]
+fn test_criterion4_udp_stream_without_srt_configured_forwards_without_srt_inspection_events() {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set timeout");
+    let dest_port = receiver.local_addr().expect("dest addr").port();
+    let listen_port = pick_unused_port();
+
+    let yaml = format!(
+        r#"
+version: "1"
+instances:
+  - id: "no-srt-test"
+    streams:
+      - id: "s-unconfigured"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+"#
+    );
+
+    let config = rer::config::Config::from_yaml_str(&yaml).expect("valid config");
+    let relay = rer::relay::Relay::start(&config).expect("start relay");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    let srt_bytes = sample_valid_srt_data_packet(1234, b"srt data on unconfigured stream");
+
+    sender
+        .send_to(&srt_bytes, format!("127.0.0.1:{listen_port}"))
+        .expect("send valid srt");
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = receiver.recv_from(&mut buf).expect("receive packet");
+
+    // Acceptance criterion 4: forwards datagrams byte-identically
+    assert_eq!(
+        &buf[..n],
+        &srt_bytes[..],
+        "forwarded UDP datagram payload bytes must match byte-identically"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let snap = relay.event_buffer().snapshot();
+    let srt_events: Vec<_> = snap
+        .events
+        .iter()
+        .filter(|e| {
+            e.stage == rer::diagnostics::DiagnosticStage::SrtInspection
+                || e.srt_inspection.is_some()
+        })
+        .collect();
+
+    // Acceptance criterion 4: without emitting SrtInspection diagnostic events
+    assert!(
+        srt_events.is_empty(),
+        "unconfigured stream must not emit SrtInspection events: {srt_events:?}"
+    );
+
+    relay.stop();
+}
+
+#[test]
+fn test_criterion5_configuration_doc_specifies_srt_passive_metadata_inspection() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let doc_path = std::path::Path::new(manifest_dir)
+        .parent()
+        .expect("crates")
+        .parent()
+        .expect("repo root")
+        .join("docs")
+        .join("CONFIGURATION.md");
+
+    let doc = std::fs::read_to_string(&doc_path).expect("read docs/CONFIGURATION.md");
+
+    // Acceptance criterion 5: documentation for stream option inspection specifies that SRT support
+    // performs passive metadata inspection without stream termination, encryption management, or retransmission recovery
+    assert!(
+        doc.contains("stream.inspection.srt") || doc.contains("inspection.srt"),
+        "docs/CONFIGURATION.md must document stream option inspection for SRT"
+    );
+    assert!(
+        doc.contains(
+            "passive metadata inspection without stream termination, encryption management, or retransmission recovery"
+        ),
+        "docs/CONFIGURATION.md must specify passive metadata inspection without stream termination, encryption management, or retransmission recovery"
+    );
+}
+
+#[test]
+fn test_impairment_harness_with_srt_traffic_under_loss_reordering_jitter() {
+    use rer::sim::channel::{ImpairmentConfig, SimulatedChannel};
+    use rer::sim::packet::Packet;
+
+    let impairment = ImpairmentConfig {
+        seed: 42,
+        loss_rate: 0.10,
+        reorder_rate: 0.20,
+        delay_ms: 10,
+        jitter_ms: 5,
+        ..Default::default()
+    };
+
+    let mut channel = SimulatedChannel::new(impairment);
+
+    let count = 50;
+    let mut input_packets = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let pkt_bytes =
+            sample_valid_srt_data_packet(i, &format!("impairment test packet {i}").into_bytes());
+        let pkt = Packet::new(format!("srt-{i}"), i as u64, i as u64 * 1000, pkt_bytes);
+        input_packets.push(pkt);
+    }
+
+    let out_packets = channel.apply(input_packets);
+    // Under 10% loss, some packets should be received
+    assert!(
+        !out_packets.is_empty(),
+        "some packets must be received through impaired channel"
+    );
+    assert!(
+        out_packets.len() <= count as usize,
+        "cannot receive more than transmitted"
+    );
+}

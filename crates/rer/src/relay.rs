@@ -12,14 +12,16 @@ use crate::bpv7::{evaluate_bundle_header, BundleParseStatus};
 use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequenceTracker};
 use crate::config::{
     Bpv7InspectionConfig, CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig,
-    FramingMode, InstanceConfig, LtpInspectionConfig, OperationalMode, StreamConfig, TransportType,
+    FramingMode, InstanceConfig, LtpInspectionConfig, OperationalMode, SrtInspectionConfig,
+    StreamConfig, TransportType,
 };
 use crate::diagnostics::{
     BundleInspection, DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState,
-    LtpInspection, SequenceState, SequenceTracker, SequenceTrackingEvent,
+    LtpInspection, SequenceState, SequenceTracker, SequenceTrackingEvent, SrtInspection,
 };
 use crate::framing;
 use crate::ltp::{evaluate_segment_header, LtpParseStatus, SegmentType};
+use crate::srt::{evaluate_srt_header, SrtParseStatus};
 
 /// Default maximum queue size (packets) when not explicitly configured.
 pub const DEFAULT_MAX_QUEUE_SIZE: usize = 1024;
@@ -1159,6 +1161,107 @@ fn process_ltp_ingress(payload: &[u8], ctx: &LtpIngressContext<'_>) -> Extracted
     extracted
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SrtIngressContext<'a> {
+    srt_cfg: Option<&'a SrtInspectionConfig>,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
+    transport: TransportType,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExtractedSrt {
+    sequence_number: Option<u32>,
+    status: Option<SrtParseStatus>,
+    inspection: Option<SrtInspection>,
+}
+
+fn process_srt_ingress(payload: &[u8], ctx: &SrtIngressContext<'_>) -> ExtractedSrt {
+    let SrtIngressContext {
+        srt_cfg,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+
+    let Some(srt_cfg) = srt_cfg else {
+        return ExtractedSrt::default();
+    };
+    if !srt_cfg.enabled {
+        return ExtractedSrt::default();
+    }
+
+    let max_bytes = srt_cfg.max_inspect_bytes;
+    let inspect_data = if max_bytes > 0 && payload.len() > max_bytes {
+        &payload[..max_bytes]
+    } else {
+        payload
+    };
+
+    let (status, maybe_header) = evaluate_srt_header(inspect_data);
+
+    let (ev, extracted) = match maybe_header {
+        Some(header) => {
+            let mut insp = SrtInspection::from_header(&header, status);
+            insp.stream_id = Some(stream_id.to_string());
+            insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+            insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+
+            if !srt_cfg.extract_stream_id {
+                insp.stream_id_extension = None;
+                if let Some(ref mut m) = insp.srt_metadata {
+                    m.stream_id = None;
+                }
+            }
+
+            let ext = ExtractedSrt {
+                sequence_number: header.sequence_number,
+                status: Some(status),
+                inspection: Some(insp.clone()),
+            };
+
+            let mut ev: DiagnosticEvent = insp.into();
+            ev.transport = transport;
+            ev.payload_length = payload.len() as u64;
+            ev.source_endpoint = Some(src_endpoint.to_string());
+            ev.destination_endpoint = Some(primary_dest.to_string());
+            if let Some(seq) = header.sequence_number {
+                ev.sequence_number = Some(seq as u64);
+            }
+            (ev, ext)
+        }
+        None => {
+            let ext = ExtractedSrt {
+                sequence_number: None,
+                status: Some(status),
+                inspection: None,
+            };
+
+            let mut ev = DiagnosticEvent::new(
+                event_buffer.clock().monotonic_nanos(),
+                event_buffer.clock().wall_clock_nanos(),
+                stream_id,
+                DiagnosticStage::SrtInspection,
+                transport,
+                payload.len() as u64,
+            );
+            ev.source_endpoint = Some(src_endpoint.to_string());
+            ev.destination_endpoint = Some(primary_dest.to_string());
+            ev.srt_parse_status = Some(status);
+            ev.reason = Some(format!("unparsed traffic: {status}"));
+            (ev, ext)
+        }
+    };
+
+    event_buffer.emit(ev);
+
+    extracted
+}
+
 /// Active forwarding runner for a single stream (UDP or TCP).
 pub struct StreamRunner {
     pub stream_id: String,
@@ -1325,6 +1428,7 @@ impl StreamRunner {
                 let recv_ccsds_config = stream.ccsds.clone();
                 let recv_bpv7_config = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let recv_ltp_config = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
+                let recv_srt_config = stream.inspection.as_ref().and_then(|i| i.srt.clone());
 
                 let recv_handle = thread::spawn(move || {
                     let mut buf = vec![0u8; 65536];
@@ -1380,6 +1484,18 @@ impl StreamRunner {
                                     },
                                 );
 
+                                let srt_info = process_srt_ingress(
+                                    payload_slice,
+                                    &SrtIngressContext {
+                                        srt_cfg: recv_srt_config.as_ref(),
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                );
+
                                 let (generic_seq, hex_prev, ascii_prev) = {
                                     let mut tracker = recv_seq_tracker.lock().unwrap();
                                     if tracker.is_enabled() {
@@ -1393,7 +1509,11 @@ impl StreamRunner {
                                     }
                                 };
 
-                                let extracted_seq = ccsds_info.seq.map(u64::from).or(generic_seq);
+                                let extracted_seq = ccsds_info
+                                    .seq
+                                    .map(u64::from)
+                                    .or(srt_info.sequence_number.map(u64::from))
+                                    .or(generic_seq);
                                 let extracted_apid = ccsds_info.apid;
                                 let extracted_ccsds_seq = ccsds_info.seq;
                                 let extracted_ccsds_flags = ccsds_info.flags;
@@ -1444,6 +1564,19 @@ impl StreamRunner {
                                     if let Some(ref li) = ltp_info.inspection {
                                         ev.ltp_inspection = Some(li.clone());
                                         ev.ltp_metadata = li.ltp_metadata.clone();
+                                    }
+                                    if let Some(status) = srt_info.status {
+                                        ev.srt_parse_status = Some(status);
+                                    }
+                                    if let Some(ref si) = srt_info.inspection {
+                                        ev.srt_inspection = Some(si.clone());
+                                        ev.srt_metadata = si.srt_metadata.clone();
+                                        ev.srt_packet_kind = Some(si.packet_kind);
+                                        ev.srt_packet_type = Some(si.packet_kind);
+                                        ev.srt_control_type = si.control_type;
+                                        ev.srt_sequence_number = si.sequence_number;
+                                        ev.srt_timestamp = Some(si.timestamp);
+                                        ev.srt_timestamp_us = Some(si.timestamp);
                                     }
                                     if let Some(ref h) = hex_prev {
                                         ev = ev.with_hex_preview(h);
@@ -1645,6 +1778,7 @@ impl StreamRunner {
                 let ccsds_config_for_tcp = stream.ccsds.clone();
                 let bpv7_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let ltp_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
+                let srt_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.srt.clone());
                 let recv_stream_id = stream_id.clone();
                 let recv_stats = Arc::clone(&stats);
                 let recv_shutdown = Arc::clone(&shutdown_flag);
@@ -1689,6 +1823,7 @@ impl StreamRunner {
                                         let cl_ccsds_config = ccsds_config_for_tcp.clone();
                                         let cl_bpv7_config = bpv7_config_for_tcp.clone();
                                         let cl_ltp_config = ltp_config_for_tcp.clone();
+                                        let cl_srt_config = srt_config_for_tcp.clone();
 
                                         let client_h = thread::spawn(move || {
                                             let src_endpoint = client_addr.to_string();
@@ -1752,6 +1887,18 @@ impl StreamRunner {
                                                             },
                                                         );
 
+                                                        let srt_info = process_srt_ingress(
+                                                            &payload,
+                                                            &SrtIngressContext {
+                                                                srt_cfg: cl_srt_config.as_ref(),
+                                                                event_buffer: &cl_event_buffer,
+                                                                stream_id: &cl_stream_id,
+                                                                src_endpoint: &src_endpoint,
+                                                                primary_dest: &cl_primary_dest,
+                                                                transport: TransportType::Tcp,
+                                                            },
+                                                        );
+
                                                         let (generic_seq, hex_prev, ascii_prev) = {
                                                             let mut tracker =
                                                                 cl_seq_tracker.lock().unwrap();
@@ -1773,6 +1920,9 @@ impl StreamRunner {
                                                         let extracted_seq = ccsds_info
                                                             .seq
                                                             .map(u64::from)
+                                                            .or(srt_info
+                                                                .sequence_number
+                                                                .map(u64::from))
                                                             .or(generic_seq);
                                                         let extracted_apid = ccsds_info.apid;
                                                         let extracted_ccsds_seq = ccsds_info.seq;
@@ -1825,6 +1975,19 @@ impl StreamRunner {
                                                             if let Some(ref li) = ltp_info.inspection {
                                                                 ev.ltp_inspection = Some(li.clone());
                                                                 ev.ltp_metadata = li.ltp_metadata.clone();
+                                                            }
+                                                            if let Some(status) = srt_info.status {
+                                                                ev.srt_parse_status = Some(status);
+                                                            }
+                                                            if let Some(ref si) = srt_info.inspection {
+                                                                ev.srt_inspection = Some(si.clone());
+                                                                ev.srt_metadata = si.srt_metadata.clone();
+                                                                ev.srt_packet_kind = Some(si.packet_kind);
+                                                                ev.srt_packet_type = Some(si.packet_kind);
+                                                                ev.srt_control_type = si.control_type;
+                                                                ev.srt_sequence_number = si.sequence_number;
+                                                                ev.srt_timestamp = Some(si.timestamp);
+                                                                ev.srt_timestamp_us = Some(si.timestamp);
                                                             }
                                                             if let Some(ref h) = hex_prev {
                                                                 ev = ev.with_hex_preview(h);
@@ -2113,6 +2276,7 @@ impl StreamRunner {
                         let conn_seq_tracker = Arc::clone(&recv_seq_tracker);
                         let conn_bpv7_config = bpv7_config_for_tcp.clone();
                         let conn_ltp_config = ltp_config_for_tcp.clone();
+                        let conn_srt_config = srt_config_for_tcp.clone();
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
@@ -2213,6 +2377,18 @@ impl StreamRunner {
                                                         },
                                                     );
 
+                                                    let srt_info = process_srt_ingress(
+                                                        &payload,
+                                                        &SrtIngressContext {
+                                                            srt_cfg: conn_srt_config.as_ref(),
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
+                                                    );
+
                                                     let (generic_seq, hex_prev, ascii_prev) = {
                                                         let mut tracker =
                                                             conn_seq_tracker.lock().unwrap();
@@ -2234,6 +2410,7 @@ impl StreamRunner {
                                                     let extracted_seq = ccsds_info
                                                         .seq
                                                         .map(u64::from)
+                                                        .or(srt_info.sequence_number.map(u64::from))
                                                         .or(generic_seq);
                                                     let extracted_apid = ccsds_info.apid;
                                                     let extracted_ccsds_seq = ccsds_info.seq;
@@ -2285,6 +2462,19 @@ impl StreamRunner {
                                                         if let Some(ref li) = ltp_info.inspection {
                                                             ev.ltp_inspection = Some(li.clone());
                                                             ev.ltp_metadata = li.ltp_metadata.clone();
+                                                        }
+                                                        if let Some(status) = srt_info.status {
+                                                            ev.srt_parse_status = Some(status);
+                                                        }
+                                                        if let Some(ref si) = srt_info.inspection {
+                                                            ev.srt_inspection = Some(si.clone());
+                                                            ev.srt_metadata = si.srt_metadata.clone();
+                                                            ev.srt_packet_kind = Some(si.packet_kind);
+                                                            ev.srt_packet_type = Some(si.packet_kind);
+                                                            ev.srt_control_type = si.control_type;
+                                                            ev.srt_sequence_number = si.sequence_number;
+                                                            ev.srt_timestamp = Some(si.timestamp);
+                                                            ev.srt_timestamp_us = Some(si.timestamp);
                                                         }
                                                         if let Some(ref h) = hex_prev {
                                                             ev = ev.with_hex_preview(h);
