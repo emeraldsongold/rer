@@ -44,7 +44,7 @@ fn test_criterion2_decode_varint_5_bytes_overflow() {
     let buf = [0x80, 0x80, 0x80, 0x80, 0x80];
     let err = decode_variable_byte_integer(&buf).expect_err("5 continuation bytes must overflow");
     assert_eq!(err, MqttParseError::VariableByteIntegerOverflow);
-    assert_eq!(err, MqttParseError::LengthOverflow);
+    assert_eq!(err, MqttParseError::LENGTH_OVERFLOW);
     assert!(err.is_length_overflow());
     assert!(err.is_varint_overflow());
     assert!(format!("{err}")
@@ -53,7 +53,7 @@ fn test_criterion2_decode_varint_5_bytes_overflow() {
 
     // Also verify decode_varint and decode_variable_length_integer aliases
     let err_alias = decode_varint(&buf).expect_err("alias must error");
-    assert_eq!(err_alias, MqttParseError::LengthOverflow);
+    assert_eq!(err_alias, MqttParseError::LENGTH_OVERFLOW);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn test_criterion3_connect_non_zero_flags_rejected() {
     let buf = [first_byte, 0x00];
     let err = parse_mqtt_fixed_header(&buf).expect_err("CONNECT with non-zero flags must error");
     assert_eq!(err, MqttParseError::InvalidFlags);
-    assert_eq!(err, MqttParseError::NonZeroFlags);
+    assert_eq!(err, MqttParseError::NON_ZERO_FLAGS);
     assert!(err.is_invalid_flags());
     assert!(err.is_non_zero_flags());
     assert!(format!("{err}")
@@ -128,7 +128,7 @@ fn test_criterion5_truncated_packet_data() {
     let err_varint = parse_mqtt_fixed_header(&buf_truncated_varint)
         .expect_err("truncated varint must return error");
     assert_eq!(err_varint, MqttParseError::TruncatedPacket);
-    assert_eq!(err_varint, MqttParseError::TruncatedPacketData);
+    assert_eq!(err_varint, MqttParseError::TRUNCATED_PACKET_DATA);
     assert!(err_varint.is_truncated());
     assert!(format!("{err_varint}")
         .to_lowercase()
@@ -167,7 +167,7 @@ fn test_criterion6_forbidden_packet_type_0() {
     let buf_zeros = [0x00, 0x00];
     let err = parse_mqtt_fixed_header(&buf_zeros).expect_err("packet type 0 must error");
     assert_eq!(err, MqttParseError::ForbiddenPacketType0);
-    assert_eq!(err, MqttParseError::ForbiddenPacketType);
+    assert_eq!(err, MqttParseError::FORBIDDEN_PACKET_TYPE);
     assert!(err.is_forbidden_packet_type());
     assert!(err.is_forbidden_packet_type_0());
     assert!(format!("{err}")

@@ -100,11 +100,6 @@ impl MqttPacketType {
     pub const DISCONNECT: Self = Self::Disconnect;
     pub const AUTH: Self = Self::Auth;
 
-    #[allow(non_upper_case_globals)]
-    pub const PingReq: Self = Self::Pingreq;
-    #[allow(non_upper_case_globals)]
-    pub const PingResp: Self = Self::Pingresp;
-
     /// Returns the raw 4-bit packet type code.
     #[must_use]
     pub const fn code(&self) -> u8 {
@@ -243,26 +238,16 @@ pub enum MqttParseError {
 
 impl MqttParseError {
     pub const TRUNCATED_PACKET: Self = Self::TruncatedPacket;
+    pub const TRUNCATED_PACKET_DATA: Self = Self::TruncatedPacket;
+    pub const TRUNCATED: Self = Self::TruncatedPacket;
+    pub const TRUNCATED_HEADER: Self = Self::TruncatedPacket;
     pub const FORBIDDEN_PACKET_TYPE_0: Self = Self::ForbiddenPacketType0;
+    pub const FORBIDDEN_PACKET_TYPE: Self = Self::ForbiddenPacketType0;
     pub const VARIABLE_BYTE_INTEGER_OVERFLOW: Self = Self::VariableByteIntegerOverflow;
     pub const LENGTH_OVERFLOW: Self = Self::VariableByteIntegerOverflow;
+    pub const VARINT_OVERFLOW: Self = Self::VariableByteIntegerOverflow;
     pub const INVALID_FLAGS: Self = Self::InvalidFlags;
     pub const NON_ZERO_FLAGS: Self = Self::InvalidFlags;
-
-    #[allow(non_upper_case_globals)]
-    pub const Truncated: Self = Self::TruncatedPacket;
-    #[allow(non_upper_case_globals)]
-    pub const TruncatedHeader: Self = Self::TruncatedPacket;
-    #[allow(non_upper_case_globals)]
-    pub const TruncatedPacketData: Self = Self::TruncatedPacket;
-    #[allow(non_upper_case_globals)]
-    pub const ForbiddenPacketType: Self = Self::ForbiddenPacketType0;
-    #[allow(non_upper_case_globals)]
-    pub const LengthOverflow: Self = Self::VariableByteIntegerOverflow;
-    #[allow(non_upper_case_globals)]
-    pub const VarintOverflow: Self = Self::VariableByteIntegerOverflow;
-    #[allow(non_upper_case_globals)]
-    pub const NonZeroFlags: Self = Self::InvalidFlags;
 
     /// Returns true if this error indicates truncated packet data.
     #[must_use]
@@ -769,7 +754,7 @@ mod tests {
         let buf = [0x80, 0x80, 0x80, 0x80, 0x80];
         let err = decode_variable_byte_integer(&buf).expect_err("5 continuation bytes must error");
         assert_eq!(err, MqttParseError::VariableByteIntegerOverflow);
-        assert_eq!(err, MqttParseError::LengthOverflow);
+        assert_eq!(err, MqttParseError::LENGTH_OVERFLOW);
         assert!(err.is_length_overflow());
         assert!(format!("{err}")
             .to_lowercase()
@@ -792,7 +777,7 @@ mod tests {
         let buf = [first_byte, 0x00];
         let err = parse_mqtt_fixed_header(&buf).expect_err("CONNECT with flags 0b0001 must error");
         assert_eq!(err, MqttParseError::InvalidFlags);
-        assert_eq!(err, MqttParseError::NonZeroFlags);
+        assert_eq!(err, MqttParseError::NON_ZERO_FLAGS);
         assert!(err.is_invalid_flags());
         assert!(err.is_non_zero_flags());
         assert!(format!("{err}")
