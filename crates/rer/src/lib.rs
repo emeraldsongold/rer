@@ -14,6 +14,7 @@ pub mod health;
 pub mod ltp;
 pub mod management;
 pub mod mavlink;
+pub mod mqtt;
 pub mod relay;
 pub mod replay;
 pub mod secret;
@@ -87,6 +88,19 @@ pub use mavlink::{
     MAVLINK_V2_FRAMING_OVERHEAD_SIGNED, MAVLINK_V2_FRAMING_OVERHEAD_UNSIGNED,
     MAVLINK_V2_HEADER_LEN, MAVLINK_V2_MIN_HEADER_LEN, MAVLINK_V2_OVERHEAD_SIGNED,
     MAVLINK_V2_OVERHEAD_UNSIGNED, MAVLINK_V2_STX,
+};
+pub use mqtt::{
+    decode_variable_byte_integer, decode_variable_length_integer, decode_varint,
+    encode_variable_byte_integer, encode_variable_byte_integer_vec, encode_varint,
+    evaluate_mqtt_header, evaluate_payload as evaluate_mqtt_payload, parse_fixed_header,
+    parse_mqtt_fixed_header, parse_mqtt_fixed_header_prefix, parse_mqtt_fixed_header_relaxed,
+    parse_mqtt_header, parse_mqtt_packet, validate_flags, MqttFixedHeader, MqttPacketType,
+    MqttParseError, MqttParseStatus, MQTT_MAX_FIXED_HEADER_LEN, MQTT_MAX_PACKET_SIZE,
+    MQTT_MAX_VARIABLE_BYTE_INTEGER, MQTT_MAX_VARINT_BYTES, MQTT_MIN_FIXED_HEADER_LEN,
+    MQTT_TYPE_AUTH, MQTT_TYPE_CONNACK, MQTT_TYPE_CONNECT, MQTT_TYPE_DISCONNECT, MQTT_TYPE_PINGREQ,
+    MQTT_TYPE_PINGRESP, MQTT_TYPE_PUBACK, MQTT_TYPE_PUBCOMP, MQTT_TYPE_PUBLISH, MQTT_TYPE_PUBREC,
+    MQTT_TYPE_PUBREL, MQTT_TYPE_SUBACK, MQTT_TYPE_SUBSCRIBE, MQTT_TYPE_UNSUBACK,
+    MQTT_TYPE_UNSUBSCRIBE,
 };
 pub use relay::{
     bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,
