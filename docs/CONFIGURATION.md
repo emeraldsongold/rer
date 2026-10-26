@@ -135,9 +135,9 @@ Configures parsing, validation, and sequence tracking for CCSDS Space Packets (C
 
 *Note: A configuration specifying both active CCSDS sequence tracking (`ccsds.track_sequences: true`) and generic sequence tracking (`sequence.enabled: true`) on the same stream is rejected by `rer validate` with a conflicting sequence tracking error.*
 
-### Packet Inspection and Protocol Inspection Configuration (`InspectionConfig`, `Bpv7InspectionConfig`, `LtpInspectionConfig`)
+### Packet Inspection and Protocol Inspection Configuration (`InspectionConfig`, `Bpv7InspectionConfig`, `LtpInspectionConfig`, `SrtInspectionConfig`)
 
-Configures optional packet inspection previews and passive protocol inspection for Bundle Protocol Version 7 (BPv7, RFC 9171) and Licklider Transmission Protocol (LTP, RFC 5326) (SPEC §14, §8).
+Configures optional packet inspection previews and passive protocol inspection for Bundle Protocol Version 7 (BPv7, RFC 9171), Licklider Transmission Protocol (LTP, RFC 5326), and Secure Reliable Transport (SRT, draft-sharabayko-srt) (SPEC §14, §8).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -146,6 +146,7 @@ Configures optional packet inspection previews and passive protocol inspection f
 | `max_preview_bytes` | integer | `64` | Maximum length in bytes for payload previews (length-bounded). |
 | `bpv7` | object | `null` | Optional passive BPv7 bundle inspection settings (`Bpv7InspectionConfig`). Disabled by default. |
 | `ltp` | object | `null` | Optional passive LTP segment inspection settings (`LtpInspectionConfig`). Disabled by default. |
+| `srt` | object | `null` | Optional passive SRT packet inspection settings (`SrtInspectionConfig`). Disabled by default. |
 
 #### BPv7 Passive Bundle Inspection (`Bpv7InspectionConfig`)
 
@@ -181,6 +182,24 @@ LTP support performs passive metadata inspection without session management, ret
 - **No Timer Handling**: RER does not manage countdown timers, compute one-way light times, or execute timer suspension/resumption during contact outages.
 - **Explicit Stream Configuration Required**: Inspection is strictly opt-in per stream (`stream.inspection.ltp`). RER does not automatically enable LTP inspection based merely on UDP port 1113 (`ltp-deepspace`). A stream on port 1113 without explicit inspection configuration forwards datagrams transparently without emitting LTP inspection events.
 - **Transparent and Non-Blocking**: Stream option inspection operates strictly in observation mode. Forwarded payload bytes are transmitted to destination sockets completely unmodified, and inspection diagnostics never block or stall forwarding threads. When an inspected stream receives non-LTP datagram traffic or malformed LTP segments, the relay forwards the payload unmodified and records a diagnostic event indicating unparsed traffic without interrupting relay operation.
+
+#### SRT Passive Packet Inspection (`SrtInspectionConfig`)
+
+When stream option inspection (`stream.inspection.srt`) is configured, RER performs passive inspection of Secure Reliable Transport (SRT) packet headers on incoming datagrams (draft-sharabayko-srt, SPEC §14, §8):
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enables passive SRT inspection when the `srt` section is present. |
+| `max_inspect_bytes` | integer | `512` | Maximum bytes of the payload to inspect for SRT headers and extensions (must be > 0). |
+| `extract_stream_id` | boolean | `true` | Extracts Stream ID (SID) strings from handshake extension records. |
+
+**Scope and Non-Claims:**
+SRT support performs passive metadata inspection without stream termination, encryption management, or retransmission recovery:
+- **No Stream Termination**: RER does not act as an SRT caller, listener, or rendezvous endpoint, negotiate handshakes, maintain connection states, or terminate SRT connections.
+- **No Encryption Management**: RER does not manage keys, process Key Material (KM) extension blocks, derive secrets from passphrases, or decrypt payloads. Encrypted packet payloads remain intact ciphertext.
+- **No Retransmission Recovery**: RER does not maintain packet loss lists, schedule ARQ periodic or immediate NAKs, generate ACKs/ACKACKs, or buffer packets for retransmission.
+- **Explicit Stream Configuration Required**: Inspection is strictly opt-in per stream (`stream.inspection.srt`). A UDP stream without option srt configured forwards datagrams byte-identically without emitting SrtInspection diagnostic events.
+- **Transparent and Non-Blocking**: Stream option inspection operates strictly in observation mode. Forwarded UDP datagram payload bytes are transmitted to destination sockets completely unmodified, and inspection diagnostics never block or stall forwarding threads. When an inspected stream receives non-SRT or truncated datagrams, the relay forwards the payload unmodified and records a diagnostic event indicating unparsed traffic without interrupting relay operation.
 
 ### Endpoint Configuration (`EndpointConfig`)
 
