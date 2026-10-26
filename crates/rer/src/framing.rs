@@ -707,14 +707,17 @@ mod tests {
         // Mavlink mode
         let mavlink_pkt = make_test_mavlink1_packet(1, 10, 20, 30, b"hello mavlink mode");
         let mut mavlink_buf = Vec::new();
-        write_frame_with_mode(&mut mavlink_buf, FramingMode::Mavlink, &mavlink_pkt).unwrap();
+        assert!(
+            write_frame_with_mode(&mut mavlink_buf, FramingMode::Mavlink, &mavlink_pkt).is_ok()
+        );
         assert_eq!(mavlink_buf, mavlink_pkt); // Raw packet bytes, no 4-byte prefix
         let mut mavlink_cursor = Cursor::new(mavlink_buf);
         let decoded_mavlink =
-            read_frame_with_mode(&mut mavlink_cursor, FramingMode::Mavlink, 1024, &shutdown)
-                .unwrap()
-                .unwrap();
-        assert_eq!(decoded_mavlink, mavlink_pkt);
+            read_frame_with_mode(&mut mavlink_cursor, FramingMode::Mavlink, 1024, &shutdown);
+        assert!(matches!(
+            decoded_mavlink,
+            Ok(Some(ref pkt)) if pkt == &mavlink_pkt
+        ));
     }
 
     fn make_test_mavlink1_packet(
@@ -772,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn test_criterion1_mavlink1_and_mavlink2_fragmented_one_byte_reads() {
+    fn test_criterion1_mavlink1_and_mavlink2_fragmented_one_byte_reads() -> io::Result<()> {
         // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
         // delivering a MAVLink 1 or MAVLink 2 frame fragmented across multiple 1-byte reads
         // reassembles the complete frame matching the original transmitted bytes.
@@ -785,10 +788,8 @@ mod tests {
             inner: cursor_v1,
             chunk_size: 1, // Deliver exactly 1 byte per read() call
         };
-        let decoded_v1 = read_mavlink_frame(&mut chunked_v1, 1024, &shutdown)
-            .expect("read chunked mavlink 1")
-            .expect("payload");
-        assert_eq!(decoded_v1, v1_pkt);
+        let decoded_v1 = read_mavlink_frame(&mut chunked_v1, 1024, &shutdown)?;
+        assert_eq!(decoded_v1.as_deref(), Some(v1_pkt.as_slice()));
 
         // MAVLink 2 unsigned fragmented
         let v2_unsigned =
@@ -798,10 +799,8 @@ mod tests {
             inner: cursor_v2_u,
             chunk_size: 1,
         };
-        let decoded_v2_u = read_mavlink_frame(&mut chunked_v2_u, 1024, &shutdown)
-            .expect("read chunked mavlink 2 unsigned")
-            .expect("payload");
-        assert_eq!(decoded_v2_u, v2_unsigned);
+        let decoded_v2_u = read_mavlink_frame(&mut chunked_v2_u, 1024, &shutdown)?;
+        assert_eq!(decoded_v2_u.as_deref(), Some(v2_unsigned.as_slice()));
 
         // MAVLink 2 signed fragmented
         let v2_signed = make_test_mavlink2_packet(
@@ -817,14 +816,13 @@ mod tests {
             inner: cursor_v2_s,
             chunk_size: 1,
         };
-        let decoded_v2_s = read_mavlink_frame(&mut chunked_v2_s, 1024, &shutdown)
-            .expect("read chunked mavlink 2 signed")
-            .expect("payload");
-        assert_eq!(decoded_v2_s, v2_signed);
+        let decoded_v2_s = read_mavlink_frame(&mut chunked_v2_s, 1024, &shutdown)?;
+        assert_eq!(decoded_v2_s.as_deref(), Some(v2_signed.as_slice()));
+        Ok(())
     }
 
     #[test]
-    fn test_criterion2_concatenated_mavlink_frames_in_single_read_buffer() {
+    fn test_criterion2_concatenated_mavlink_frames_in_single_read_buffer() -> io::Result<()> {
         // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
         // delivering two concatenated MAVLink frames in a single read buffer yields
         // the two frames individually at their calculated frame length boundaries.
@@ -839,16 +837,12 @@ mod tests {
         let mut cursor = Cursor::new(stream_bytes);
         let shutdown = AtomicBool::new(false);
 
-        let r1 = read_mavlink_frame(&mut cursor, 1024, &shutdown)
-            .unwrap()
-            .unwrap();
-        let r2 = read_mavlink_frame(&mut cursor, 1024, &shutdown)
-            .unwrap()
-            .unwrap();
-        let r3 = read_mavlink_frame(&mut cursor, 1024, &shutdown).unwrap();
+        let r1 = read_mavlink_frame(&mut cursor, 1024, &shutdown)?;
+        let r2 = read_mavlink_frame(&mut cursor, 1024, &shutdown)?;
+        let r3 = read_mavlink_frame(&mut cursor, 1024, &shutdown)?;
 
-        assert_eq!(r1, p1);
-        assert_eq!(r2, p2);
+        assert_eq!(r1.as_deref(), Some(p1.as_slice()));
+        assert_eq!(r2.as_deref(), Some(p2.as_slice()));
         assert!(r3.is_none());
 
         // Concatenated signed MAVLink 2 and unsigned MAVLink 2
@@ -860,17 +854,14 @@ mod tests {
         stream_signed.extend_from_slice(&ps2);
 
         let mut cursor2 = Cursor::new(stream_signed);
-        let s1 = read_mavlink_frame(&mut cursor2, 1024, &shutdown)
-            .unwrap()
-            .unwrap();
-        let s2 = read_mavlink_frame(&mut cursor2, 1024, &shutdown)
-            .unwrap()
-            .unwrap();
-        let s3 = read_mavlink_frame(&mut cursor2, 1024, &shutdown).unwrap();
+        let s1 = read_mavlink_frame(&mut cursor2, 1024, &shutdown)?;
+        let s2 = read_mavlink_frame(&mut cursor2, 1024, &shutdown)?;
+        let s3 = read_mavlink_frame(&mut cursor2, 1024, &shutdown)?;
 
-        assert_eq!(s1, ps1);
-        assert_eq!(s2, ps2);
+        assert_eq!(s1.as_deref(), Some(ps1.as_slice()));
+        assert_eq!(s2.as_deref(), Some(ps2.as_slice()));
         assert!(s3.is_none());
+        Ok(())
     }
 
     #[test]
@@ -883,35 +874,35 @@ mod tests {
         // MAVLink 1: payload length 100 -> total length 108. Max allowed 50.
         let v1_pkt = make_test_mavlink1_packet(1, 1, 1, 1, &[0xAA; 100]);
         let mut cursor_v1 = Cursor::new(v1_pkt);
-        let err_v1 = read_mavlink_frame(&mut cursor_v1, 50, &shutdown).unwrap_err();
-        assert_eq!(err_v1.kind(), io::ErrorKind::InvalidData);
-        assert!(err_v1.to_string().contains("exceeds maximum allowed"));
+        assert!(matches!(
+            read_mavlink_frame(&mut cursor_v1, 50, &shutdown),
+            Err(ref e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("exceeds maximum allowed")
+        ));
 
         // MAVLink 2 unsigned: payload length 100 -> total length 112. Max allowed 50.
         let v2_pkt = make_test_mavlink2_packet(1, 1, 1, 1, false, &[0xBB; 100]);
         let mut cursor_v2 = Cursor::new(v2_pkt);
-        let err_v2 = read_mavlink_frame(&mut cursor_v2, 50, &shutdown).unwrap_err();
-        assert_eq!(err_v2.kind(), io::ErrorKind::InvalidData);
-        assert!(err_v2.to_string().contains("exceeds maximum allowed"));
+        assert!(matches!(
+            read_mavlink_frame(&mut cursor_v2, 50, &shutdown),
+            Err(ref e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("exceeds maximum allowed")
+        ));
 
         // MAVLink 2 signed: payload length 50 -> total length 75 (50 + 25). Max allowed 60.
         let v2_signed = make_test_mavlink2_packet(1, 1, 1, 1, true, &[0xCC; 50]);
         let mut cursor_v2_signed = Cursor::new(v2_signed);
-        let err_v2_signed = read_mavlink_frame(&mut cursor_v2_signed, 60, &shutdown).unwrap_err();
-        assert_eq!(err_v2_signed.kind(), io::ErrorKind::InvalidData);
-        assert!(err_v2_signed
-            .to_string()
-            .contains("exceeds maximum allowed"));
+        assert!(matches!(
+            read_mavlink_frame(&mut cursor_v2_signed, 60, &shutdown),
+            Err(ref e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("exceeds maximum allowed")
+        ));
     }
 
     #[test]
-    fn test_criterion4_write_frame_with_mode_mavlink_raw_packet() {
+    fn test_criterion4_write_frame_with_mode_mavlink_raw_packet() -> io::Result<()> {
         // Acceptance criterion: In crates/rer/src/framing.rs, writing a MAVLink frame
         // using write_frame_with_mode transmits raw packet bytes without prepending a 4-byte length prefix.
         let v1_pkt = make_test_mavlink1_packet(42, 5, 10, 15, b"telemetry raw");
         let mut out_v1 = Vec::new();
-        write_frame_with_mode(&mut out_v1, FramingMode::Mavlink, &v1_pkt)
-            .expect("write mavlink frame");
+        write_frame_with_mode(&mut out_v1, FramingMode::Mavlink, &v1_pkt)?;
         assert_eq!(out_v1, v1_pkt);
         // Explicitly assert that no 4-byte big-endian length prefix was prepended
         assert_ne!(&out_v1[0..4], &(v1_pkt.len() as u32).to_be_bytes());
@@ -919,11 +910,11 @@ mod tests {
 
         let v2_pkt = make_test_mavlink2_packet(99, 1, 1, 246, true, b"signed telemetry");
         let mut out_v2 = Vec::new();
-        write_frame_with_mode(&mut out_v2, FramingMode::Mavlink, &v2_pkt)
-            .expect("write mavlink frame");
+        write_frame_with_mode(&mut out_v2, FramingMode::Mavlink, &v2_pkt)?;
         assert_eq!(out_v2, v2_pkt);
         assert_ne!(&out_v2[0..4], &(v2_pkt.len() as u32).to_be_bytes());
         assert_eq!(out_v2[0], MAVLINK_STX_V2);
+        Ok(())
     }
 
     #[test]
@@ -931,9 +922,10 @@ mod tests {
         let bad_packet = vec![0x42, 0x05, 0x00, 0x00, 0x00, 0x00];
         let mut cursor = Cursor::new(bad_packet);
         let shutdown = AtomicBool::new(false);
-        let err = read_mavlink_frame(&mut cursor, 1024, &shutdown).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("invalid MAVLink magic byte"));
+        assert!(matches!(
+            read_mavlink_frame(&mut cursor, 1024, &shutdown),
+            Err(ref e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("invalid MAVLink magic byte")
+        ));
     }
 
     #[test]
@@ -942,8 +934,10 @@ mod tests {
         let partial = vec![MAVLINK_STX_V1, 0x05];
         let mut cursor = Cursor::new(partial);
         let shutdown = AtomicBool::new(false);
-        let err = read_mavlink_frame(&mut cursor, 1024, &shutdown).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(matches!(
+            read_mavlink_frame(&mut cursor, 1024, &shutdown),
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof
+        ));
     }
 
     #[test]
@@ -953,8 +947,10 @@ mod tests {
         let truncated = full[..full.len() - 5].to_vec();
         let mut cursor = Cursor::new(truncated);
         let shutdown = AtomicBool::new(false);
-        let err = read_mavlink_frame(&mut cursor, 1024, &shutdown).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(matches!(
+            read_mavlink_frame(&mut cursor, 1024, &shutdown),
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof
+        ));
     }
 
     fn make_test_mqtt_packet(packet_type: u8, flags: u8, payload_data: &[u8]) -> Vec<u8> {
