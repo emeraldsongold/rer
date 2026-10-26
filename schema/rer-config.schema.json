@@ -190,7 +190,7 @@
           "type": "string"
         },
         "framing": {
-          "description": "Optional framing mode for TCP endpoints (\"length_prefix\" or \"ccsds\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP endpoints (\"length_prefix\", \"ccsds\", or \"mavlink\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"
@@ -237,6 +237,13 @@
           "type": "string",
           "enum": [
             "ccsds"
+          ]
+        },
+        {
+          "description": "MAVLink self-delimiting packet framing (MAVLink 1 and MAVLink 2).",
+          "type": "string",
+          "enum": [
+            "mavlink"
           ]
         }
       ]
@@ -550,6 +557,17 @@
             "minimum": 0.0
           }
         },
+        "framing": {
+          "description": "Optional framing mode override (\"length_prefix\", \"ccsds\", or \"mavlink\").",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "passthrough_on_error": {
           "description": "When true, datagrams failing MAVLink validation are forwarded unchanged to destination. Defaults to false.",
           "default": false,
@@ -754,7 +772,7 @@
           }
         },
         "framing": {
-          "description": "Optional framing mode for TCP streams (\"length_prefix\" or \"ccsds\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", or \"mavlink\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"

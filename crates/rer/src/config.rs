@@ -301,7 +301,7 @@ pub struct StreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mavlink: Option<MavlinkConfig>,
 
-    /// Optional framing mode for TCP streams ("length_prefix" or "ccsds"). Defaults to length_prefix.
+    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", or "mavlink"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 }
@@ -347,6 +347,10 @@ pub struct MavlinkConfig {
     /// When true, datagrams failing MAVLink validation are forwarded unchanged to destination. Defaults to false.
     #[serde(default, alias = "passthrough")]
     pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("length_prefix", "ccsds", or "mavlink").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
 }
 
 impl Default for MavlinkConfig {
@@ -358,6 +362,7 @@ impl Default for MavlinkConfig {
             filter_systems: None,
             filter_components: None,
             passthrough_on_error: false,
+            framing: None,
         }
     }
 }
@@ -439,6 +444,7 @@ impl StreamConfig {
             .framing
             .or(self.framing)
             .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
+            .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
             .unwrap_or_default()
     }
 
@@ -448,6 +454,7 @@ impl StreamConfig {
         dest.framing
             .or(self.framing)
             .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
+            .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
             .unwrap_or_default()
     }
 }
@@ -688,7 +695,7 @@ pub struct EndpointConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ConnectionMode>,
 
-    /// Optional framing mode for TCP endpoints ("length_prefix" or "ccsds"). Defaults to length_prefix.
+    /// Optional framing mode for TCP endpoints ("length_prefix", "ccsds", or "mavlink"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 }
@@ -704,6 +711,14 @@ pub enum FramingMode {
     /// CCSDS Space Packet length-based framing (packet data length field + 7 bytes).
     #[serde(alias = "CCSDS")]
     Ccsds,
+    /// MAVLink self-delimiting packet framing (MAVLink 1 and MAVLink 2).
+    #[serde(
+        alias = "MAVLink",
+        alias = "mavlink",
+        alias = "mavlink1",
+        alias = "mavlink2"
+    )]
+    Mavlink,
 }
 
 impl fmt::Display for FramingMode {
@@ -711,6 +726,7 @@ impl fmt::Display for FramingMode {
         match self {
             Self::LengthPrefix => write!(f, "length_prefix"),
             Self::Ccsds => write!(f, "ccsds"),
+            Self::Mavlink => write!(f, "mavlink"),
         }
     }
 }
@@ -1762,5 +1778,70 @@ mod tests {
             generated.trim(),
             "schema/rer-config.schema.json is out of date with Config models."
         );
+    }
+
+    #[test]
+    fn test_framing_mode_mavlink_deserialization() {
+        // Acceptance criterion: In crates/rer/src/config.rs, configuring option framing
+        // with value mavlink deserializes into FramingMode::Mavlink.
+        let yaml_stream = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        framing: mavlink
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_stream).expect("valid config with framing mavlink");
+        assert_eq!(
+            config.instances[0].streams[0].framing,
+            Some(FramingMode::Mavlink)
+        );
+        assert_eq!(
+            config.instances[0].streams[0].source_framing(),
+            FramingMode::Mavlink
+        );
+
+        let yaml_endpoint = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+          framing: mavlink
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+          framing: mavlink
+"#;
+        let config_ep = Config::from_yaml_str(yaml_endpoint)
+            .expect("valid config with endpoint framing mavlink");
+        assert_eq!(
+            config_ep.instances[0].streams[0].source.framing,
+            Some(FramingMode::Mavlink)
+        );
+        let dest = config_ep.instances[0].streams[0]
+            .destination
+            .as_ref()
+            .unwrap();
+        assert_eq!(dest.framing, Some(FramingMode::Mavlink));
+        assert_eq!(
+            config_ep.instances[0].streams[0].destination_framing(dest),
+            FramingMode::Mavlink
+        );
+
+        // Direct deserialization
+        let mode: FramingMode = serde_json::from_str("\"mavlink\"").unwrap();
+        assert_eq!(mode, FramingMode::Mavlink);
+        assert_eq!(mode.to_string(), "mavlink");
     }
 }
