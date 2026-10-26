@@ -645,7 +645,7 @@ impl TcpDestinationConnection {
                 let frame = framing::encode_frame(payload);
                 s.write_all(&frame)
             }
-            FramingMode::Ccsds | FramingMode::Mavlink => s.write_all(payload),
+            FramingMode::Ccsds | FramingMode::Mavlink | FramingMode::Mqtt => s.write_all(payload),
         };
 
         match write_res {
