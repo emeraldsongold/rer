@@ -297,9 +297,77 @@ pub struct StreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ccsds: Option<CcsdsConfig>,
 
+    /// Optional MAVLink packet inspection, validation, and sequence tracking configuration (SPEC §14, §8). Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mavlink: Option<MavlinkConfig>,
+
     /// Optional framing mode for TCP streams ("length_prefix" or "ccsds"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
+}
+
+/// Configuration for MAVLink packet inspection, validation, and sequence tracking (SPEC §14, §8).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MavlinkConfig {
+    /// Enable MAVLink packet inspection and validation. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Track sequence continuity independently per (sysid, compid) endpoint. Defaults to true.
+    #[serde(
+        default = "default_true",
+        alias = "sequence_tracking",
+        alias = "track_sequence"
+    )]
+    pub track_sequences: bool,
+
+    /// Enforce valid MAVLink magic start byte (0xFE for v1, 0xFD for v2). Defaults to true.
+    #[serde(default = "default_true")]
+    pub validate_magic: bool,
+
+    /// Optional allowlist of System IDs (sysid) to accept and track. If None, all are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_systems",
+        alias = "systems"
+    )]
+    pub filter_systems: Option<Vec<u8>>,
+
+    /// Optional allowlist of Component IDs (compid) to accept and track. If None, all are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_components",
+        alias = "components"
+    )]
+    pub filter_components: Option<Vec<u8>>,
+
+    /// When true, datagrams failing MAVLink validation are forwarded unchanged to destination. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+}
+
+impl Default for MavlinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            track_sequences: true,
+            validate_magic: true,
+            filter_systems: None,
+            filter_components: None,
+            passthrough_on_error: false,
+        }
+    }
+}
+
+impl MavlinkConfig {
+    /// Returns true if sequence tracking is enabled for MAVLink.
+    #[must_use]
+    pub fn is_sequence_tracking_enabled(&self) -> bool {
+        self.enabled && self.track_sequences
+    }
 }
 
 /// Configuration for CCSDS Space Packet parsing, validation, and sequence tracking (SPEC §14).
@@ -1112,6 +1180,51 @@ impl Config {
                                         "invalid APID {}: APID must be between 0 and 2047",
                                         apid
                                     ),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Validate MAVLink configuration and check conflicting sequence tracking
+                if let Some(ref mavlink) = stream.mavlink {
+                    let mavlink_seq_enabled = mavlink.enabled && mavlink.track_sequences;
+                    let generic_seq_enabled = stream.sequence.as_ref().is_some_and(|s| s.enabled);
+
+                    if mavlink_seq_enabled && generic_seq_enabled {
+                        errors.push(ValidationError {
+                            path: format!("{}.mavlink.track_sequences", stream_prefix),
+                            reason: "conflicting sequence tracking: both MAVLink sequence tracking and generic sequence tracking cannot be enabled simultaneously".to_string(),
+                        });
+                    }
+
+                    if let Some(ref ccsds) = stream.ccsds {
+                        let ccsds_seq_enabled = ccsds.enabled && ccsds.track_sequences;
+                        if mavlink_seq_enabled && ccsds_seq_enabled {
+                            errors.push(ValidationError {
+                                path: format!("{}.mavlink.track_sequences", stream_prefix),
+                                reason: "conflicting sequence tracking: both MAVLink sequence tracking and CCSDS sequence tracking cannot be enabled simultaneously".to_string(),
+                            });
+                        }
+                    }
+
+                    if let Some(ref systems) = mavlink.filter_systems {
+                        for sysid in systems {
+                            if *sysid == 0 {
+                                errors.push(ValidationError {
+                                    path: format!("{}.mavlink.filter_systems", stream_prefix),
+                                    reason: "invalid system ID 0: MAVLink system ID must be between 1 and 255".to_string(),
+                                });
+                            }
+                        }
+                    }
+
+                    if let Some(ref components) = mavlink.filter_components {
+                        for compid in components {
+                            if *compid == 0 {
+                                errors.push(ValidationError {
+                                    path: format!("{}.mavlink.filter_components", stream_prefix),
+                                    reason: "invalid component ID 0: MAVLink component ID must be between 1 and 255".to_string(),
                                 });
                             }
                         }
