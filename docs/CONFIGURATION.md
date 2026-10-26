@@ -114,7 +114,7 @@ Each stream specifies forwarding from a `source` to one or more destinations:
 | `sequence` | object | No | Optional generic sequence extraction and tracking (`SequenceConfig`). Off by default. |
 | `inspection` | object | No | Optional packet inspection and preview configuration (`InspectionConfig`). Off by default. |
 | `ccsds` | object | No | Optional CCSDS Space Packet parsing, validation, and per-APID sequence tracking (`CcsdsConfig`). Off by default. |
-| `framing` | string | No | Optional stream-level framing mode override for TCP endpoints (`"length_prefix"` or `"ccsds"`). Defaults to `"length_prefix"`. |
+| `framing` | string | No | Optional stream-level framing mode override for TCP endpoints (`"length_prefix"`, `"ccsds"`, or `"mavlink"`). Defaults to `"length_prefix"`. |
 
 *Note: Either `destination` or `destinations` must be specified, but not both.*
 
@@ -208,7 +208,7 @@ SRT support performs passive metadata inspection without stream termination, enc
 | `transport` | string | (required) | Transport protocol: `"udp"` or `"tcp"`. |
 | `address` | string | (required) | Network address in `host:port` format (e.g. `127.0.0.1:5000` or `[::1]:5000`). Port must be between 1 and 65535. |
 | `mode` | string | `"listen"` for source, `"connect"` for dest | Connection mode: `"listen"` or `"connect"`. |
-| `framing` | string | `"length_prefix"` | Optional framing mode for TCP endpoints: `"length_prefix"` (default 4-byte prefix) or `"ccsds"` (CCSDS Space Packet length-based framing, C + 7 bytes). |
+| `framing` | string | `"length_prefix"` | Optional framing mode for TCP endpoints: `"length_prefix"` (default 4-byte prefix), `"ccsds"` (CCSDS Space Packet length-based framing, C + 7 bytes), or `"mavlink"` (MAVLink 1 and 2 self-delimiting packet framing). |
 
 #### Address Formats and IPv6 Support
 
@@ -273,6 +273,23 @@ For TCP streams carrying CCSDS Space Packets (SPEC §14, §5), setting `framing:
 - **Defragmentation**: Reassembles Space Packets arriving across fragmented reads delivering one byte at a time into complete individual Space Packets matching sent payloads.
 - **Concatenation Separation**: When multiple concatenated Space Packets arrive in a single read buffer, RER separates and yields each packet individually at its declared $C + 7$ byte boundary.
 - **Bounded Buffering**: A declared packet length exceeding the configured `max_packet_size` causes the connection to reject the frame and increment `drops_oversized` and `dropped_packets` counters without crashing the relay.
+
+##### 3. MAVLink Self-Delimiting Framing (`framing: "mavlink"`)
+
+For TCP streams carrying MAVLink 1 or MAVLink 2 frames (SPEC §14, §5), setting `framing: "mavlink"` on the endpoint or stream enables native self-delimiting framing without RER's 4-byte length prefix:
+
+```text
++-----------------------+---------------------------------------+
+| MAVLink Header        | Payload & Checksum (optional sig)     |
+| v1: 6 octets (0xFE)   | len + 2 octets                        |
+| v2: 10 octets (0xFD)  | len + 2 octets (+ 13 octets if signed)|
++-----------------------+---------------------------------------+
+```
+
+- **Packet Boundary Detection**: Ingress parses packet boundaries directly from MAVLink headers (6-byte header + payload + 2 CRC bytes for MAVLink 1; 10-byte header + payload + 2 CRC bytes + optional 13-byte signature for MAVLink 2).
+- **Defragmentation**: Reassembles MAVLink frames arriving across fragmented reads delivering one byte at a time into complete individual frames matching original transmitted bytes.
+- **Concatenation Separation**: When multiple concatenated MAVLink frames arrive in a single read buffer, RER separates and yields each frame individually at its calculated frame length boundary.
+- **Bounded Buffering**: A declared packet length exceeding the configured `max_packet_size` returns an invalid data error without panicking, rejecting the oversized frame safely.
 
 Frames with length exceeding `max_packet_size` are dropped at ingress and tracked under `drops_oversized`. Destination outages trigger automatic reconnection with exponential backoff. Slow TCP readers that stall transmission cause bounded queue saturation and explicit drop policy enforcement without unbounded memory growth.
 

@@ -640,7 +640,7 @@ impl TcpDestinationConnection {
                 let frame = framing::encode_frame(payload);
                 s.write_all(&frame)
             }
-            FramingMode::Ccsds => s.write_all(payload),
+            FramingMode::Ccsds | FramingMode::Mavlink => s.write_all(payload),
         };
 
         match write_res {
@@ -2743,6 +2743,7 @@ impl StreamRunner {
         let fwd_is_active = Arc::clone(&is_active);
         let fwd_stream_framing = stream.framing;
         let fwd_stream_ccsds_framing = stream.ccsds.as_ref().and_then(|c| c.framing);
+        let fwd_stream_mavlink_framing = stream.mavlink.as_ref().and_then(|m| m.framing);
 
         let fwd_handle = thread::spawn(move || {
             let ipv4_socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0))).ok();
@@ -2757,6 +2758,7 @@ impl StreamRunner {
                             .framing
                             .or(fwd_stream_framing)
                             .or(fwd_stream_ccsds_framing)
+                            .or(fwd_stream_mavlink_framing)
                             .unwrap_or_default();
                         Some(TcpDestinationConnection::new(
                             d.address.clone(),
