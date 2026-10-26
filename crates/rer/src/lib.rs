@@ -13,6 +13,7 @@ pub mod framing;
 pub mod health;
 pub mod ltp;
 pub mod management;
+pub mod mavlink;
 pub mod relay;
 pub mod replay;
 pub mod secret;
@@ -71,6 +72,18 @@ pub use management::{
     ManagementServer, MetricsReport, MetricsServer, OperationType, StatusReport,
     StreamStatusReport, StreamsManagementReport, VersionReport, DEFAULT_MANAGEMENT_SOCKET,
     MGMT_API_VERSION,
+};
+pub use mavlink::{
+    encode_mavlink1_header, encode_mavlink2_header, evaluate_mavlink, evaluate_mavlink_2_packet,
+    evaluate_mavlink_header, evaluate_mavlink_packet, evaluate_mavlink_payload,
+    parse_mavlink_header, parse_mavlink_packet, MavlinkHeader, MavlinkParseError,
+    MavlinkParseStatus, MavlinkParseWarning, MavlinkVersion, MAVLINK_IFLAG_SIGNED,
+    MAVLINK_KNOWN_INCOMPAT_FLAGS, MAVLINK_MAGIC_V1, MAVLINK_MAGIC_V2, MAVLINK_SIGNATURE_LEN,
+    MAVLINK_STX_V1, MAVLINK_STX_V2, MAVLINK_V1_FRAMING_OVERHEAD, MAVLINK_V1_HEADER_LEN,
+    MAVLINK_V1_MIN_HEADER_LEN, MAVLINK_V1_OVERHEAD, MAVLINK_V1_STX,
+    MAVLINK_V2_FRAMING_OVERHEAD_SIGNED, MAVLINK_V2_FRAMING_OVERHEAD_UNSIGNED,
+    MAVLINK_V2_HEADER_LEN, MAVLINK_V2_MIN_HEADER_LEN, MAVLINK_V2_OVERHEAD_SIGNED,
+    MAVLINK_V2_OVERHEAD_UNSIGNED, MAVLINK_V2_STX,
 };
 pub use relay::{
     bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,
