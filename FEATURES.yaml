@@ -1040,6 +1040,61 @@ items:
       - The proposal document in docs/proposals explicitly states that full AX.25 connected-mode state machines, TNC modem hardware control, and physical-layer modulation are not claimed.
       - The proposal in docs/proposals identifies the smallest first implementation step for in-tree KISS frame encoding and decoding.
 
+  - id: RER-F-064
+    order: 64
+    title: Document author attribution and refresh milestone status in README
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-034]
+    spec_refs: [§3, §7, §18, §21]
+    test_profile: standard
+    notes: 'Part 1 of 3 of one request. Refresh and update the documentation. README, USAGE, EXAMPLES, SPEC, ect. Include my name in the read me and a link to my website ronaldreeves.com Relevant code: Cargo.toml, README.md, crates/rer/tests/cli_tests.rs.'
+    acceptance:
+      - In README.md, searching for "ronaldreeves.com" returns at least 1 matching line linking to the project author website.
+      - In README.md, searching for "Ronald Edward Reeves Jr" returns at least 1 matching line identifying the author and copyright holder.
+      - In README.md, the Current Status section lists commands rer diagnose and rer replay alongside rer validate, rer inspect, rer run, rer test, rer status, rer health, rer streams, rer metrics, and rer version.
+      - In crates/rer/tests/cli_tests.rs, the test function test_cli_docs_acceptance_criteria asserts that README.md contains "ronaldreeves.com", "rer diagnose", and "rer replay".
+
+  - id: RER-F-065
+    order: 65
+    title: Update CLI usage guide for implemented commands and simulation subcommands
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-064]
+    spec_refs: [§3, §7, §18, §21]
+    test_profile: standard
+    notes: 'Part 2 of 3 of one request. Refresh and update the documentation. README, USAGE, EXAMPLES, SPEC, ect. Include my name in the read me and a link to my website ronaldreeves.com Relevant code: Cargo.toml, README.md, crates/rer/tests/cli_tests.rs.'
+    acceptance:
+      - In docs/USAGE.md, a dedicated section documents rer diagnose with options --socket, --endpoint, --auth-token, --limit, --timeout, --json, and --format.
+      - In docs/USAGE.md, a dedicated section documents rer replay with options --capture, --destination, --transport, --speed, --max-rate, --pps, --json, and --format.
+      - In docs/USAGE.md, the simulation testing section documents rer test subcommands fault-injection with option --scenario, benchmark with option --json, and long-duration with option --duration.
+      - In docs/USAGE.md, rer capture is documented under planned roadmap commands with a note that it exits with status 1.
+      - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria asserts that docs/USAGE.md contains option strings "--scenario", "--pps", "--max-rate", and subcommand names "fault-injection", "benchmark", and "long-duration".
+
+  - id: RER-F-066
+    order: 66
+    title: Document configuration examples and update specification attribution
+    type: docs
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-065]
+    spec_refs: [§3, §7, §18, §21]
+    test_profile: standard
+    notes: 'Part 3 of 3 of one request. Refresh and update the documentation. README, USAGE, EXAMPLES, SPEC, ect. Include my name in the read me and a link to my website ronaldreeves.com Relevant code: Cargo.toml, README.md, crates/rer/tests/cli_tests.rs.'
+    acceptance:
+      - In docs/CONFIGURATION.md, a dedicated section documents the 6 configuration examples minimal.yaml, paired_streams.yaml, fan_out.yaml, multi_instance.yaml, multi_interface.yaml, and management_auth.yaml.
+      - In docs/SPEC.md, Section 3 includes the project author name Ronald Edward Reeves Jr and a reference link to ronaldreeves.com.
+      - In README.md, the Documentation Index entry for docs/CONFIGURATION.md describes both YAML configuration syntax and the catalog of 6 configuration examples in the examples directory.
+      - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria asserts that docs/CONFIGURATION.md contains the 6 example filenames "minimal.yaml", "paired_streams.yaml", "fan_out.yaml", "multi_instance.yaml", "multi_interface.yaml", and "management_auth.yaml".
+
   - id: RER-T-001
     kind: track
     order: 101
