@@ -517,6 +517,57 @@
       },
       "additionalProperties": false
     },
+    "MavlinkConfig": {
+      "description": "Configuration for MAVLink packet inspection, validation, and sequence tracking (SPEC §14, §8).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable MAVLink packet inspection and validation. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "filter_components": {
+          "description": "Optional allowlist of Component IDs (compid) to accept and track. If None, all are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "filter_systems": {
+          "description": "Optional allowlist of System IDs (sysid) to accept and track. If None, all are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "passthrough_on_error": {
+          "description": "When true, datagrams failing MAVLink validation are forwarded unchanged to destination. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "track_sequences": {
+          "description": "Track sequence continuity independently per (sysid, compid) endpoint. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "validate_magic": {
+          "description": "Enforce valid MAVLink magic start byte (0xFE for v1, 0xFD for v2). Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "MetricsConfig": {
       "description": "Prometheus and OpenMetrics metrics endpoint configuration (SPEC §15).",
       "type": "object",
@@ -722,6 +773,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/InspectionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mavlink": {
+          "description": "Optional MAVLink packet inspection, validation, and sequence tracking configuration (SPEC §14, §8). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MavlinkConfig"
             },
             {
               "type": "null"

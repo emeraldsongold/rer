@@ -58,6 +58,9 @@ pub enum DiagnosticStage {
     /// Secure Reliable Transport (SRT) passive inspection event (SPEC §14, §8).
     #[serde(rename = "srt_inspection")]
     SrtInspection,
+    /// MAVLink passive inspection event (SPEC §14, §8).
+    #[serde(rename = "mavlink_inspection")]
+    MavlinkInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -76,6 +79,7 @@ impl fmt::Display for DiagnosticStage {
             Self::BundleInspection => write!(f, "bundle_inspection"),
             Self::LtpInspection => write!(f, "ltp_inspection"),
             Self::SrtInspection => write!(f, "srt_inspection"),
+            Self::MavlinkInspection => write!(f, "mavlink_inspection"),
         }
     }
 }
@@ -96,6 +100,7 @@ impl FromStr for DiagnosticStage {
             "bundle_inspection" => Ok(Self::BundleInspection),
             "ltp_inspection" => Ok(Self::LtpInspection),
             "srt_inspection" => Ok(Self::SrtInspection),
+            "mavlink_inspection" | "mavlink" => Ok(Self::MavlinkInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -1269,6 +1274,167 @@ impl From<SrtInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_mavlink_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::MavlinkInspection
+}
+
+/// Structured MAVLink packet metadata extracted during passive packet inspection (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MavlinkMetadata {
+    /// Sending vehicle/node system ID (1 to 255).
+    pub system_id: u8,
+
+    /// Sending subsystem component ID (1 to 255).
+    pub component_id: u8,
+
+    /// Packet sequence number (0 to 255).
+    pub sequence: u8,
+
+    /// Packet sequence number (alias for compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "seq")]
+    pub sequence_number: Option<u8>,
+
+    /// Message schema identifier (8-bit for v1, 24-bit for v2).
+    pub message_id: u32,
+
+    /// Protocol version (1 or 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
+    /// Payload length in octets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_length: Option<u8>,
+
+    /// Incompatibility flags bitfield.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incompat_flags: Option<u8>,
+
+    /// Compatibility flags bitfield.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_flags: Option<u8>,
+
+    /// True if the packet carries a 13-octet signature block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_signed: Option<bool>,
+
+    /// Calculated total packet length in octets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_packet_length: Option<usize>,
+}
+
+/// Diagnostic event representing a MAVLink passive inspection event (SPEC §14, §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MavlinkInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `mavlink_inspection`).
+    #[serde(default = "default_mavlink_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// Sending vehicle/node system ID.
+    pub system_id: u8,
+
+    /// Sending subsystem component ID.
+    pub component_id: u8,
+
+    /// Packet sequence number.
+    pub sequence: u8,
+
+    /// Message schema identifier (24-bit).
+    pub message_id: u32,
+
+    /// Protocol version (1 or 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
+    /// Parse outcome status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<crate::mavlink::MavlinkParseStatus>,
+
+    /// Structured MAVLink metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "mavlink"
+    )]
+    pub mavlink_metadata: Option<MavlinkMetadata>,
+}
+
+pub type MavlinkInspectionEvent = MavlinkInspection;
+
+impl MavlinkInspection {
+    /// Creates a new `MavlinkInspection` event.
+    #[must_use]
+    pub fn new(system_id: u8, component_id: u8, sequence: u8, message_id: u32) -> Self {
+        let metadata = MavlinkMetadata {
+            system_id,
+            component_id,
+            sequence,
+            sequence_number: Some(sequence),
+            message_id,
+            version: None,
+            payload_length: None,
+            incompat_flags: None,
+            compat_flags: None,
+            is_signed: None,
+            total_packet_length: None,
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::MavlinkInspection,
+            system_id,
+            component_id,
+            sequence,
+            message_id,
+            version: None,
+            parse_status: None,
+            mavlink_metadata: Some(metadata),
+        }
+    }
+}
+
+impl From<MavlinkInspection> for DiagnosticEvent {
+    fn from(insp: MavlinkInspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp
+            .stream_id
+            .clone()
+            .unwrap_or_else(|| "mavlink".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::MavlinkInspection,
+            TransportType::Udp,
+            0,
+        );
+        event.mavlink_system_id = Some(insp.system_id);
+        event.mavlink_component_id = Some(insp.component_id);
+        event.mavlink_sequence = Some(insp.sequence);
+        event.sequence_number = Some(u64::from(insp.sequence));
+        event.mavlink_message_id = Some(insp.message_id);
+        event.mavlink_version = insp.version;
+        event.mavlink_parse_status = insp.parse_status;
+        event.mavlink_metadata = insp.mavlink_metadata.clone();
+        event.mavlink_inspection = Some(insp);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -1436,6 +1602,51 @@ pub struct DiagnosticEvent {
     /// Structured SRT metadata (SPEC §14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub srt_metadata: Option<SrtMetadata>,
+
+    /// MAVLink system ID (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "system_id")]
+    pub mavlink_system_id: Option<u8>,
+
+    /// MAVLink component ID (SPEC §14, §8).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "component_id"
+    )]
+    pub mavlink_component_id: Option<u8>,
+
+    /// MAVLink sequence number (SPEC §14, §8).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "mavlink_sequence_number"
+    )]
+    pub mavlink_sequence: Option<u8>,
+
+    /// MAVLink 24-bit message ID (SPEC §14, §8).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "mavlink_msg_id",
+        alias = "message_id"
+    )]
+    pub mavlink_message_id: Option<u32>,
+
+    /// MAVLink version (1 or 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mavlink_version: Option<u8>,
+
+    /// MAVLink parse evaluation status (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mavlink_parse_status: Option<crate::mavlink::MavlinkParseStatus>,
+
+    /// MAVLink inspection metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "mavlink")]
+    pub mavlink_inspection: Option<MavlinkInspection>,
+
+    /// Structured MAVLink metadata (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mavlink_metadata: Option<MavlinkMetadata>,
 }
 
 impl DiagnosticEvent {
@@ -1488,6 +1699,14 @@ impl DiagnosticEvent {
             srt_parse_status: None,
             srt_inspection: None,
             srt_metadata: None,
+            mavlink_system_id: None,
+            mavlink_component_id: None,
+            mavlink_sequence: None,
+            mavlink_message_id: None,
+            mavlink_version: None,
+            mavlink_parse_status: None,
+            mavlink_inspection: None,
+            mavlink_metadata: None,
         }
     }
 
@@ -1779,6 +1998,141 @@ impl DiagnosticEvent {
         packet_kind: SrtPacketKind,
     ) -> Self {
         SrtInspection::new(destination_socket_id, timestamp, packet_kind).into()
+    }
+
+    fn ensure_mavlink_metadata(&mut self) -> &mut MavlinkMetadata {
+        self.mavlink_metadata
+            .get_or_insert_with(|| MavlinkMetadata {
+                system_id: self.mavlink_system_id.unwrap_or(0),
+                component_id: self.mavlink_component_id.unwrap_or(0),
+                sequence: self.mavlink_sequence.unwrap_or(0),
+                sequence_number: self.mavlink_sequence,
+                message_id: self.mavlink_message_id.unwrap_or(0),
+                version: self.mavlink_version,
+                payload_length: None,
+                incompat_flags: None,
+                compat_flags: None,
+                is_signed: None,
+                total_packet_length: None,
+            })
+    }
+
+    /// Sets MAVLink system ID.
+    #[must_use]
+    pub fn with_mavlink_system_id(mut self, sysid: u8) -> Self {
+        self.mavlink_system_id = Some(sysid);
+        self.ensure_mavlink_metadata().system_id = sysid;
+        self
+    }
+
+    /// Sets MAVLink component ID.
+    #[must_use]
+    pub fn with_mavlink_component_id(mut self, compid: u8) -> Self {
+        self.mavlink_component_id = Some(compid);
+        self.ensure_mavlink_metadata().component_id = compid;
+        self
+    }
+
+    /// Sets MAVLink sequence number.
+    #[must_use]
+    pub fn with_mavlink_sequence(mut self, seq: u8) -> Self {
+        self.mavlink_sequence = Some(seq);
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(seq));
+        }
+        let m = self.ensure_mavlink_metadata();
+        m.sequence = seq;
+        m.sequence_number = Some(seq);
+        self
+    }
+
+    /// Sets MAVLink sequence number (alias).
+    #[must_use]
+    pub fn with_mavlink_sequence_number(self, seq: u8) -> Self {
+        self.with_mavlink_sequence(seq)
+    }
+
+    /// Sets MAVLink message ID.
+    #[must_use]
+    pub fn with_mavlink_message_id(mut self, msgid: u32) -> Self {
+        self.mavlink_message_id = Some(msgid);
+        self.ensure_mavlink_metadata().message_id = msgid;
+        self
+    }
+
+    /// Sets MAVLink version.
+    #[must_use]
+    pub fn with_mavlink_version(mut self, ver: u8) -> Self {
+        self.mavlink_version = Some(ver);
+        self.ensure_mavlink_metadata().version = Some(ver);
+        self
+    }
+
+    /// Sets MAVLink metadata.
+    #[must_use]
+    pub fn with_mavlink_metadata(mut self, metadata: MavlinkMetadata) -> Self {
+        self.mavlink_system_id = Some(metadata.system_id);
+        self.mavlink_component_id = Some(metadata.component_id);
+        self.mavlink_sequence = Some(metadata.sequence);
+        self.mavlink_message_id = Some(metadata.message_id);
+        if let Some(v) = metadata.version {
+            self.mavlink_version = Some(v);
+        }
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(metadata.sequence));
+        }
+        self.mavlink_metadata = Some(metadata);
+        self
+    }
+
+    /// Enriches event with a parsed MAVLink header.
+    #[must_use]
+    pub fn with_mavlink_header(self, header: &crate::mavlink::MavlinkHeader) -> Self {
+        let meta = MavlinkMetadata {
+            system_id: header.system_id,
+            component_id: header.component_id,
+            sequence: header.sequence,
+            sequence_number: Some(header.sequence),
+            message_id: header.message_id,
+            version: Some(if header.version.is_v1() { 1 } else { 2 }),
+            payload_length: Some(header.payload_length),
+            incompat_flags: Some(header.incompat_flags),
+            compat_flags: Some(header.compat_flags),
+            is_signed: Some(header.is_signed),
+            total_packet_length: Some(header.total_packet_length),
+        };
+        self.with_mavlink_metadata(meta)
+    }
+
+    /// Attaches MAVLink inspection event metadata.
+    #[must_use]
+    pub fn with_mavlink_inspection(mut self, inspection: MavlinkInspection) -> Self {
+        self.mavlink_system_id = Some(inspection.system_id);
+        self.mavlink_component_id = Some(inspection.component_id);
+        self.mavlink_sequence = Some(inspection.sequence);
+        self.mavlink_message_id = Some(inspection.message_id);
+        self.mavlink_version = inspection.version;
+        self.mavlink_parse_status = inspection.parse_status;
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(inspection.sequence));
+        }
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::MavlinkInspection;
+        }
+        self.mavlink_metadata = inspection.mavlink_metadata.clone();
+        self.mavlink_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a diagnostic event specifically for MAVLink packet inspection.
+    #[must_use]
+    pub fn mavlink_inspection(
+        system_id: u8,
+        component_id: u8,
+        sequence: u8,
+        message_id: u32,
+    ) -> Self {
+        MavlinkInspection::new(system_id, component_id, sequence, message_id).into()
     }
 }
 
@@ -3662,5 +4016,62 @@ mod tests {
         assert!(wall > 0);
         assert!(sys_clock.wall_clock_time() > SystemTime::UNIX_EPOCH);
         let _ = mono;
+    }
+
+    #[test]
+    fn test_criterion3_mavlink_diagnostic_event_serialization() {
+        // Acceptance criterion: In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent
+        // containing MAVLink system ID, component ID, sequence number, and 24-bit message ID
+        // produces a JSON object containing the structured MAVLink metadata fields.
+        let msgid_24bit: u32 = 16_777_215; // 0xFFFFFF (24-bit max message ID)
+        let event = DiagnosticEvent::new(
+            1000,
+            2000,
+            "mavlink-stream",
+            DiagnosticStage::MavlinkInspection,
+            TransportType::Udp,
+            128,
+        )
+        .with_mavlink_system_id(1)
+        .with_mavlink_component_id(2)
+        .with_mavlink_sequence(42)
+        .with_mavlink_message_id(msgid_24bit);
+
+        let json_str = serde_json::to_string(&event).expect("serialize diagnostic event");
+        let val: serde_json::Value = serde_json::from_str(&json_str).expect("deserialize json");
+        let obj = val.as_object().expect("json object expected");
+
+        assert_eq!(
+            obj.get("mavlink_system_id").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            obj.get("mavlink_component_id").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            obj.get("mavlink_sequence").and_then(|v| v.as_u64()),
+            Some(42)
+        );
+        assert_eq!(
+            obj.get("sequence_number").and_then(|v| v.as_u64()),
+            Some(42)
+        );
+        assert_eq!(
+            obj.get("mavlink_message_id").and_then(|v| v.as_u64()),
+            Some(u64::from(msgid_24bit))
+        );
+
+        let meta = obj
+            .get("mavlink_metadata")
+            .and_then(|v| v.as_object())
+            .expect("mavlink_metadata object");
+        assert_eq!(meta.get("system_id").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(meta.get("component_id").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(meta.get("sequence").and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(
+            meta.get("message_id").and_then(|v| v.as_u64()),
+            Some(u64::from(msgid_24bit))
+        );
     }
 }

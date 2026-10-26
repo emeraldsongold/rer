@@ -41,16 +41,17 @@ pub use ccsds::{
 };
 pub use config::{
     Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
-    InspectionConfig, InstanceConfig, LogicalInterfaceConfig, LtpInspectionConfig, MetricsConfig,
-    OperationalMode, SequenceConfig, SrtInspectionConfig, StreamConfig, TestModeConfig,
-    ValidationError, ValidationReport,
+    InspectionConfig, InstanceConfig, LogicalInterfaceConfig, LtpInspectionConfig, MavlinkConfig,
+    MetricsConfig, OperationalMode, SequenceConfig, SrtInspectionConfig, StreamConfig,
+    TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, BundleInspection, BundleInspectionEvent,
     BundleMetadata, Clock, DiagnosticBuffer, DiagnosticBufferBuilder, DiagnosticEvent,
     DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, IntoDtnTimestamp, LtpInspection,
-    LtpInspectionEvent, LtpMetadata, ManualClock, RateLimiter, SequenceState, SequenceTracker,
-    SequenceTrackingEvent, SrtInspection, SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
+    LtpInspectionEvent, LtpMetadata, ManualClock, MavlinkInspection, MavlinkInspectionEvent,
+    MavlinkMetadata, RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent,
+    SrtInspection, SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
 };
 pub use framing::{
     encode_frame, read_ccsds_frame, read_frame, read_frame_with_mode, write_ccsds_frame,
@@ -76,11 +77,13 @@ pub use management::{
 pub use mavlink::{
     encode_mavlink1_header, encode_mavlink2_header, evaluate_mavlink, evaluate_mavlink_2_packet,
     evaluate_mavlink_header, evaluate_mavlink_packet, evaluate_mavlink_payload,
-    parse_mavlink_header, parse_mavlink_packet, MavlinkHeader, MavlinkParseError,
-    MavlinkParseStatus, MavlinkParseWarning, MavlinkVersion, MAVLINK_IFLAG_SIGNED,
-    MAVLINK_KNOWN_INCOMPAT_FLAGS, MAVLINK_MAGIC_V1, MAVLINK_MAGIC_V2, MAVLINK_SIGNATURE_LEN,
-    MAVLINK_STX_V1, MAVLINK_STX_V2, MAVLINK_V1_FRAMING_OVERHEAD, MAVLINK_V1_HEADER_LEN,
-    MAVLINK_V1_MIN_HEADER_LEN, MAVLINK_V1_OVERHEAD, MAVLINK_V1_STX,
+    parse_mavlink_header, parse_mavlink_packet, EndpointSequenceTracker,
+    MavlinkEndpointSequenceTracker, MavlinkHeader, MavlinkParseError, MavlinkParseStatus,
+    MavlinkParseWarning, MavlinkSequenceTracker, MavlinkSourceSequenceTracker,
+    MavlinkStreamSequenceTracker, MavlinkVersion, SourceSequenceTracker, MAVLINK_IFLAG_SIGNED,
+    MAVLINK_KNOWN_INCOMPAT_FLAGS, MAVLINK_MAGIC_V1, MAVLINK_MAGIC_V2, MAVLINK_SEQUENCE_MODULUS,
+    MAVLINK_SIGNATURE_LEN, MAVLINK_STX_V1, MAVLINK_STX_V2, MAVLINK_V1_FRAMING_OVERHEAD,
+    MAVLINK_V1_HEADER_LEN, MAVLINK_V1_MIN_HEADER_LEN, MAVLINK_V1_OVERHEAD, MAVLINK_V1_STX,
     MAVLINK_V2_FRAMING_OVERHEAD_SIGNED, MAVLINK_V2_FRAMING_OVERHEAD_UNSIGNED,
     MAVLINK_V2_HEADER_LEN, MAVLINK_V2_MIN_HEADER_LEN, MAVLINK_V2_OVERHEAD_SIGNED,
     MAVLINK_V2_OVERHEAD_UNSIGNED, MAVLINK_V2_STX,

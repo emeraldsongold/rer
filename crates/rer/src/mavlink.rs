@@ -10,9 +10,13 @@
 //! XML message definitions, autonomous vehicle control, autopilot session management, or
 //! end-to-end cryptographic signature generation. Forwarded datagrams are transmitted byte-unmodified.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use crate::config::ByteOrder;
+use crate::diagnostics::{SequenceState, SequenceTrackingEvent};
 
 /// Minimal header length for MAVLink 1 packets in octets (STX, len, seq, sysid, compid, msgid).
 pub const MAVLINK_V1_HEADER_LEN: usize = 6;
@@ -679,6 +683,459 @@ pub use parse_mavlink_header as parse_header;
 pub use parse_mavlink_header as parse_mavlink_packet;
 pub use parse_mavlink_header as parse_packet;
 
+/// Modulus value for 8-bit MAVLink sequence counters (256).
+pub const MAVLINK_SEQUENCE_MODULUS: u64 = 256;
+
+/// Single-source MAVLink sequence continuity tracker maintaining an 8-bit counter modulo 256 (SPEC §14, §8).
+#[derive(Debug, Clone)]
+pub struct MavlinkSourceSequenceTracker {
+    /// System ID of the tracked source (1 to 255).
+    pub system_id: u8,
+    /// Component ID of the tracked source (1 to 255).
+    pub component_id: u8,
+    /// Number of packets evaluated for this source.
+    pub packets_evaluated: u64,
+    /// Last sequence number observed, if any.
+    pub last_sequence: Option<u8>,
+    /// Highest sequence number observed, if any.
+    pub highest_sequence: Option<u8>,
+    /// Cumulative count of missing packets (sequence gaps) detected.
+    pub gap_count: u64,
+    /// Cumulative count of duplicate packets detected.
+    pub duplicate_count: u64,
+    /// Cumulative count of out-of-order packets detected.
+    pub out_of_order_count: u64,
+    /// Cumulative count of rollover events detected modulo 256.
+    pub rollover_count: u64,
+    recent_seen_queue: VecDeque<u8>,
+    recent_seen_set: HashSet<u8>,
+}
+
+impl MavlinkSourceSequenceTracker {
+    /// Creates a new sequence tracker for a given system and component identifier.
+    #[must_use]
+    pub fn new(system_id: u8, component_id: u8) -> Self {
+        Self {
+            system_id,
+            component_id,
+            packets_evaluated: 0,
+            last_sequence: None,
+            highest_sequence: None,
+            gap_count: 0,
+            duplicate_count: 0,
+            out_of_order_count: 0,
+            rollover_count: 0,
+            recent_seen_queue: VecDeque::with_capacity(64),
+            recent_seen_set: HashSet::with_capacity(64),
+        }
+    }
+
+    /// Evaluates an 8-bit sequence number modulo 256 and updates continuity state.
+    pub fn record_sequence(&mut self, seq: u8) -> SequenceTrackingEvent {
+        self.packets_evaluated += 1;
+
+        let last = match self.last_sequence {
+            None => {
+                self.last_sequence = Some(seq);
+                self.highest_sequence = Some(seq);
+                self.remember_seen(seq);
+                return SequenceTrackingEvent::Initial {
+                    sequence: u64::from(seq),
+                };
+            }
+            Some(l) => l,
+        };
+
+        let modulus: u32 = 256;
+        let half_modulus: u32 = 128;
+        let seq_u = u32::from(seq);
+        let last_u = u32::from(last);
+
+        if seq == last || self.recent_seen_set.contains(&seq) {
+            self.duplicate_count += 1;
+            return SequenceTrackingEvent::Duplicate {
+                sequence: u64::from(seq),
+            };
+        }
+
+        self.remember_seen(seq);
+
+        if seq > last {
+            let dist_forward = seq_u - last_u;
+            if dist_forward < half_modulus {
+                self.last_sequence = Some(seq);
+                if seq > self.highest_sequence.unwrap_or(0) {
+                    self.highest_sequence = Some(seq);
+                }
+                if dist_forward == 1 {
+                    SequenceTrackingEvent::InOrder {
+                        sequence: u64::from(seq),
+                    }
+                } else {
+                    let missing = u64::from(dist_forward - 1);
+                    self.gap_count += missing;
+                    let expected = u64::from((last_u + 1) % modulus);
+                    SequenceTrackingEvent::Gap {
+                        expected,
+                        actual: u64::from(seq),
+                        missing_count: missing,
+                    }
+                }
+            } else {
+                self.out_of_order_count += 1;
+                SequenceTrackingEvent::OutOfOrder {
+                    sequence: u64::from(seq),
+                    previous_highest: u64::from(self.highest_sequence.unwrap_or(last)),
+                }
+            }
+        } else {
+            // seq < last
+            let dist_backward = last_u - seq_u;
+            let dist_rollover = (seq_u + modulus) - last_u;
+
+            if dist_rollover < half_modulus {
+                self.rollover_count += 1;
+                self.last_sequence = Some(seq);
+                self.highest_sequence = Some(seq);
+                if dist_rollover == 1 {
+                    SequenceTrackingEvent::Rollover {
+                        sequence: u64::from(seq),
+                        missing_count: 0,
+                    }
+                } else {
+                    let missing = u64::from(dist_rollover - 1);
+                    self.gap_count += missing;
+                    SequenceTrackingEvent::Rollover {
+                        sequence: u64::from(seq),
+                        missing_count: missing,
+                    }
+                }
+            } else {
+                let _ = dist_backward;
+                self.out_of_order_count += 1;
+                SequenceTrackingEvent::OutOfOrder {
+                    sequence: u64::from(seq),
+                    previous_highest: u64::from(self.highest_sequence.unwrap_or(last)),
+                }
+            }
+        }
+    }
+
+    fn remember_seen(&mut self, seq: u8) {
+        if self.recent_seen_queue.len() >= 64 {
+            if let Some(old) = self.recent_seen_queue.pop_front() {
+                self.recent_seen_set.remove(&old);
+            }
+        }
+        self.recent_seen_queue.push_back(seq);
+        self.recent_seen_set.insert(seq);
+    }
+
+    /// Returns the number of sequence gaps recorded.
+    #[must_use]
+    pub fn gap_count(&self) -> u64 {
+        self.gap_count
+    }
+
+    /// Returns the number of duplicate packets recorded.
+    #[must_use]
+    pub fn duplicate_count(&self) -> u64 {
+        self.duplicate_count
+    }
+
+    /// Returns the number of out-of-order packets recorded.
+    #[must_use]
+    pub fn out_of_order_count(&self) -> u64 {
+        self.out_of_order_count
+    }
+
+    /// Returns the number of sequence rollovers recorded.
+    #[must_use]
+    pub fn rollover_count(&self) -> u64 {
+        self.rollover_count
+    }
+
+    /// Returns the number of packets evaluated.
+    #[must_use]
+    pub fn packets_evaluated(&self) -> u64 {
+        self.packets_evaluated
+    }
+
+    /// Returns the last sequence number observed, if any.
+    #[must_use]
+    pub fn last_sequence(&self) -> Option<u8> {
+        self.last_sequence
+    }
+
+    /// Returns the highest sequence number observed, if any.
+    #[must_use]
+    pub fn highest_sequence(&self) -> Option<u8> {
+        self.highest_sequence
+    }
+
+    /// Returns true if the sequence number is identified as a duplicate.
+    #[must_use]
+    pub fn is_duplicate(&self, seq: u8) -> bool {
+        self.last_sequence == Some(seq) || self.recent_seen_set.contains(&seq)
+    }
+}
+
+/// Multi-source MAVLink sequence tracker maintaining independent modulo-256 counters per (system_id, component_id) (SPEC §14, §8).
+#[derive(Debug, Clone, Default)]
+pub struct MavlinkSequenceTracker {
+    allowed_sources: Option<HashSet<(u8, u8)>>,
+    filter_systems: Option<HashSet<u8>>,
+    filter_components: Option<HashSet<u8>>,
+    trackers: HashMap<(u8, u8), MavlinkSourceSequenceTracker>,
+    validation_errors: u64,
+}
+
+impl MavlinkSequenceTracker {
+    /// Creates a new MAVLink sequence tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a MAVLink sequence tracker with optional system and component ID allowlists.
+    #[must_use]
+    pub fn with_filters(
+        filter_systems: Option<Vec<u8>>,
+        filter_components: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            allowed_sources: None,
+            filter_systems: filter_systems.map(|v| v.into_iter().collect()),
+            filter_components: filter_components.map(|v| v.into_iter().collect()),
+            trackers: HashMap::new(),
+            validation_errors: 0,
+        }
+    }
+
+    /// Returns true if the source `(system_id, component_id)` passes configured filters.
+    #[must_use]
+    pub fn is_source_allowed(&self, system_id: u8, component_id: u8) -> bool {
+        if let Some(ref allowed) = self.allowed_sources {
+            if !allowed.contains(&(system_id, component_id)) {
+                return false;
+            }
+        }
+        if let Some(ref systems) = self.filter_systems {
+            if !systems.contains(&system_id) {
+                return false;
+            }
+        }
+        if let Some(ref comps) = self.filter_components {
+            if !comps.contains(&component_id) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Records and evaluates a sequence number for a specific system and component source.
+    pub fn record_sequence(
+        &mut self,
+        system_id: u8,
+        component_id: u8,
+        seq: u8,
+    ) -> Option<SequenceTrackingEvent> {
+        if !self.is_source_allowed(system_id, component_id) {
+            return None;
+        }
+        let tracker = self
+            .trackers
+            .entry((system_id, component_id))
+            .or_insert_with(|| MavlinkSourceSequenceTracker::new(system_id, component_id));
+        Some(tracker.record_sequence(seq))
+    }
+
+    /// Records and evaluates a sequence number for a source given as a tuple `(system_id, component_id)`.
+    pub fn record_source_sequence(
+        &mut self,
+        source: (u8, u8),
+        seq: u8,
+    ) -> Option<SequenceTrackingEvent> {
+        self.record_sequence(source.0, source.1, seq)
+    }
+
+    /// Evaluates sequence continuity from an extracted [`MavlinkHeader`].
+    pub fn record_header(&mut self, header: &MavlinkHeader) -> Option<SequenceTrackingEvent> {
+        self.record_sequence(header.system_id, header.component_id, header.sequence)
+    }
+
+    /// Alias for [`record_header`].
+    pub fn process_header(&mut self, header: &MavlinkHeader) -> Option<SequenceTrackingEvent> {
+        self.record_header(header)
+    }
+
+    /// Parses a raw packet buffer and evaluates sequence continuity if valid.
+    ///
+    /// # Errors
+    /// Returns [`MavlinkParseError`] if the packet is malformed or truncated.
+    pub fn process_packet(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<Option<SequenceTrackingEvent>, MavlinkParseError> {
+        let header = parse_mavlink_header(packet)?;
+        Ok(self.record_header(&header))
+    }
+
+    /// Returns the last sequence number observed for a specific source, if any.
+    #[must_use]
+    pub fn last_sequence(&self, system_id: u8, component_id: u8) -> Option<u8> {
+        self.trackers
+            .get(&(system_id, component_id))
+            .and_then(|t| t.last_sequence)
+    }
+
+    /// Returns the highest sequence number observed for a specific source, if any.
+    #[must_use]
+    pub fn highest_sequence(&self, system_id: u8, component_id: u8) -> Option<u8> {
+        self.trackers
+            .get(&(system_id, component_id))
+            .and_then(|t| t.highest_sequence)
+    }
+
+    /// Returns the sequence gap count for a specific source.
+    #[must_use]
+    pub fn gap_count(&self, system_id: u8, component_id: u8) -> u64 {
+        self.trackers
+            .get(&(system_id, component_id))
+            .map_or(0, |t| t.gap_count)
+    }
+
+    /// Returns the duplicate packet count for a specific source.
+    #[must_use]
+    pub fn duplicate_count(&self, system_id: u8, component_id: u8) -> u64 {
+        self.trackers
+            .get(&(system_id, component_id))
+            .map_or(0, |t| t.duplicate_count)
+    }
+
+    /// Returns the out-of-order packet count for a specific source.
+    #[must_use]
+    pub fn out_of_order_count(&self, system_id: u8, component_id: u8) -> u64 {
+        self.trackers
+            .get(&(system_id, component_id))
+            .map_or(0, |t| t.out_of_order_count)
+    }
+
+    /// Returns the sequence rollover count for a specific source.
+    #[must_use]
+    pub fn rollover_count(&self, system_id: u8, component_id: u8) -> u64 {
+        self.trackers
+            .get(&(system_id, component_id))
+            .map_or(0, |t| t.rollover_count)
+    }
+
+    /// Returns the total packets evaluated for a specific source.
+    #[must_use]
+    pub fn packets_evaluated(&self, system_id: u8, component_id: u8) -> u64 {
+        self.trackers
+            .get(&(system_id, component_id))
+            .map_or(0, |t| t.packets_evaluated)
+    }
+
+    /// Returns true if the sequence number is identified as a duplicate for the given source.
+    #[must_use]
+    pub fn is_duplicate(&self, system_id: u8, component_id: u8, seq: u8) -> bool {
+        self.trackers
+            .get(&(system_id, component_id))
+            .is_some_and(|t| t.is_duplicate(seq))
+    }
+
+    /// Returns cumulative gap count across all sources.
+    #[must_use]
+    pub fn total_gap_count(&self) -> u64 {
+        self.trackers.values().map(|t| t.gap_count).sum()
+    }
+
+    /// Returns cumulative duplicate count across all sources.
+    #[must_use]
+    pub fn total_duplicate_count(&self) -> u64 {
+        self.trackers.values().map(|t| t.duplicate_count).sum()
+    }
+
+    /// Returns total packets evaluated across all sources.
+    #[must_use]
+    pub fn total_packets_evaluated(&self) -> u64 {
+        self.trackers.values().map(|t| t.packets_evaluated).sum()
+    }
+
+    /// Returns a reference to the tracker for a specific source if initialized.
+    #[must_use]
+    pub fn source_tracker(
+        &self,
+        system_id: u8,
+        component_id: u8,
+    ) -> Option<&MavlinkSourceSequenceTracker> {
+        self.trackers.get(&(system_id, component_id))
+    }
+
+    /// Alias for [`source_tracker`].
+    #[must_use]
+    pub fn get(&self, system_id: u8, component_id: u8) -> Option<&MavlinkSourceSequenceTracker> {
+        self.source_tracker(system_id, component_id)
+    }
+
+    /// Records a packet validation error.
+    pub fn record_validation_error(&mut self) {
+        self.validation_errors += 1;
+    }
+
+    /// Returns total validation errors recorded.
+    #[must_use]
+    pub fn validation_error_count(&self) -> u64 {
+        self.validation_errors
+    }
+
+    /// Resets all sequence tracking state across all sources.
+    pub fn reset(&mut self) {
+        self.trackers.clear();
+        self.validation_errors = 0;
+    }
+
+    /// Resets sequence tracking state for a specific source.
+    pub fn reset_source(&mut self, system_id: u8, component_id: u8) {
+        self.trackers.remove(&(system_id, component_id));
+    }
+
+    /// Captures a point-in-time snapshot of the sequence state for a source (SPEC §8).
+    #[must_use]
+    pub fn source_state(
+        &self,
+        stream_id: &str,
+        system_id: u8,
+        component_id: u8,
+    ) -> Option<SequenceState> {
+        let t = self.trackers.get(&(system_id, component_id))?;
+        Some(SequenceState {
+            stream_id: format!("{stream_id}:mavlink_{system_id}_{component_id}"),
+            enabled: true,
+            offset: Some(2),
+            width: Some(1),
+            byte_order: Some(ByteOrder::LittleEndian),
+            rollover_threshold: Some(MAVLINK_SEQUENCE_MODULUS),
+            packets_evaluated: t.packets_evaluated,
+            last_sequence: t.last_sequence.map(u64::from),
+            highest_sequence: t.highest_sequence.map(u64::from),
+            gap_count: t.gap_count,
+            duplicate_count: t.duplicate_count,
+            out_of_order_count: t.out_of_order_count,
+            rollover_count: t.rollover_count,
+            hex_preview_enabled: false,
+            ascii_preview_enabled: false,
+            max_preview_bytes: 64,
+        })
+    }
+}
+
+pub type MavlinkEndpointSequenceTracker = MavlinkSourceSequenceTracker;
+pub type EndpointSequenceTracker = MavlinkSourceSequenceTracker;
+pub type SourceSequenceTracker = MavlinkSourceSequenceTracker;
+pub type MavlinkStreamSequenceTracker = MavlinkSequenceTracker;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -913,5 +1370,148 @@ mod tests {
         let signed_hdr = signed_header_opt.expect("signed header must be preserved");
         assert!(signed_hdr.is_signed);
         assert_eq!(signed_hdr.total_packet_length, 10 + 25);
+    }
+
+    #[test]
+    fn test_criterion1_independent_per_source_sequence_tracking() {
+        // Acceptance criterion: In crates/rer/src/mavlink.rs, sequence tracking maintains 8-bit
+        // sequence counters modulo 256 independently for two distinct system and component identifier sources,
+        // detecting a sequence gap on one source without altering continuity state on the other source.
+        let mut tracker = MavlinkSequenceTracker::new();
+        let sys_a = 1;
+        let comp_a = 1;
+        let sys_b = 2;
+        let comp_b = 1;
+
+        // Source A initial packet
+        assert_eq!(
+            tracker.record_sequence(sys_a, comp_a, 0),
+            Some(SequenceTrackingEvent::Initial { sequence: 0 })
+        );
+
+        // Source B initial packet (different start sequence)
+        assert_eq!(
+            tracker.record_sequence(sys_b, comp_b, 100),
+            Some(SequenceTrackingEvent::Initial { sequence: 100 })
+        );
+
+        // Source A in-order packet
+        assert_eq!(
+            tracker.record_sequence(sys_a, comp_a, 1),
+            Some(SequenceTrackingEvent::InOrder { sequence: 1 })
+        );
+
+        // Source A receives sequence 4 (gap of 2: missing 2, 3)
+        assert_eq!(
+            tracker.record_sequence(sys_a, comp_a, 4),
+            Some(SequenceTrackingEvent::Gap {
+                expected: 2,
+                actual: 4,
+                missing_count: 2,
+            })
+        );
+        assert_eq!(tracker.gap_count(sys_a, comp_a), 2);
+        assert_eq!(tracker.last_sequence(sys_a, comp_a), Some(4));
+
+        // VERIFY: Source B continuity state is completely unaltered!
+        assert_eq!(tracker.gap_count(sys_b, comp_b), 0);
+        assert_eq!(tracker.duplicate_count(sys_b, comp_b), 0);
+        assert_eq!(tracker.last_sequence(sys_b, comp_b), Some(100));
+        assert_eq!(tracker.packets_evaluated(sys_b, comp_b), 1);
+
+        // Source B advances in-order to 101
+        assert_eq!(
+            tracker.record_sequence(sys_b, comp_b, 101),
+            Some(SequenceTrackingEvent::InOrder { sequence: 101 })
+        );
+        assert_eq!(tracker.last_sequence(sys_b, comp_b), Some(101));
+        assert_eq!(tracker.gap_count(sys_b, comp_b), 0);
+    }
+
+    #[test]
+    fn test_criterion2_duplicate_sequence_tracking() {
+        // Acceptance criterion: In crates/rer/src/mavlink.rs, sequence tracking receiving a duplicate
+        // sequence number for an existing source increments duplicate counters and identifies duplicate
+        // packets without dropping traffic.
+        let mut tracker = MavlinkSequenceTracker::new();
+        let sys = 1;
+        let comp = 1;
+
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 10),
+            Some(SequenceTrackingEvent::Initial { sequence: 10 })
+        );
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 11),
+            Some(SequenceTrackingEvent::InOrder { sequence: 11 })
+        );
+
+        // Immediate duplicate: sequence 11 again
+        assert!(tracker.is_duplicate(sys, comp, 11));
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 11),
+            Some(SequenceTrackingEvent::Duplicate { sequence: 11 })
+        );
+        assert_eq!(tracker.duplicate_count(sys, comp), 1);
+        assert_eq!(tracker.total_duplicate_count(), 1);
+        // last_sequence is still 11
+        assert_eq!(tracker.last_sequence(sys, comp), Some(11));
+
+        // Advance to 12
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 12),
+            Some(SequenceTrackingEvent::InOrder { sequence: 12 })
+        );
+
+        // Previous sequence 11 arrives again (recent window duplicate)
+        assert!(tracker.is_duplicate(sys, comp, 11));
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 11),
+            Some(SequenceTrackingEvent::Duplicate { sequence: 11 })
+        );
+        assert_eq!(tracker.duplicate_count(sys, comp), 2);
+        assert_eq!(tracker.total_duplicate_count(), 2);
+        // last_sequence is preserved at 12
+        assert_eq!(tracker.last_sequence(sys, comp), Some(12));
+    }
+
+    #[test]
+    fn test_mavlink_sequence_rollover_modulo_256() {
+        let mut tracker = MavlinkSequenceTracker::new();
+        let sys = 1;
+        let comp = 1;
+
+        // Sequence near 255 boundary
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 255),
+            Some(SequenceTrackingEvent::Initial { sequence: 255 })
+        );
+
+        // Rollover to 0
+        assert_eq!(
+            tracker.record_sequence(sys, comp, 0),
+            Some(SequenceTrackingEvent::Rollover {
+                sequence: 0,
+                missing_count: 0,
+            })
+        );
+        assert_eq!(tracker.last_sequence(sys, comp), Some(0));
+        assert_eq!(tracker.rollover_count(sys, comp), 1);
+
+        // Rollover with gap: from 254 to 2 (missing 255, 0, 1 -> 3 packets)
+        let mut tracker2 = MavlinkSequenceTracker::new();
+        assert_eq!(
+            tracker2.record_sequence(sys, comp, 254),
+            Some(SequenceTrackingEvent::Initial { sequence: 254 })
+        );
+        assert_eq!(
+            tracker2.record_sequence(sys, comp, 2),
+            Some(SequenceTrackingEvent::Rollover {
+                sequence: 2,
+                missing_count: 3,
+            })
+        );
+        assert_eq!(tracker2.gap_count(sys, comp), 3);
+        assert_eq!(tracker2.last_sequence(sys, comp), Some(2));
     }
 }

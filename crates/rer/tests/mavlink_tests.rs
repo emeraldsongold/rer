@@ -1,5 +1,7 @@
 //! Integration tests for in-tree MAVLink packet header parser (SPEC §14, §8, Task RER-F-050).
 
+use std::process::Command;
+
 use rer::mavlink::{
     encode_mavlink1_header, encode_mavlink2_header, evaluate_header, evaluate_mavlink,
     evaluate_mavlink_2_packet, evaluate_mavlink_header, evaluate_mavlink_packet,
@@ -358,4 +360,350 @@ fn test_constants_and_aliases() {
     assert_eq!(MAVLINK_SIGNATURE_LEN, 13);
     assert_eq!(MAVLINK_IFLAG_SIGNED, 0x01);
     assert_eq!(MAVLINK_KNOWN_INCOMPAT_FLAGS, 0x01);
+}
+
+// ---------------------------------------------------------------------------
+// Task RER-F-051 Acceptance Criteria Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_f051_criterion1_independent_per_source_sequence_tracking() {
+    // Acceptance criterion: In crates/rer/src/mavlink.rs, sequence tracking maintains 8-bit
+    // sequence counters modulo 256 independently for two distinct system and component identifier sources,
+    // detecting a sequence gap on one source without altering continuity state on the other source.
+    use rer::diagnostics::SequenceTrackingEvent;
+    use rer::mavlink::MavlinkSequenceTracker;
+
+    let mut tracker = MavlinkSequenceTracker::new();
+    let sys_1 = 1u8;
+    let comp_1 = 1u8;
+    let sys_2 = 2u8;
+    let comp_2 = 1u8;
+
+    // Initial packets on distinct sources
+    assert_eq!(
+        tracker.record_sequence(sys_1, comp_1, 10),
+        Some(SequenceTrackingEvent::Initial { sequence: 10 })
+    );
+    assert_eq!(
+        tracker.record_sequence(sys_2, comp_2, 200),
+        Some(SequenceTrackingEvent::Initial { sequence: 200 })
+    );
+
+    // Source 1 advances in-order
+    assert_eq!(
+        tracker.record_sequence(sys_1, comp_1, 11),
+        Some(SequenceTrackingEvent::InOrder { sequence: 11 })
+    );
+
+    // Source 1 experiences a sequence gap: jumps from 11 to 15 (missing 12, 13, 14 -> 3 packets)
+    assert_eq!(
+        tracker.record_sequence(sys_1, comp_1, 15),
+        Some(SequenceTrackingEvent::Gap {
+            expected: 12,
+            actual: 15,
+            missing_count: 3,
+        })
+    );
+    assert_eq!(tracker.gap_count(sys_1, comp_1), 3);
+    assert_eq!(tracker.last_sequence(sys_1, comp_1), Some(15));
+
+    // VERIFY: Source 2 continuity state is completely unaltered!
+    assert_eq!(
+        tracker.gap_count(sys_2, comp_2),
+        0,
+        "Source 2 must have 0 gaps despite Source 1 sequence gap"
+    );
+    assert_eq!(
+        tracker.duplicate_count(sys_2, comp_2),
+        0,
+        "Source 2 must have 0 duplicates"
+    );
+    assert_eq!(tracker.last_sequence(sys_2, comp_2), Some(200));
+    assert_eq!(tracker.packets_evaluated(sys_2, comp_2), 1);
+
+    // Source 2 advances in-order to 201 without disruption
+    assert_eq!(
+        tracker.record_sequence(sys_2, comp_2, 201),
+        Some(SequenceTrackingEvent::InOrder { sequence: 201 })
+    );
+    assert_eq!(tracker.last_sequence(sys_2, comp_2), Some(201));
+    assert_eq!(tracker.gap_count(sys_2, comp_2), 0);
+}
+
+#[test]
+fn test_f051_criterion2_duplicate_sequence_number_tracking() {
+    // Acceptance criterion: In crates/rer/src/mavlink.rs, sequence tracking receiving a duplicate
+    // sequence number for an existing source increments duplicate counters and identifies duplicate
+    // packets without dropping traffic.
+    use rer::diagnostics::SequenceTrackingEvent;
+    use rer::mavlink::MavlinkSequenceTracker;
+
+    let mut tracker = MavlinkSequenceTracker::new();
+    let sys = 1u8;
+    let comp = 1u8;
+
+    assert_eq!(
+        tracker.record_sequence(sys, comp, 50),
+        Some(SequenceTrackingEvent::Initial { sequence: 50 })
+    );
+    assert_eq!(
+        tracker.record_sequence(sys, comp, 51),
+        Some(SequenceTrackingEvent::InOrder { sequence: 51 })
+    );
+
+    // Receive duplicate sequence 51
+    assert!(tracker.is_duplicate(sys, comp, 51));
+    assert_eq!(
+        tracker.record_sequence(sys, comp, 51),
+        Some(SequenceTrackingEvent::Duplicate { sequence: 51 })
+    );
+    assert_eq!(tracker.duplicate_count(sys, comp), 1);
+    assert_eq!(tracker.total_duplicate_count(), 1);
+    assert_eq!(tracker.last_sequence(sys, comp), Some(51));
+
+    // Subsequent in-order packet
+    assert_eq!(
+        tracker.record_sequence(sys, comp, 52),
+        Some(SequenceTrackingEvent::InOrder { sequence: 52 })
+    );
+
+    // Receive duplicate sequence 51 again (out-of-order duplicate)
+    assert!(tracker.is_duplicate(sys, comp, 51));
+    assert_eq!(
+        tracker.record_sequence(sys, comp, 51),
+        Some(SequenceTrackingEvent::Duplicate { sequence: 51 })
+    );
+    assert_eq!(tracker.duplicate_count(sys, comp), 2);
+    assert_eq!(tracker.total_duplicate_count(), 2);
+    // last_sequence is preserved at 52
+    assert_eq!(tracker.last_sequence(sys, comp), Some(52));
+}
+
+#[test]
+fn test_f051_criterion3_diagnostic_event_mavlink_serialization() {
+    // Acceptance criterion: In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent
+    // containing MAVLink system ID, component ID, sequence number, and 24-bit message ID
+    // produces a JSON object containing the structured MAVLink metadata fields.
+    use rer::config::TransportType;
+    use rer::diagnostics::{DiagnosticEvent, DiagnosticStage};
+
+    let msgid_24bit = 16_777_215u32; // 0xFFFFFF
+    let event = DiagnosticEvent::new(
+        1000,
+        2000,
+        "mavlink-test-stream",
+        DiagnosticStage::MavlinkInspection,
+        TransportType::Udp,
+        1400,
+    )
+    .with_mavlink_system_id(1)
+    .with_mavlink_component_id(2)
+    .with_mavlink_sequence(42)
+    .with_mavlink_message_id(msgid_24bit);
+
+    let json_str = serde_json::to_string(&event).expect("serialize event to JSON");
+    let val: serde_json::Value = serde_json::from_str(&json_str).expect("parse JSON");
+    let obj = val.as_object().expect("expected JSON object");
+
+    // Top-level structured fields
+    assert_eq!(
+        obj.get("mavlink_system_id").and_then(|v| v.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        obj.get("mavlink_component_id").and_then(|v| v.as_u64()),
+        Some(2)
+    );
+    assert_eq!(
+        obj.get("mavlink_sequence").and_then(|v| v.as_u64()),
+        Some(42)
+    );
+    assert_eq!(
+        obj.get("sequence_number").and_then(|v| v.as_u64()),
+        Some(42)
+    );
+    assert_eq!(
+        obj.get("mavlink_message_id").and_then(|v| v.as_u64()),
+        Some(u64::from(msgid_24bit))
+    );
+
+    // Structured MavlinkMetadata object
+    let meta = obj
+        .get("mavlink_metadata")
+        .and_then(|v| v.as_object())
+        .expect("expected mavlink_metadata object in JSON");
+    assert_eq!(meta.get("system_id").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(meta.get("component_id").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(meta.get("sequence").and_then(|v| v.as_u64()), Some(42));
+    assert_eq!(
+        meta.get("message_id").and_then(|v| v.as_u64()),
+        Some(u64::from(msgid_24bit))
+    );
+
+    // Also verify deserialization round-trip
+    let deserialized: DiagnosticEvent = serde_json::from_value(val).expect("deserialize");
+    assert_eq!(deserialized.mavlink_system_id, Some(1));
+    assert_eq!(deserialized.mavlink_component_id, Some(2));
+    assert_eq!(deserialized.mavlink_sequence, Some(42));
+    assert_eq!(deserialized.mavlink_message_id, Some(msgid_24bit));
+}
+
+#[test]
+fn test_f051_criterion4_validate_rejects_conflicting_sequence_tracking() {
+    // Acceptance criterion: Running rer validate on a configuration where both option mavlink
+    // sequence tracking and option sequence tracking are enabled on the same stream returns a
+    // validation error reporting conflicting sequence tracking.
+    use rer::config::Config;
+
+    let yaml_conflict = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "stream-conflict"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:6000"
+        sequence:
+          enabled: true
+          offset: 0
+          width: 4
+        mavlink:
+          enabled: true
+          track_sequences: true
+"#;
+
+    let config = Config::from_yaml_str(yaml_conflict).expect("parse yaml config");
+    let errors = config.validate();
+    assert!(
+        !errors.is_empty(),
+        "conflicting sequence tracking must produce validation errors"
+    );
+    let conflict_err = errors
+        .iter()
+        .find(|e| e.reason.contains("conflicting sequence tracking"));
+    assert!(
+        conflict_err.is_some(),
+        "expected error reason containing 'conflicting sequence tracking', got: {:?}",
+        errors
+    );
+
+    // Test through CLI 'rer validate'
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!(
+        "test_mavlink_conflict_{}.yaml",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&temp_file, yaml_conflict).expect("write temp config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rer"))
+        .arg("validate")
+        .arg(&temp_file)
+        .output()
+        .expect("execute rer validate");
+
+    let _ = std::fs::remove_file(&temp_file);
+
+    assert!(
+        !output.status.success(),
+        "rer validate must fail for conflicting sequence tracking"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicting sequence tracking"),
+        "stderr must report conflicting sequence tracking, got:\n{}",
+        stderr
+    );
+
+    // Verify with sequence_tracking alias in yaml
+    let yaml_conflict_alias = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "stream-conflict-alias"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:6000"
+        sequence:
+          enabled: true
+        mavlink:
+          enabled: true
+          sequence_tracking: true
+"#;
+    let config_alias = Config::from_yaml_str(yaml_conflict_alias).expect("parse yaml");
+    let errors_alias = config_alias.validate();
+    assert!(
+        errors_alias
+            .iter()
+            .any(|e| e.reason.contains("conflicting sequence tracking")),
+        "sequence_tracking alias must also trigger conflicting sequence tracking error"
+    );
+
+    // Verify when generic sequence tracking is disabled, validation succeeds
+    let yaml_valid = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "stream-valid"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:6000"
+        sequence:
+          enabled: false
+        mavlink:
+          enabled: true
+          track_sequences: true
+"#;
+    let config_valid = Config::from_yaml_str(yaml_valid).expect("parse valid yaml");
+    assert!(
+        config_valid.validate().is_empty(),
+        "when generic sequence tracking is disabled, mavlink sequence tracking is allowed"
+    );
+}
+
+#[test]
+fn test_f051_criterion5_deserializing_yaml_defaults_mavlink_to_none() {
+    // Acceptance criterion: Deserializing a configuration YAML containing a stream without
+    // option mavlink defaults to None and preserves existing relay configuration behavior.
+    use rer::config::Config;
+
+    let yaml_without_mavlink = r#"
+version: "1"
+instances:
+  - id: "inst-default"
+    streams:
+      - id: "stream-default"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:7000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:8000"
+"#;
+
+    let config = Config::from_yaml_str(yaml_without_mavlink).expect("parse yaml without mavlink");
+    let stream = &config.instances[0].streams[0];
+    assert_eq!(
+        stream.mavlink, None,
+        "stream without mavlink option must deserialize into None"
+    );
+    assert!(
+        config.validate().is_empty(),
+        "standard configuration without mavlink must validate cleanly"
+    );
 }

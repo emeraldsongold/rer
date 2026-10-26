@@ -1118,6 +1118,83 @@ items:
       - In crates/rer/src/relay.rs, forwarding traffic on a stream without MQTT inspection enabled delivers packets byte-identically without invoking MQTT parsing overhead.
       - In crates/rer/src/relay.rs, forwarding an inspected MQTT packet records successful local transmission with DiagnosticStage::SendSucceeded without claiming downstream broker receipt.
 
+  - id: RER-F-060
+    order: 60
+    title: KISS TCP stream framing support
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-055]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. Implement RER-F-055 as a modular, zero-dependency KISS framing and AX.25 packet inspection feature for amateur radio, APRS, ground stations, and small-satellite telemetry. **Requirements** 1. Add ''FramingMode::Kiss'' to support KISS-over-TCP streams, handling fragmented reads, multiple frames, FEND delimiters, and escape sequences. 2. Parse AX.25 addresses, callsigns, SSIDs, digipeater paths, control fields, and PID where safely available. 3. Integrate KISS port, command type, frame classification, and address metadata into existing diagnostics. 4. Add comprehensive tests for valid frames, malformed escapes, truncated packets, oversized frames, and stream resynchronization. **Recommendations** - Enforce configurable frame-size limits and bounded buffering. Malformed frames must never crash or indefinitely stall the relay. - Keep passive inspection separate from KISS TNC control commands. Never transmit hardware configuration commands unless explicitly supported and authorized. - Make callsign filtering optional, with clear rules for frames that cannot be parsed. - Preserve transparent forwarding and distinguish malformed KISS framing from invalid AX.25 content. - Do not implement connected-mode AX.25, radio control, modem functionality, or APRS application decoding in this proposal. - Benchmark throughput and latency to ensure inspection introduces minimal overhead. **Acceptance Criteria:** KISS framing handles arbitrary TCP boundaries correctly; AX.25 metadata is extracted safely; malformed frames are handled predictably; diagnostics remain bounded and non-blocking; and existing relay behavior remains unchanged when inspection is disabled. Implement KISS framing first, then AX.25 parsing and diagnostics integration. This staged approach delivers practical packet-radio visibility while keeping RER lightweight and protocol-agnostic. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering a KISS frame fragmented across multiple 1-byte reads reassembles the complete unescaped frame matching the original transmitted payload bytes.
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering two concatenated KISS frames separated by FEND delimiter byte 0xC0 in a single read buffer yields the two frames individually.
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering an escaped sequence of 0xDB followed by 0xDC decodes byte 0xC0, and 0xDB followed by 0xDD decodes byte 0xDB.
+      - In crates/rer/src/framing.rs, reading a KISS frame containing escape byte 0xDB followed by an unexpected byte returns an io::ErrorKind::InvalidData error.
+      - In crates/rer/src/framing.rs, reading a KISS frame whose unescaped length exceeds the configured max_frame_size returns an io::ErrorKind::InvalidData error.
+      - In crates/rer/src/config.rs, configuring option framing with value kiss deserializes into FramingMode::Kiss.
+
+  - id: RER-F-061
+    order: 61
+    title: In-tree AX.25 packet header parser
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-060]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. Implement RER-F-055 as a modular, zero-dependency KISS framing and AX.25 packet inspection feature for amateur radio, APRS, ground stations, and small-satellite telemetry. **Requirements** 1. Add ''FramingMode::Kiss'' to support KISS-over-TCP streams, handling fragmented reads, multiple frames, FEND delimiters, and escape sequences. 2. Parse AX.25 addresses, callsigns, SSIDs, digipeater paths, control fields, and PID where safely available. 3. Integrate KISS port, command type, frame classification, and address metadata into existing diagnostics. 4. Add comprehensive tests for valid frames, malformed escapes, truncated packets, oversized frames, and stream resynchronization. **Recommendations** - Enforce configurable frame-size limits and bounded buffering. Malformed frames must never crash or indefinitely stall the relay. - Keep passive inspection separate from KISS TNC control commands. Never transmit hardware configuration commands unless explicitly supported and authorized. - Make callsign filtering optional, with clear rules for frames that cannot be parsed. - Preserve transparent forwarding and distinguish malformed KISS framing from invalid AX.25 content. - Do not implement connected-mode AX.25, radio control, modem functionality, or APRS application decoding in this proposal. - Benchmark throughput and latency to ensure inspection introduces minimal overhead. **Acceptance Criteria:** KISS framing handles arbitrary TCP boundaries correctly; AX.25 metadata is extracted safely; malformed frames are handled predictably; diagnostics remain bounded and non-blocking; and existing relay behavior remains unchanged when inspection is disabled. Implement KISS framing first, then AX.25 parsing and diagnostics integration. This staged approach delivers practical packet-radio visibility while keeping RER lightweight and protocol-agnostic. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/ax25.rs, parsing a 15-byte buffer containing standard 7-byte destination and 7-byte source address fields unshifts ASCII callsign characters by 1 bit and extracts destination callsign, source callsign, and SSIDs in range 0 to 15.
+      - In crates/rer/src/ax25.rs, parsing an address field with digipeater addresses extracts up to 8 repeater callsigns and identifies whether the repeated bit is set.
+      - In crates/rer/src/ax25.rs, parsing a frame with control byte 0x03 or 0x13 classifies the frame as Unnumbered Information and extracts the following protocol identifier byte.
+      - In crates/rer/src/ax25.rs, parsing an input buffer shorter than 15 bytes returns an error indicating a truncated packet.
+      - In crates/rer/src/ax25.rs, parsing an address field containing non-alphanumeric callsign characters returns a parse error without panicking.
+
+  - id: RER-F-062
+    order: 62
+    title: KISS configuration and AX.25 diagnostic event enrichment
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-061]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. Implement RER-F-055 as a modular, zero-dependency KISS framing and AX.25 packet inspection feature for amateur radio, APRS, ground stations, and small-satellite telemetry. **Requirements** 1. Add ''FramingMode::Kiss'' to support KISS-over-TCP streams, handling fragmented reads, multiple frames, FEND delimiters, and escape sequences. 2. Parse AX.25 addresses, callsigns, SSIDs, digipeater paths, control fields, and PID where safely available. 3. Integrate KISS port, command type, frame classification, and address metadata into existing diagnostics. 4. Add comprehensive tests for valid frames, malformed escapes, truncated packets, oversized frames, and stream resynchronization. **Recommendations** - Enforce configurable frame-size limits and bounded buffering. Malformed frames must never crash or indefinitely stall the relay. - Keep passive inspection separate from KISS TNC control commands. Never transmit hardware configuration commands unless explicitly supported and authorized. - Make callsign filtering optional, with clear rules for frames that cannot be parsed. - Preserve transparent forwarding and distinguish malformed KISS framing from invalid AX.25 content. - Do not implement connected-mode AX.25, radio control, modem functionality, or APRS application decoding in this proposal. - Benchmark throughput and latency to ensure inspection introduces minimal overhead. **Acceptance Criteria:** KISS framing handles arbitrary TCP boundaries correctly; AX.25 metadata is extracted safely; malformed frames are handled predictably; diagnostics remain bounded and non-blocking; and existing relay behavior remains unchanged when inspection is disabled. Implement KISS framing first, then AX.25 parsing and diagnostics integration. This staged approach delivers practical packet-radio visibility while keeping RER lightweight and protocol-agnostic. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - Deserializing a configuration YAML containing stream option kiss defaults field enabled to true and field inspect_ax25 to true.
+      - Running rer validate on a configuration with option kiss containing a port filter value greater than 15 returns a validation error reporting an invalid port number.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent containing KISS port, KISS command, AX.25 source callsign, and destination callsign produces a JSON object containing the structured metadata fields.
+      - In crates/rer/src/diagnostics.rs, emitting a DiagnosticEvent with KISS metadata into a full DiagnosticBuffer drops the event without blocking or panicking.
+      - Deserializing a configuration YAML containing a stream without option kiss defaults to None and preserves existing configuration behavior.
+
+  - id: RER-F-063
+    order: 63
+    title: Passive KISS and AX.25 stream inspection and transparent relay forwarding
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-062]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. Implement RER-F-055 as a modular, zero-dependency KISS framing and AX.25 packet inspection feature for amateur radio, APRS, ground stations, and small-satellite telemetry. **Requirements** 1. Add ''FramingMode::Kiss'' to support KISS-over-TCP streams, handling fragmented reads, multiple frames, FEND delimiters, and escape sequences. 2. Parse AX.25 addresses, callsigns, SSIDs, digipeater paths, control fields, and PID where safely available. 3. Integrate KISS port, command type, frame classification, and address metadata into existing diagnostics. 4. Add comprehensive tests for valid frames, malformed escapes, truncated packets, oversized frames, and stream resynchronization. **Recommendations** - Enforce configurable frame-size limits and bounded buffering. Malformed frames must never crash or indefinitely stall the relay. - Keep passive inspection separate from KISS TNC control commands. Never transmit hardware configuration commands unless explicitly supported and authorized. - Make callsign filtering optional, with clear rules for frames that cannot be parsed. - Preserve transparent forwarding and distinguish malformed KISS framing from invalid AX.25 content. - Do not implement connected-mode AX.25, radio control, modem functionality, or APRS application decoding in this proposal. - Benchmark throughput and latency to ensure inspection introduces minimal overhead. **Acceptance Criteria:** KISS framing handles arbitrary TCP boundaries correctly; AX.25 metadata is extracted safely; malformed frames are handled predictably; diagnostics remain bounded and non-blocking; and existing relay behavior remains unchanged when inspection is disabled. Implement KISS framing first, then AX.25 parsing and diagnostics integration. This staged approach delivers practical packet-radio visibility while keeping RER lightweight and protocol-agnostic. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a KISS data frame on a stream with KISS inspection enabled forwards the payload unmodified to destination endpoints while recording AX.25 metadata in diagnostic events.
+      - In crates/rer/src/relay.rs, receiving a KISS frame with a port mismatch against the configured port filter drops the packet and increments dropped packet counters.
+      - In crates/rer/src/relay.rs, receiving a malformed AX.25 packet on an inspected stream drops the packet by default and increments dropped packet counters.
+      - In crates/rer/src/relay.rs, receiving a malformed AX.25 packet on an inspected stream configured with option passthrough_on_error forwards the payload unmodified to destination endpoints while recording a validation failure event.
+      - In crates/rer/src/relay.rs, forwarding traffic on a stream without KISS inspection configured delivers datagrams byte-identically without invoking KISS parsing overhead.
+
   - id: RER-F-064
     order: 64
     title: Document author attribution and refresh milestone status in README
