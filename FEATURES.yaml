@@ -1040,6 +1040,84 @@ items:
       - The proposal document in docs/proposals explicitly states that full AX.25 connected-mode state machines, TNC modem hardware control, and physical-layer modulation are not claimed.
       - The proposal in docs/proposals identifies the smallest first implementation step for in-tree KISS frame encoding and decoding.
 
+  - id: RER-F-056
+    order: 56
+    title: In-tree MQTT fixed header parser and variable-byte integer codec
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-054]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. Implement RER-F-054 as a modular, zero-dependency MQTT inspection and framing feature supporting MQTT 3.1.1 and 5.0, with MQTT-SN support staged separately. **Requirements** 1. Implement an in-tree parser for fixed headers, packet types, flags, and variable-length integers. 2. Add opt-in MQTT TCP framing that handles fragmented reads, concatenated packets, and configurable maximum frame sizes. 3. Integrate packet metadata and validation errors with RER''s existing non-blocking diagnostics. 4. Add comprehensive tests covering all packet types, length boundaries, malformed headers, truncated frames, and forwarding behavior. **Recommendations** - Keep MQTT-SN separate from standard MQTT configuration or clearly isolate it through an explicit protocol variant, since its framing and transport differ. - On malformed TCP framing, terminate the affected stream by default. Avoid heuristic resynchronization that could misidentify payload bytes as headers. - Keep topic extraction disabled by default; if added, enforce length limits and redact sensitive topic data where appropriate. - Do not use MQTT packet identifiers as generic sequence numbers. Their meaning depends on QoS exchanges and session state. - Enforce packet-size limits before allocation and preserve existing relay behavior when inspection is disabled. - Report successful local transmission as ''Forwarded'', never as proof of downstream receipt or broker acceptance. **Scope:** No broker functionality, subscription routing, persistence, TLS termination, or application-payload decoding. **Acceptance Criteria:** Zero new dependencies, bounded memory use, correct framing, safe malformed-packet handling, accurate diagnostics, and passing automated tests. Implement the parser and tests first, then TCP framing and diagnostics. Add MQTT-SN only after standard MQTT support is stable. This delivers useful IoT and telemetry debugging while keeping RER lightweight and transparent. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/mqtt.rs, decoding a variable byte integer from byte buffer [0x80, 0x01] returns a decoded value of 128 and 2 bytes consumed.
+      - In crates/rer/src/mqtt.rs, decoding a variable byte integer containing 5 consecutive bytes with the continuation bit set returns an error indicating length overflow beyond 4 octets.
+      - In crates/rer/src/mqtt.rs, parsing a fixed header with packet type 1 for CONNECT and flag bits 0b0001 returns an error rejecting non-zero flags.
+      - In crates/rer/src/mqtt.rs, parsing a 2-byte PINGREQ packet with first byte 0xC0 and remaining length byte 0x00 returns an MqttFixedHeader with packet type 12, flags 0, remaining length 0, and total packet length 2.
+      - In crates/rer/src/mqtt.rs, parsing a buffer shorter than the declared variable byte integer or declared remaining length returns an error indicating truncated packet data.
+      - In crates/rer/src/mqtt.rs, parsing a byte buffer whose first byte has 4 high bits equal to 0 returns an error indicating forbidden packet type 0.
+
+  - id: RER-F-057
+    order: 57
+    title: Opt-in MQTT TCP stream framing support
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-056]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. Implement RER-F-054 as a modular, zero-dependency MQTT inspection and framing feature supporting MQTT 3.1.1 and 5.0, with MQTT-SN support staged separately. **Requirements** 1. Implement an in-tree parser for fixed headers, packet types, flags, and variable-length integers. 2. Add opt-in MQTT TCP framing that handles fragmented reads, concatenated packets, and configurable maximum frame sizes. 3. Integrate packet metadata and validation errors with RER''s existing non-blocking diagnostics. 4. Add comprehensive tests covering all packet types, length boundaries, malformed headers, truncated frames, and forwarding behavior. **Recommendations** - Keep MQTT-SN separate from standard MQTT configuration or clearly isolate it through an explicit protocol variant, since its framing and transport differ. - On malformed TCP framing, terminate the affected stream by default. Avoid heuristic resynchronization that could misidentify payload bytes as headers. - Keep topic extraction disabled by default; if added, enforce length limits and redact sensitive topic data where appropriate. - Do not use MQTT packet identifiers as generic sequence numbers. Their meaning depends on QoS exchanges and session state. - Enforce packet-size limits before allocation and preserve existing relay behavior when inspection is disabled. - Report successful local transmission as ''Forwarded'', never as proof of downstream receipt or broker acceptance. **Scope:** No broker functionality, subscription routing, persistence, TLS termination, or application-payload decoding. **Acceptance Criteria:** Zero new dependencies, bounded memory use, correct framing, safe malformed-packet handling, accurate diagnostics, and passing automated tests. Implement the parser and tests first, then TCP framing and diagnostics. Add MQTT-SN only after standard MQTT support is stable. This delivers useful IoT and telemetry debugging while keeping RER lightweight and transparent. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering an MQTT packet fragmented across 1-byte reads reassembles the complete packet matching the transmitted bytes.
+      - In crates/rer/src/framing.rs, reading from a TCP stream delivering two concatenated MQTT packets in a single read buffer yields the two packets individually at their calculated remaining length boundaries.
+      - In crates/rer/src/framing.rs, reading an MQTT TCP frame declaring a remaining length that exceeds the configured maximum frame size returns an invalid data error without allocating the declared frame size.
+      - In crates/rer/src/framing.rs, reading an MQTT frame from a TCP stream with a variable byte integer exceeding 4 octets returns an invalid data error and terminates the stream.
+      - In crates/rer/src/framing.rs, writing an MQTT packet using write_frame_with_mode transmits raw packet bytes without prepending a 4-byte length prefix.
+      - In crates/rer/src/config.rs, configuring option framing with value mqtt deserializes into FramingMode::Mqtt.
+
+  - id: RER-F-058
+    order: 58
+    title: MQTT stream configuration model and diagnostic event telemetry
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-057]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. Implement RER-F-054 as a modular, zero-dependency MQTT inspection and framing feature supporting MQTT 3.1.1 and 5.0, with MQTT-SN support staged separately. **Requirements** 1. Implement an in-tree parser for fixed headers, packet types, flags, and variable-length integers. 2. Add opt-in MQTT TCP framing that handles fragmented reads, concatenated packets, and configurable maximum frame sizes. 3. Integrate packet metadata and validation errors with RER''s existing non-blocking diagnostics. 4. Add comprehensive tests covering all packet types, length boundaries, malformed headers, truncated frames, and forwarding behavior. **Recommendations** - Keep MQTT-SN separate from standard MQTT configuration or clearly isolate it through an explicit protocol variant, since its framing and transport differ. - On malformed TCP framing, terminate the affected stream by default. Avoid heuristic resynchronization that could misidentify payload bytes as headers. - Keep topic extraction disabled by default; if added, enforce length limits and redact sensitive topic data where appropriate. - Do not use MQTT packet identifiers as generic sequence numbers. Their meaning depends on QoS exchanges and session state. - Enforce packet-size limits before allocation and preserve existing relay behavior when inspection is disabled. - Report successful local transmission as ''Forwarded'', never as proof of downstream receipt or broker acceptance. **Scope:** No broker functionality, subscription routing, persistence, TLS termination, or application-payload decoding. **Acceptance Criteria:** Zero new dependencies, bounded memory use, correct framing, safe malformed-packet handling, accurate diagnostics, and passing automated tests. Implement the parser and tests first, then TCP framing and diagnostics. Add MQTT-SN only after standard MQTT support is stable. This delivers useful IoT and telemetry debugging while keeping RER lightweight and transparent. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/config.rs, configuring option mqtt deserializes into MqttConfig with default validation settings.
+      - In crates/rer/src/config.rs, calling source_framing on a StreamConfig configured with option mqtt specifying framing mqtt returns FramingMode::Mqtt.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent populated with MQTT packet type 3, packet type name PUBLISH, QoS 1, and packet identifier 100 emits a JSON object containing the structured MQTT metadata fields.
+      - In crates/rer/src/diagnostics.rs, recording local transmission of an inspected MQTT packet sets stage to DiagnosticStage::SendSucceeded without asserting downstream broker delivery.
+      - In crates/rer/src/config.rs, deserializing a stream configuration YAML omitting option mqtt defaults field mqtt to None and preserves existing stream configuration values.
+
+  - id: RER-F-059
+    order: 59
+    title: MQTT relay forwarding integration and stream error handling
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-058]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. Implement RER-F-054 as a modular, zero-dependency MQTT inspection and framing feature supporting MQTT 3.1.1 and 5.0, with MQTT-SN support staged separately. **Requirements** 1. Implement an in-tree parser for fixed headers, packet types, flags, and variable-length integers. 2. Add opt-in MQTT TCP framing that handles fragmented reads, concatenated packets, and configurable maximum frame sizes. 3. Integrate packet metadata and validation errors with RER''s existing non-blocking diagnostics. 4. Add comprehensive tests covering all packet types, length boundaries, malformed headers, truncated frames, and forwarding behavior. **Recommendations** - Keep MQTT-SN separate from standard MQTT configuration or clearly isolate it through an explicit protocol variant, since its framing and transport differ. - On malformed TCP framing, terminate the affected stream by default. Avoid heuristic resynchronization that could misidentify payload bytes as headers. - Keep topic extraction disabled by default; if added, enforce length limits and redact sensitive topic data where appropriate. - Do not use MQTT packet identifiers as generic sequence numbers. Their meaning depends on QoS exchanges and session state. - Enforce packet-size limits before allocation and preserve existing relay behavior when inspection is disabled. - Report successful local transmission as ''Forwarded'', never as proof of downstream receipt or broker acceptance. **Scope:** No broker functionality, subscription routing, persistence, TLS termination, or application-payload decoding. **Acceptance Criteria:** Zero new dependencies, bounded memory use, correct framing, safe malformed-packet handling, accurate diagnostics, and passing automated tests. Implement the parser and tests first, then TCP framing and diagnostics. Add MQTT-SN only after standard MQTT support is stable. This delivers useful IoT and telemetry debugging while keeping RER lightweight and transparent. Relevant code: crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a valid MQTT packet on a stream with MQTT inspection enabled transmits the payload unmodified to destination endpoints while recording packet type and QoS in diagnostic events.
+      - In crates/rer/src/relay.rs, receiving a malformed MQTT packet with invalid header flags on a stream with MQTT inspection enabled drops the packet by default, increments dropped packet counters, and emits a dropped diagnostic event.
+      - In crates/rer/src/relay.rs, receiving a malformed MQTT packet on an inspected stream configured with option passthrough_on_error forwards the payload unmodified to destination endpoints while recording a validation failure event.
+      - In crates/rer/src/relay.rs, forwarding traffic on a stream without MQTT inspection enabled delivers packets byte-identically without invoking MQTT parsing overhead.
+      - In crates/rer/src/relay.rs, forwarding an inspected MQTT packet records successful local transmission with DiagnosticStage::SendSucceeded without claiming downstream broker receipt.
+
   - id: RER-T-001
     kind: track
     order: 101
