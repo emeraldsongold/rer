@@ -301,7 +301,7 @@ pub struct StreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mavlink: Option<MavlinkConfig>,
 
-    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", or "mavlink"). Defaults to length_prefix.
+    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", or "mqtt"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 }
@@ -695,7 +695,7 @@ pub struct EndpointConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ConnectionMode>,
 
-    /// Optional framing mode for TCP endpoints ("length_prefix", "ccsds", or "mavlink"). Defaults to length_prefix.
+    /// Optional framing mode for TCP endpoints ("length_prefix", "ccsds", "mavlink", or "mqtt"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 }
@@ -719,6 +719,9 @@ pub enum FramingMode {
         alias = "mavlink2"
     )]
     Mavlink,
+    /// MQTT packet framing (OASIS MQTT 3.1.1 and MQTT 5.0).
+    #[serde(alias = "MQTT", alias = "mqtt")]
+    Mqtt,
 }
 
 impl fmt::Display for FramingMode {
@@ -727,6 +730,7 @@ impl fmt::Display for FramingMode {
             Self::LengthPrefix => write!(f, "length_prefix"),
             Self::Ccsds => write!(f, "ccsds"),
             Self::Mavlink => write!(f, "mavlink"),
+            Self::Mqtt => write!(f, "mqtt"),
         }
     }
 }
@@ -1843,5 +1847,70 @@ instances:
         let mode: FramingMode = serde_json::from_str("\"mavlink\"").unwrap();
         assert_eq!(mode, FramingMode::Mavlink);
         assert_eq!(mode.to_string(), "mavlink");
+    }
+
+    #[test]
+    fn test_framing_mode_mqtt_deserialization() {
+        // Acceptance criterion: In crates/rer/src/config.rs, configuring option framing
+        // with value mqtt deserializes into FramingMode::Mqtt.
+        let yaml_stream = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        framing: mqtt
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_stream).expect("valid config with framing mqtt");
+        assert_eq!(
+            config.instances[0].streams[0].framing,
+            Some(FramingMode::Mqtt)
+        );
+        assert_eq!(
+            config.instances[0].streams[0].source_framing(),
+            FramingMode::Mqtt
+        );
+
+        let yaml_endpoint = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+          framing: mqtt
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+          framing: mqtt
+"#;
+        let config_ep =
+            Config::from_yaml_str(yaml_endpoint).expect("valid config with endpoint framing mqtt");
+        assert_eq!(
+            config_ep.instances[0].streams[0].source.framing,
+            Some(FramingMode::Mqtt)
+        );
+        let dest = config_ep.instances[0].streams[0]
+            .destination
+            .as_ref()
+            .unwrap();
+        assert_eq!(dest.framing, Some(FramingMode::Mqtt));
+        assert_eq!(
+            config_ep.instances[0].streams[0].destination_framing(dest),
+            FramingMode::Mqtt
+        );
+
+        // Direct deserialization
+        let mode: FramingMode = serde_json::from_str("\"mqtt\"").unwrap();
+        assert_eq!(mode, FramingMode::Mqtt);
+        assert_eq!(mode.to_string(), "mqtt");
     }
 }

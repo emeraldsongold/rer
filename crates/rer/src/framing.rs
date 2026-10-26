@@ -310,6 +310,106 @@ pub fn write_mavlink_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Resul
     writer.write_all(packet)
 }
 
+/// Reads a single MQTT packet frame from `reader`.
+///
+/// In MQTT TCP stream framing (OASIS MQTT 3.1.1 and 5.0, SPEC §5, §8, §14):
+/// - The packet begins with a 1-byte fixed header containing the 4-bit Control Packet Type
+///   and 4-bit flags. Packet type 0 is reserved/forbidden.
+/// - The remaining length is encoded as a Variable Byte Integer (1 to 4 octets).
+///   Each octet uses 7 bits for length data and the MSB (bit 7) as a continuation bit.
+///   If the continuation bit is set on the 4th octet, the variable byte integer exceeds 4 octets
+///   and is invalid.
+/// - The remaining payload follows immediately for `remaining_length` octets.
+///
+/// Validates that declared remaining length and total packet length do not exceed `max_frame_size`.
+/// Validates that variable byte integer does not exceed 4 octets.
+pub fn read_mqtt_frame<R: Read>(
+    reader: &mut R,
+    max_frame_size: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut byte1 = [0u8; 1];
+    let ok = read_exact_interruptible(reader, &mut byte1, shutdown)?;
+    if !ok {
+        return Ok(None);
+    }
+
+    let packet_type = byte1[0] >> 4;
+    if packet_type == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid MQTT packet type: 0 is forbidden",
+        ));
+    }
+
+    let mut multiplier: usize = 1;
+    let mut remaining_length: usize = 0;
+    let mut varint_bytes = Vec::with_capacity(4);
+
+    loop {
+        let mut b = [0u8; 1];
+        let ok = read_exact_interruptible(reader, &mut b, shutdown)?;
+        if !ok {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream closed before full MQTT variable byte integer was read",
+            ));
+        }
+        let encoded_byte = b[0];
+        varint_bytes.push(encoded_byte);
+
+        remaining_length += ((encoded_byte & 0x7F) as usize) * multiplier;
+
+        if (encoded_byte & 0x80) == 0 {
+            break;
+        }
+
+        if varint_bytes.len() >= 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MQTT variable byte integer exceeds 4 octets",
+            ));
+        }
+
+        multiplier *= 128;
+    }
+
+    let header_len = 1 + varint_bytes.len();
+    let total_packet_length = header_len.saturating_add(remaining_length);
+
+    if remaining_length > max_frame_size || total_packet_length > max_frame_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "MQTT frame remaining length {} (total length {}) exceeds maximum allowed {}",
+                remaining_length, total_packet_length, max_frame_size
+            ),
+        ));
+    }
+
+    let mut packet = vec![0u8; total_packet_length];
+    packet[0] = byte1[0];
+    packet[1..header_len].copy_from_slice(&varint_bytes);
+
+    let ok = read_exact_interruptible(reader, &mut packet[header_len..], shutdown)?;
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "stream closed before full MQTT packet payload was read",
+        ));
+    }
+
+    Ok(Some(packet))
+}
+
+/// Writes an MQTT packet frame to `writer`.
+///
+/// In MQTT TCP stream framing, packets are self-delimiting via their fixed header,
+/// so the raw MQTT packet bytes are transmitted directly without prepending a 4-byte length prefix.
+pub fn write_mqtt_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<()> {
+    writer.write_all(packet)
+}
+
 /// Reads a single frame from `reader` using the specified [`FramingMode`].
 pub fn read_frame_with_mode<R: Read>(
     reader: &mut R,
@@ -321,6 +421,7 @@ pub fn read_frame_with_mode<R: Read>(
         FramingMode::LengthPrefix => read_frame(reader, max_frame_size, shutdown),
         FramingMode::Ccsds => read_ccsds_frame(reader, max_frame_size, shutdown),
         FramingMode::Mavlink => read_mavlink_frame(reader, max_frame_size, shutdown),
+        FramingMode::Mqtt => read_mqtt_frame(reader, max_frame_size, shutdown),
     }
 }
 
@@ -340,6 +441,7 @@ pub fn write_frame_with_mode<W: Write>(
         FramingMode::LengthPrefix => write_frame(writer, payload),
         FramingMode::Ccsds => write_ccsds_frame(writer, payload),
         FramingMode::Mavlink => write_mavlink_frame(writer, payload),
+        FramingMode::Mqtt => write_mqtt_frame(writer, payload),
     }
 }
 
@@ -852,6 +954,210 @@ mod tests {
         let mut cursor = Cursor::new(truncated);
         let shutdown = AtomicBool::new(false);
         let err = read_mavlink_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    fn make_test_mqtt_packet(packet_type: u8, flags: u8, payload_data: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.push((packet_type << 4) | (flags & 0x0F));
+        let mut varint = [0u8; 4];
+        let n = crate::mqtt::encode_variable_byte_integer(payload_data.len(), &mut varint).unwrap();
+        pkt.extend_from_slice(&varint[..n]);
+        pkt.extend_from_slice(payload_data);
+        pkt
+    }
+
+    #[test]
+    fn test_criterion1_mqtt_fragmented_one_byte_reads() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
+        // delivering an MQTT packet fragmented across 1-byte reads reassembles the
+        // complete packet matching the transmitted bytes.
+        let shutdown = AtomicBool::new(false);
+
+        // 1. Single-byte varint MQTT PUBLISH packet
+        let pkt1 =
+            make_test_mqtt_packet(3, 0, b"fragmented mqtt publish packet across 1-byte reads");
+        let cursor1 = Cursor::new(pkt1.clone());
+        let mut chunked1 = ChunkedReader {
+            inner: cursor1,
+            chunk_size: 1, // Deliver exactly 1 byte per read()
+        };
+        let decoded1 = read_mqtt_frame(&mut chunked1, 1024, &shutdown)
+            .expect("read chunked mqtt packet")
+            .expect("payload");
+        assert_eq!(decoded1, pkt1);
+
+        // 2. Multi-byte varint MQTT PUBLISH packet (payload > 127 bytes -> 2-byte varint)
+        let large_payload = vec![0x42; 300];
+        let pkt2 = make_test_mqtt_packet(3, 0, &large_payload);
+        assert!(pkt2.len() > 300);
+        let cursor2 = Cursor::new(pkt2.clone());
+        let mut chunked2 = ChunkedReader {
+            inner: cursor2,
+            chunk_size: 1,
+        };
+        let decoded2 = read_mqtt_frame(&mut chunked2, 1024, &shutdown)
+            .expect("read chunked multibyte varint mqtt packet")
+            .expect("payload");
+        assert_eq!(decoded2, pkt2);
+
+        // 3. 2-byte PINGREQ packet ([0xC0, 0x00]) fragmented 1 byte at a time
+        let pingreq = vec![0xC0, 0x00];
+        let cursor3 = Cursor::new(pingreq.clone());
+        let mut chunked3 = ChunkedReader {
+            inner: cursor3,
+            chunk_size: 1,
+        };
+        let decoded3 = read_mqtt_frame(&mut chunked3, 1024, &shutdown)
+            .expect("read chunked pingreq")
+            .expect("payload");
+        assert_eq!(decoded3, pingreq);
+    }
+
+    #[test]
+    fn test_criterion2_concatenated_mqtt_packets_in_single_read_buffer() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
+        // delivering two concatenated MQTT packets in a single read buffer yields
+        // the two packets individually at their calculated remaining length boundaries.
+        let p1 = make_test_mqtt_packet(3, 0, b"first mqtt publish packet");
+        let p2 = vec![0xC0, 0x00]; // PINGREQ packet
+        let p3 = make_test_mqtt_packet(1, 0, b"third mqtt connect packet");
+
+        let mut stream_bytes = Vec::new();
+        stream_bytes.extend_from_slice(&p1);
+        stream_bytes.extend_from_slice(&p2);
+        stream_bytes.extend_from_slice(&p3);
+
+        let mut cursor = Cursor::new(stream_bytes);
+        let shutdown = AtomicBool::new(false);
+
+        let r1 = read_mqtt_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .unwrap();
+        let r2 = read_mqtt_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .unwrap();
+        let r3 = read_mqtt_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .unwrap();
+        let r4 = read_mqtt_frame(&mut cursor, 1024, &shutdown).unwrap();
+
+        assert_eq!(r1, p1);
+        assert_eq!(r2, p2);
+        assert_eq!(r3, p3);
+        assert!(r4.is_none());
+    }
+
+    #[test]
+    fn test_criterion3_oversized_mqtt_frame_rejection() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading an MQTT TCP frame
+        // declaring a remaining length that exceeds the configured maximum frame size
+        // returns an invalid data error without allocating the declared frame size.
+        let shutdown = AtomicBool::new(false);
+
+        // Packet with declared remaining length 200, but max frame size is 100
+        let payload = vec![0xEE; 200];
+        let pkt = make_test_mqtt_packet(3, 0, &payload);
+        let mut cursor = Cursor::new(pkt);
+        let err = read_mqtt_frame(&mut cursor, 100, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum allowed"));
+        assert!(err.to_string().contains("remaining length"));
+
+        // Frame declaring huge remaining length (e.g. 50 MB) with small stream buffer
+        // Must return invalid data error immediately without allocating 50 MB
+        let mut huge_pkt = Vec::new();
+        huge_pkt.push(0x30); // PUBLISH
+        let mut varint = [0u8; 4];
+        let n = crate::mqtt::encode_variable_byte_integer(50_000_000, &mut varint).unwrap();
+        huge_pkt.extend_from_slice(&varint[..n]);
+        // Cursor only has header, not 50 MB
+        let mut huge_cursor = Cursor::new(huge_pkt);
+        let err_huge = read_mqtt_frame(&mut huge_cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err_huge.kind(), io::ErrorKind::InvalidData);
+        assert!(err_huge.to_string().contains("exceeds maximum allowed"));
+
+        // Also verify via read_frame_with_mode
+        let pkt_mode = make_test_mqtt_packet(3, 0, &[0xAA; 150]);
+        let mut cursor_mode = Cursor::new(pkt_mode);
+        let res_mode = read_frame_with_mode(&mut cursor_mode, FramingMode::Mqtt, 80, &shutdown);
+        assert!(res_mode.is_err());
+        assert_eq!(res_mode.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_criterion4_mqtt_varint_exceeding_four_octets_returns_invalid_data() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading an MQTT frame
+        // from a TCP stream with a variable byte integer exceeding 4 octets returns
+        // an invalid data error and terminates the stream.
+        let shutdown = AtomicBool::new(false);
+
+        // 5-byte varint: 4 bytes with continuation bit set (0x80) followed by 5th byte
+        let bad_varint_packet = vec![0x30, 0x80, 0x80, 0x80, 0x80, 0x01, 0x00];
+        let mut cursor = Cursor::new(bad_varint_packet);
+        let err = read_mqtt_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds 4 octets"));
+
+        // Also test via read_frame_with_mode
+        let bad_varint2 = vec![0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F];
+        let mut cursor2 = Cursor::new(bad_varint2);
+        let err2 =
+            read_frame_with_mode(&mut cursor2, FramingMode::Mqtt, 1024, &shutdown).unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+        assert!(err2.to_string().contains("exceeds 4 octets"));
+    }
+
+    #[test]
+    fn test_criterion5_write_frame_with_mode_mqtt_raw_packet() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, writing an MQTT packet
+        // using write_frame_with_mode transmits raw packet bytes without prepending a 4-byte length prefix.
+        let payload = b"mqtt raw packet payload";
+        let pkt = make_test_mqtt_packet(3, 0, payload);
+
+        let mut out = Vec::new();
+        write_frame_with_mode(&mut out, FramingMode::Mqtt, &pkt).expect("write mqtt frame");
+
+        // Exactly matches raw packet bytes
+        assert_eq!(out, pkt);
+        assert_eq!(out.len(), pkt.len());
+        // Verify no 4-byte big-endian length prefix was prepended
+        assert_ne!(&out[0..4], &(pkt.len() as u32).to_be_bytes());
+        assert_eq!(out[0], pkt[0]);
+
+        // Direct write_mqtt_frame helper
+        let mut out_direct = Vec::new();
+        write_mqtt_frame(&mut out_direct, &pkt).expect("write_mqtt_frame");
+        assert_eq!(out_direct, pkt);
+    }
+
+    #[test]
+    fn test_mqtt_invalid_packet_type_zero() {
+        let bad_packet = vec![0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let mut cursor = Cursor::new(bad_packet);
+        let shutdown = AtomicBool::new(false);
+        let err = read_mqtt_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("0 is forbidden"));
+    }
+
+    #[test]
+    fn test_mqtt_unexpected_eof_in_varint() {
+        // First byte is PUBLISH, but continuation bit is set and stream ends
+        let truncated = vec![0x30, 0x80];
+        let mut cursor = Cursor::new(truncated);
+        let shutdown = AtomicBool::new(false);
+        let err = read_mqtt_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_mqtt_unexpected_eof_in_payload() {
+        let full = make_test_mqtt_packet(3, 0, b"payload that will be truncated");
+        let truncated = full[..full.len() - 5].to_vec();
+        let mut cursor = Cursor::new(truncated);
+        let shutdown = AtomicBool::new(false);
+        let err = read_mqtt_frame(&mut cursor, 1024, &shutdown).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

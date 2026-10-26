@@ -190,7 +190,7 @@
           "type": "string"
         },
         "framing": {
-          "description": "Optional framing mode for TCP endpoints (\"length_prefix\", \"ccsds\", or \"mavlink\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP endpoints (\"length_prefix\", \"ccsds\", \"mavlink\", or \"mqtt\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"
@@ -244,6 +244,13 @@
           "type": "string",
           "enum": [
             "mavlink"
+          ]
+        },
+        {
+          "description": "MQTT packet framing (OASIS MQTT 3.1.1 and MQTT 5.0).",
+          "type": "string",
+          "enum": [
+            "mqtt"
           ]
         }
       ]
@@ -772,7 +779,7 @@
           }
         },
         "framing": {
-          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", or \"mavlink\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", \"mavlink\", or \"mqtt\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"

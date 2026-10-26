@@ -56,7 +56,8 @@ pub use diagnostics::{
 };
 pub use framing::{
     encode_frame, read_ccsds_frame, read_frame, read_frame_with_mode, read_mavlink_frame,
-    write_ccsds_frame, write_frame, write_frame_with_mode, write_mavlink_frame,
+    read_mqtt_frame, write_ccsds_frame, write_frame, write_frame_with_mode, write_mavlink_frame,
+    write_mqtt_frame,
 };
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
