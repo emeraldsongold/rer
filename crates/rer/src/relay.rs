@@ -12,15 +12,20 @@ use crate::bpv7::{evaluate_bundle_header, BundleParseStatus};
 use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequenceTracker};
 use crate::config::{
     Bpv7InspectionConfig, CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig,
-    FramingMode, InstanceConfig, LtpInspectionConfig, OperationalMode, SrtInspectionConfig,
-    StreamConfig, TransportType,
+    FramingMode, InstanceConfig, LtpInspectionConfig, MavlinkConfig, OperationalMode,
+    SrtInspectionConfig, StreamConfig, TransportType,
 };
 use crate::diagnostics::{
     BundleInspection, DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState,
-    LtpInspection, SequenceState, SequenceTracker, SequenceTrackingEvent, SrtInspection,
+    LtpInspection, MavlinkInspection, MavlinkMetadata, SequenceState, SequenceTracker,
+    SequenceTrackingEvent, SrtInspection,
 };
 use crate::framing;
 use crate::ltp::{evaluate_segment_header, LtpParseStatus, SegmentType};
+use crate::mavlink::{
+    parse_mavlink_header, MavlinkHeader, MavlinkParseError, MavlinkParseStatus,
+    MavlinkSequenceTracker,
+};
 use crate::srt::{evaluate_srt_header, SrtParseStatus};
 
 /// Default maximum queue size (packets) when not explicitly configured.
@@ -933,6 +938,275 @@ fn process_ccsds_ingress(payload: &[u8], ctx: &CcsdsIngressContext<'_>) -> Optio
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ExtractedMavlink {
+    header: Option<MavlinkHeader>,
+    status: Option<MavlinkParseStatus>,
+    inspection: Option<MavlinkInspection>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MavlinkIngressContext<'a> {
+    mavlink_cfg: Option<&'a MavlinkConfig>,
+    mavlink_tracker: Option<&'a Arc<Mutex<MavlinkSequenceTracker>>>,
+    stats: &'a StreamStats,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
+    transport: TransportType,
+}
+
+fn process_mavlink_ingress(
+    payload: &[u8],
+    ctx: &MavlinkIngressContext<'_>,
+) -> Option<ExtractedMavlink> {
+    let MavlinkIngressContext {
+        mavlink_cfg,
+        mavlink_tracker,
+        stats,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+
+    let Some(mavlink_cfg) = mavlink_cfg else {
+        return Some(ExtractedMavlink::default());
+    };
+    if !mavlink_cfg.enabled {
+        return Some(ExtractedMavlink::default());
+    }
+
+    match parse_mavlink_header(payload) {
+        Err(parse_err) => {
+            if !mavlink_cfg.validate_magic
+                && matches!(parse_err, MavlinkParseError::InvalidMagicMarker)
+            {
+                return Some(ExtractedMavlink::default());
+            }
+
+            stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+            if let Some(t) = mavlink_tracker {
+                t.lock().unwrap().record_validation_error();
+            }
+
+            if !mavlink_cfg.passthrough_on_error {
+                stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+
+                let drop_reason = match parse_err {
+                    MavlinkParseError::InvalidMagicMarker => {
+                        "invalid MAVLink magic start byte: expected 0xFE (MAVLink 1) or 0xFD (MAVLink 2)".to_string()
+                    }
+                    MavlinkParseError::TruncatedPacket => {
+                        "truncated MAVLink packet: buffer shorter than header length or declared total packet length".to_string()
+                    }
+                };
+                eprintln!(
+                    "[stream {}] Dropped invalid MAVLink {} packet: {}",
+                    stream_id, transport, drop_reason
+                );
+
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Dropped,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_reason(drop_reason),
+                );
+                None
+            } else {
+                let fail_reason = match parse_err {
+                    MavlinkParseError::InvalidMagicMarker => {
+                        "MAVLink validation failed (passthrough): invalid magic start byte (expected 0xFE or 0xFD)".to_string()
+                    }
+                    MavlinkParseError::TruncatedPacket => {
+                        "MAVLink validation failed (passthrough): buffer shorter than header length or declared total packet length".to_string()
+                    }
+                };
+                eprintln!(
+                    "[stream {}] MAVLink validation failed (passthrough): {}",
+                    stream_id, fail_reason
+                );
+
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Failure,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_reason(fail_reason),
+                );
+                Some(ExtractedMavlink::default())
+            }
+        }
+        Ok(header) => {
+            let status = if let Some(w) = header.warning() {
+                MavlinkParseStatus::Warning(w)
+            } else {
+                MavlinkParseStatus::Valid
+            };
+
+            let metadata = MavlinkMetadata {
+                system_id: header.system_id,
+                component_id: header.component_id,
+                sequence: header.sequence,
+                sequence_number: Some(header.sequence),
+                message_id: header.message_id,
+                version: Some(if header.version.is_v1() { 1 } else { 2 }),
+                payload_length: Some(header.payload_length),
+                incompat_flags: Some(header.incompat_flags),
+                compat_flags: Some(header.compat_flags),
+                is_signed: Some(header.is_signed),
+                total_packet_length: Some(header.total_packet_length),
+            };
+
+            let mut insp = MavlinkInspection::new(
+                header.system_id,
+                header.component_id,
+                header.sequence,
+                header.message_id,
+            );
+            insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+            insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+            insp.stream_id = Some(stream_id.to_string());
+            insp.version = Some(if header.version.is_v1() { 1 } else { 2 });
+            insp.parse_status = Some(status);
+            insp.mavlink_metadata = Some(metadata);
+
+            let mut insp_ev: DiagnosticEvent = insp.clone().into();
+            insp_ev.transport = transport;
+            insp_ev.payload_length = payload.len() as u64;
+            insp_ev.source_endpoint = Some(src_endpoint.to_string());
+            insp_ev.destination_endpoint = Some(primary_dest.to_string());
+            event_buffer.emit(insp_ev);
+
+            if mavlink_cfg.track_sequences {
+                if let Some(t) = mavlink_tracker {
+                    let tracking_ev = {
+                        let mut tracker = t.lock().unwrap();
+                        tracker.record_header(&header)
+                    };
+                    if let Some(ev) = tracking_ev {
+                        match ev {
+                            SequenceTrackingEvent::Gap {
+                                expected,
+                                actual,
+                                missing_count,
+                            } => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_mavlink_header(&header)
+                                    .with_sequence_number(u64::from(header.sequence))
+                                    .with_reason(format!(
+                                        "MAVLink sequence gap: sysid {}, compid {}, expected {}, actual {}, missing {} packets",
+                                        header.system_id, header.component_id, expected, actual, missing_count
+                                    )),
+                                );
+                            }
+                            SequenceTrackingEvent::Duplicate { sequence } => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_mavlink_header(&header)
+                                    .with_sequence_number(sequence)
+                                    .with_reason(format!(
+                                        "MAVLink sequence duplicate: sysid {}, compid {}, duplicate sequence {}",
+                                        header.system_id, header.component_id, sequence
+                                    )),
+                                );
+                            }
+                            SequenceTrackingEvent::OutOfOrder {
+                                sequence,
+                                previous_highest,
+                            } => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_mavlink_header(&header)
+                                    .with_sequence_number(sequence)
+                                    .with_reason(format!(
+                                        "MAVLink sequence out-of-order: sysid {}, compid {}, sequence {} arrived after highest {}",
+                                        header.system_id, header.component_id, sequence, previous_highest
+                                    )),
+                                );
+                            }
+                            SequenceTrackingEvent::Rollover {
+                                sequence,
+                                missing_count,
+                            } if missing_count > 0 => {
+                                event_buffer.emit(
+                                    DiagnosticEvent::new(
+                                        event_buffer.clock().monotonic_nanos(),
+                                        event_buffer.clock().wall_clock_nanos(),
+                                        stream_id,
+                                        DiagnosticStage::Failure,
+                                        transport,
+                                        payload.len() as u64,
+                                    )
+                                    .with_source(src_endpoint)
+                                    .with_destination(primary_dest)
+                                    .with_mavlink_header(&header)
+                                    .with_sequence_number(sequence)
+                                    .with_reason(format!(
+                                        "MAVLink sequence rollover with gap: sysid {}, compid {}, rollover to {} with {} missing packets",
+                                        header.system_id, header.component_id, sequence, missing_count
+                                    )),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            Some(ExtractedMavlink {
+                header: Some(header),
+                status: Some(status),
+                inspection: Some(insp),
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Bpv7IngressContext<'a> {
     bpv7_cfg: Option<&'a Bpv7InspectionConfig>,
@@ -1271,6 +1545,7 @@ pub struct StreamRunner {
     pub source_transport: TransportType,
     pub sequence_tracker: Arc<Mutex<SequenceTracker>>,
     pub ccsds_tracker: Option<Arc<Mutex<CcsdsSequenceTracker>>>,
+    pub mavlink_tracker: Option<Arc<Mutex<MavlinkSequenceTracker>>>,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -1403,6 +1678,14 @@ impl StreamRunner {
             Arc::new(Mutex::new(t))
         });
 
+        let mavlink_tracker = stream.mavlink.as_ref().map(|m| {
+            let t = MavlinkSequenceTracker::with_filters(
+                m.filter_systems.clone(),
+                m.filter_components.clone(),
+            );
+            Arc::new(Mutex::new(t))
+        });
+
         let mut runner_threads = Vec::new();
 
         // -------------------------------------------------------------------
@@ -1426,6 +1709,8 @@ impl StreamRunner {
                 let recv_seq_tracker = Arc::clone(&seq_tracker);
                 let recv_ccsds_tracker = ccsds_tracker.as_ref().map(Arc::clone);
                 let recv_ccsds_config = stream.ccsds.clone();
+                let recv_mavlink_tracker = mavlink_tracker.as_ref().map(Arc::clone);
+                let recv_mavlink_config = stream.mavlink.clone();
                 let recv_bpv7_config = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let recv_ltp_config = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let recv_srt_config = stream.inspection.as_ref().and_then(|i| i.srt.clone());
@@ -1449,6 +1734,22 @@ impl StreamRunner {
                                     &CcsdsIngressContext {
                                         ccsds_cfg: recv_ccsds_config.as_ref(),
                                         ccsds_tracker: recv_ccsds_tracker.as_ref(),
+                                        stats: &recv_stats,
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                ) else {
+                                    continue;
+                                };
+
+                                let Some(mavlink_info) = process_mavlink_ingress(
+                                    payload_slice,
+                                    &MavlinkIngressContext {
+                                        mavlink_cfg: recv_mavlink_config.as_ref(),
+                                        mavlink_tracker: recv_mavlink_tracker.as_ref(),
                                         stats: &recv_stats,
                                         event_buffer: &recv_event_buffer,
                                         stream_id: &recv_stream_id,
@@ -1513,6 +1814,7 @@ impl StreamRunner {
                                     .seq
                                     .map(u64::from)
                                     .or(srt_info.sequence_number.map(u64::from))
+                                    .or(mavlink_info.header.as_ref().map(|h| u64::from(h.sequence)))
                                     .or(generic_seq);
                                 let extracted_apid = ccsds_info.apid;
                                 let extracted_ccsds_seq = ccsds_info.seq;
@@ -1530,6 +1832,15 @@ impl StreamRunner {
                                     }
                                     if let Some(f) = extracted_ccsds_flags {
                                         ev = ev.with_ccsds_flags(f);
+                                    }
+                                    if let Some(ref header) = mavlink_info.header {
+                                        ev = ev.with_mavlink_header(header);
+                                    }
+                                    if let Some(status) = mavlink_info.status {
+                                        ev.mavlink_parse_status = Some(status);
+                                    }
+                                    if let Some(ref insp) = mavlink_info.inspection {
+                                        ev.mavlink_inspection = Some(insp.clone());
                                     }
                                     if let Some(ref d) = bpv7_info.dest_eid {
                                         ev.bundle_destination = Some(d.clone());
@@ -1776,6 +2087,8 @@ impl StreamRunner {
                 let source_framing = stream.source_framing();
                 let ccsds_tracker_for_tcp = ccsds_tracker.as_ref().map(Arc::clone);
                 let ccsds_config_for_tcp = stream.ccsds.clone();
+                let mavlink_tracker_for_tcp = mavlink_tracker.as_ref().map(Arc::clone);
+                let mavlink_config_for_tcp = stream.mavlink.clone();
                 let bpv7_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let ltp_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let srt_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.srt.clone());
@@ -1821,6 +2134,9 @@ impl StreamRunner {
                                         let cl_ccsds_tracker =
                                             ccsds_tracker_for_tcp.as_ref().map(Arc::clone);
                                         let cl_ccsds_config = ccsds_config_for_tcp.clone();
+                                        let cl_mavlink_tracker =
+                                            mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
+                                        let cl_mavlink_config = mavlink_config_for_tcp.clone();
                                         let cl_bpv7_config = bpv7_config_for_tcp.clone();
                                         let cl_ltp_config = ltp_config_for_tcp.clone();
                                         let cl_srt_config = srt_config_for_tcp.clone();
@@ -1851,6 +2167,26 @@ impl StreamRunner {
                                                                         .as_ref(),
                                                                     ccsds_tracker: cl_ccsds_tracker
                                                                         .as_ref(),
+                                                                    stats: &cl_stats,
+                                                                    event_buffer: &cl_event_buffer,
+                                                                    stream_id: &cl_stream_id,
+                                                                    src_endpoint: &src_endpoint,
+                                                                    primary_dest: &cl_primary_dest,
+                                                                    transport: TransportType::Tcp,
+                                                                },
+                                                            )
+                                                        else {
+                                                            continue;
+                                                        };
+
+                                                        let Some(mavlink_info) =
+                                                            process_mavlink_ingress(
+                                                                &payload,
+                                                                &MavlinkIngressContext {
+                                                                    mavlink_cfg: cl_mavlink_config
+                                                                        .as_ref(),
+                                                                    mavlink_tracker:
+                                                                        cl_mavlink_tracker.as_ref(),
                                                                     stats: &cl_stats,
                                                                     event_buffer: &cl_event_buffer,
                                                                     stream_id: &cl_stream_id,
@@ -1923,6 +2259,10 @@ impl StreamRunner {
                                                             .or(srt_info
                                                                 .sequence_number
                                                                 .map(u64::from))
+                                                            .or(mavlink_info
+                                                                .header
+                                                                .as_ref()
+                                                                .map(|h| u64::from(h.sequence)))
                                                             .or(generic_seq);
                                                         let extracted_apid = ccsds_info.apid;
                                                         let extracted_ccsds_seq = ccsds_info.seq;
@@ -1941,6 +2281,23 @@ impl StreamRunner {
                                                             }
                                                             if let Some(f) = extracted_ccsds_flags {
                                                                 ev = ev.with_ccsds_flags(f);
+                                                            }
+                                                            if let Some(ref header) =
+                                                                mavlink_info.header
+                                                            {
+                                                                ev = ev.with_mavlink_header(header);
+                                                            }
+                                                            if let Some(status) =
+                                                                mavlink_info.status
+                                                            {
+                                                                ev.mavlink_parse_status =
+                                                                    Some(status);
+                                                            }
+                                                            if let Some(ref insp) =
+                                                                mavlink_info.inspection
+                                                            {
+                                                                ev.mavlink_inspection =
+                                                                    Some(insp.clone());
                                                             }
                                                             if let Some(ref d) = bpv7_info.dest_eid {
                                                                 ev.bundle_destination = Some(d.clone());
@@ -2277,6 +2634,8 @@ impl StreamRunner {
                         let conn_bpv7_config = bpv7_config_for_tcp.clone();
                         let conn_ltp_config = ltp_config_for_tcp.clone();
                         let conn_srt_config = srt_config_for_tcp.clone();
+                        let conn_mavlink_config = mavlink_config_for_tcp.clone();
+                        let conn_mavlink_tracker = mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
@@ -2353,6 +2712,26 @@ impl StreamRunner {
                                                         continue;
                                                     };
 
+                                                    let Some(mavlink_info) =
+                                                        process_mavlink_ingress(
+                                                            &payload,
+                                                            &MavlinkIngressContext {
+                                                                mavlink_cfg: conn_mavlink_config
+                                                                    .as_ref(),
+                                                                mavlink_tracker:
+                                                                    conn_mavlink_tracker.as_ref(),
+                                                                stats: &recv_stats,
+                                                                event_buffer: &recv_event_buffer,
+                                                                stream_id: &recv_stream_id,
+                                                                src_endpoint: &src_endpoint,
+                                                                primary_dest: &recv_primary_dest,
+                                                                transport: TransportType::Tcp,
+                                                            },
+                                                        )
+                                                    else {
+                                                        continue;
+                                                    };
+
                                                     let bpv7_info = process_bpv7_ingress(
                                                         &payload,
                                                         &Bpv7IngressContext {
@@ -2411,6 +2790,10 @@ impl StreamRunner {
                                                         .seq
                                                         .map(u64::from)
                                                         .or(srt_info.sequence_number.map(u64::from))
+                                                        .or(mavlink_info
+                                                            .header
+                                                            .as_ref()
+                                                            .map(|h| u64::from(h.sequence)))
                                                         .or(generic_seq);
                                                     let extracted_apid = ccsds_info.apid;
                                                     let extracted_ccsds_seq = ccsds_info.seq;
@@ -2428,6 +2811,15 @@ impl StreamRunner {
                                                         }
                                                         if let Some(f) = extracted_ccsds_flags {
                                                             ev = ev.with_ccsds_flags(f);
+                                                        }
+                                                        if let Some(ref header) = mavlink_info.header {
+                                                            ev = ev.with_mavlink_header(header);
+                                                        }
+                                                        if let Some(status) = mavlink_info.status {
+                                                            ev.mavlink_parse_status = Some(status);
+                                                        }
+                                                        if let Some(ref insp) = mavlink_info.inspection {
+                                                            ev.mavlink_inspection = Some(insp.clone());
                                                         }
                                                         if let Some(ref d) = bpv7_info.dest_eid {
                                                             ev.bundle_destination = Some(d.clone());
@@ -3028,6 +3420,7 @@ impl StreamRunner {
             source_transport,
             sequence_tracker: seq_tracker,
             ccsds_tracker,
+            mavlink_tracker,
             is_active,
             shutdown_flag,
             threads: runner_threads,
@@ -3135,6 +3528,7 @@ struct StreamRunnerHandle {
     stats: Arc<StreamStats>,
     sequence_tracker: Arc<Mutex<SequenceTracker>>,
     ccsds_tracker: Option<Arc<Mutex<CcsdsSequenceTracker>>>,
+    mavlink_tracker: Option<Arc<Mutex<MavlinkSequenceTracker>>>,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
 }
@@ -3187,6 +3581,14 @@ impl RelayHealthHandle {
                     }
                 }
             }
+            if let Some(ref mt) = r.mavlink_tracker {
+                let tracker = mt.lock().unwrap();
+                for &(sys, comp) in &tracker.tracked_sources() {
+                    if let Some(st) = tracker.source_state(&r.stream_id, sys, comp) {
+                        states.push(st);
+                    }
+                }
+            }
         }
         states
     }
@@ -3199,6 +3601,16 @@ impl RelayHealthHandle {
             .iter()
             .find(|r| r.stream_id == stream_id)?;
         runner.ccsds_tracker.as_ref().map(Arc::clone)
+    }
+
+    /// Returns current MAVLink sequence tracker for a stream if configured.
+    #[must_use]
+    pub fn mavlink_tracker(&self, stream_id: &str) -> Option<Arc<Mutex<MavlinkSequenceTracker>>> {
+        let runner = self
+            .stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)?;
+        runner.mavlink_tracker.as_ref().map(Arc::clone)
     }
 
     /// Returns true if the relay is running and all stream runners are healthy.
@@ -3459,6 +3871,7 @@ impl Relay {
                 stats: Arc::clone(&r.stats),
                 sequence_tracker: Arc::clone(&r.sequence_tracker),
                 ccsds_tracker: r.ccsds_tracker.as_ref().map(Arc::clone),
+                mavlink_tracker: r.mavlink_tracker.as_ref().map(Arc::clone),
                 is_active: Arc::clone(&r.is_active),
                 shutdown_flag: Arc::clone(&r.shutdown_flag),
             })
@@ -3489,6 +3902,16 @@ impl Relay {
             .iter()
             .find(|r| r.stream_id == stream_id)?;
         runner.ccsds_tracker.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the MAVLink sequence tracker for a stream if configured.
+    #[must_use]
+    pub fn mavlink_tracker(&self, stream_id: &str) -> Option<Arc<Mutex<MavlinkSequenceTracker>>> {
+        let runner = self
+            .stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)?;
+        runner.mavlink_tracker.as_ref().map(Arc::clone)
     }
 
     /// Returns all configured logical interfaces.
@@ -3732,5 +4155,267 @@ mod tests {
             "[fe80::1%eth0]:5000"
         );
         assert_eq!(format_endpoint("fe80::1%eth0:5000"), "[fe80::1%eth0]:5000");
+    }
+
+    fn make_test_mavlink1_packet(
+        seq: u8,
+        sysid: u8,
+        compid: u8,
+        msgid: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut pkt = vec![0xFE, payload.len() as u8, seq, sysid, compid, msgid];
+        pkt.extend_from_slice(payload);
+        pkt.push(0x12);
+        pkt.push(0x34);
+        pkt
+    }
+
+    fn pick_test_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
+        socket.local_addr().expect("local addr").port()
+    }
+
+    #[test]
+    fn test_mavlink_udp_forwarding_preserves_payload_and_records_metadata() {
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mavlink"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mavlink:
+          enabled: true
+          track_sequences: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+        let pkt = make_test_mavlink1_packet(42, 1, 2, 77, b"telemetry heartbeat");
+        sender
+            .send_to(&pkt, format!("127.0.0.1:{listen_port}"))
+            .expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            pkt.as_slice(),
+            "exact datagram payload bytes must be forwarded unmodified"
+        );
+
+        let stats = relay.stream_stats("s-mavlink").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        let insp_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::MavlinkInspection);
+        assert!(
+            insp_ev.is_some(),
+            "must emit diagnostic event for MAVLink inspection"
+        );
+        let ev = insp_ev.unwrap();
+        assert_eq!(ev.mavlink_system_id, Some(1));
+        assert_eq!(ev.mavlink_component_id, Some(2));
+        assert_eq!(ev.mavlink_sequence, Some(42));
+        assert_eq!(ev.sequence_number, Some(42));
+        assert_eq!(ev.mavlink_message_id, Some(77));
+        assert_eq!(ev.mavlink_version, Some(1));
+        assert!(ev.mavlink_metadata.is_some());
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mavlink_malformed_dropped_by_default() {
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mavlink-drop"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mavlink:
+          enabled: true
+          passthrough_on_error: false
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        // 1. Invalid magic byte
+        sender
+            .send_to(b"not-a-mavlink-packet", &target)
+            .expect("send");
+        // 2. Truncated packet
+        sender.send_to(&[0xFE, 10, 1], &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let res = dest_sock.recv_from(&mut buf);
+        assert!(res.is_err(), "malformed packets must be dropped by default");
+
+        let stats = relay.stream_stats("s-mavlink-drop").expect("stats");
+        assert_eq!(stats.received_packets, 2);
+        assert_eq!(stats.forwarded_packets, 0);
+        assert_eq!(stats.dropped_packets, 2);
+
+        let snap = relay.event_buffer().snapshot();
+        let drops: Vec<&DiagnosticEvent> = snap
+            .events
+            .iter()
+            .filter(|e| e.stage == DiagnosticStage::Dropped)
+            .collect();
+        assert_eq!(drops.len(), 2);
+        assert!(drops[0].reason.is_some());
+        assert!(drops[1].reason.is_some());
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mavlink_passthrough_on_error() {
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mavlink-pt"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mavlink:
+          enabled: true
+          passthrough_on_error: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        let malformed = b"raw-corrupted-bytes".to_vec();
+        sender.send_to(&malformed, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            malformed.as_slice(),
+            "malformed packet must be forwarded unmodified under passthrough_on_error"
+        );
+
+        let stats = relay.stream_stats("s-mavlink-pt").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+        assert_eq!(stats.validation_errors, 1);
+
+        let snap = relay.event_buffer().snapshot();
+        let fails: Vec<&DiagnosticEvent> = snap
+            .events
+            .iter()
+            .filter(|e| e.stage == DiagnosticStage::Failure)
+            .collect();
+        assert_eq!(fails.len(), 1);
+        assert!(fails[0].reason.as_ref().unwrap().contains("validation"));
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mavlink_unconfigured_stream_byte_identical_forwarding() {
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-unconfigured"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+        let raw = b"plain-arbitrary-traffic".to_vec();
+        sender
+            .send_to(&raw, format!("127.0.0.1:{listen_port}"))
+            .expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(&buf[..n], raw.as_slice());
+
+        assert!(relay.mavlink_tracker("s-unconfigured").is_none());
+
+        let stats = relay.stream_stats("s-unconfigured").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+
+        relay.stop();
     }
 }

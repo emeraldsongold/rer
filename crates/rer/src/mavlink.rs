@@ -1063,6 +1063,14 @@ impl MavlinkSequenceTracker {
         self.trackers.values().map(|t| t.packets_evaluated).sum()
     }
 
+    /// Returns the sorted list of tracked source identifiers `(system_id, component_id)`.
+    #[must_use]
+    pub fn tracked_sources(&self) -> Vec<(u8, u8)> {
+        let mut sources: Vec<(u8, u8)> = self.trackers.keys().copied().collect();
+        sources.sort_unstable();
+        sources
+    }
+
     /// Returns a reference to the tracker for a specific source if initialized.
     #[must_use]
     pub fn source_tracker(
