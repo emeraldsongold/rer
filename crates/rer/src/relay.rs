@@ -12,19 +12,23 @@ use crate::bpv7::{evaluate_bundle_header, BundleParseStatus};
 use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequenceTracker};
 use crate::config::{
     Bpv7InspectionConfig, CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig,
-    FramingMode, InstanceConfig, LtpInspectionConfig, MavlinkConfig, OperationalMode,
+    FramingMode, InstanceConfig, LtpInspectionConfig, MavlinkConfig, MqttConfig, OperationalMode,
     SrtInspectionConfig, StreamConfig, TransportType,
 };
 use crate::diagnostics::{
     BundleInspection, DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState,
-    LtpInspection, MavlinkInspection, MavlinkMetadata, SequenceState, SequenceTracker,
-    SequenceTrackingEvent, SrtInspection,
+    LtpInspection, MavlinkInspection, MavlinkMetadata, MqttInspection, MqttMetadata, SequenceState,
+    SequenceTracker, SequenceTrackingEvent, SrtInspection,
 };
 use crate::framing;
 use crate::ltp::{evaluate_segment_header, LtpParseStatus, SegmentType};
 use crate::mavlink::{
     parse_mavlink_header, MavlinkHeader, MavlinkParseError, MavlinkParseStatus,
     MavlinkSequenceTracker,
+};
+use crate::mqtt::{
+    parse_mqtt_fixed_header, parse_mqtt_fixed_header_relaxed, MqttFixedHeader, MqttPacketType,
+    MqttParseError, MqttParseStatus,
 };
 use crate::srt::{evaluate_srt_header, SrtParseStatus};
 
@@ -1207,6 +1211,259 @@ fn process_mavlink_ingress(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ExtractedMqtt {
+    header: Option<MqttFixedHeader>,
+    status: Option<MqttParseStatus>,
+    inspection: Option<MqttInspection>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MqttIngressContext<'a> {
+    mqtt_cfg: Option<&'a MqttConfig>,
+    stats: &'a StreamStats,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
+    transport: TransportType,
+}
+
+fn process_mqtt_ingress(payload: &[u8], ctx: &MqttIngressContext<'_>) -> Option<ExtractedMqtt> {
+    let MqttIngressContext {
+        mqtt_cfg,
+        stats,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+
+    let Some(mqtt_cfg) = mqtt_cfg else {
+        return Some(ExtractedMqtt::default());
+    };
+    if !mqtt_cfg.enabled {
+        return Some(ExtractedMqtt::default());
+    }
+
+    if mqtt_cfg.max_packet_size > 0 && payload.len() > mqtt_cfg.max_packet_size {
+        stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+        if !mqtt_cfg.passthrough_on_error {
+            stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+            let drop_reason = format!(
+                "oversized MQTT packet: {} bytes exceeds configured max_packet_size {}",
+                payload.len(),
+                mqtt_cfg.max_packet_size
+            );
+            eprintln!(
+                "[stream {}] Dropped invalid MQTT {} packet: {}",
+                stream_id, transport, drop_reason
+            );
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Dropped,
+                    transport,
+                    payload.len() as u64,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_reason(drop_reason),
+            );
+            return None;
+        } else {
+            let fail_reason = format!(
+                "MQTT validation failed (passthrough): packet size {} exceeds max_packet_size {}",
+                payload.len(),
+                mqtt_cfg.max_packet_size
+            );
+            eprintln!(
+                "[stream {}] MQTT validation failed (passthrough): {}",
+                stream_id, fail_reason
+            );
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Failure,
+                    transport,
+                    payload.len() as u64,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_reason(fail_reason),
+            );
+            return Some(ExtractedMqtt::default());
+        }
+    }
+
+    let parse_res = if mqtt_cfg.validate_flags {
+        parse_mqtt_fixed_header(payload)
+    } else {
+        parse_mqtt_fixed_header_relaxed(payload)
+    };
+
+    match parse_res {
+        Err(parse_err) => {
+            stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+
+            if !mqtt_cfg.passthrough_on_error {
+                stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+
+                let drop_reason = match parse_err {
+                    MqttParseError::InvalidFlags => {
+                        "invalid MQTT header flags: flags violate MQTT specification rules".to_string()
+                    }
+                    MqttParseError::TruncatedPacket => {
+                        "truncated MQTT packet: buffer shorter than header length or declared remaining length".to_string()
+                    }
+                    MqttParseError::ForbiddenPacketType0 => {
+                        "invalid MQTT packet: packet type 0 is forbidden".to_string()
+                    }
+                    MqttParseError::VariableByteIntegerOverflow => {
+                        "malformed MQTT variable byte integer: length field exceeds 4 bytes or overflows".to_string()
+                    }
+                };
+                eprintln!(
+                    "[stream {}] Dropped invalid MQTT {} packet: {}",
+                    stream_id, transport, drop_reason
+                );
+
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Dropped,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_reason(drop_reason),
+                );
+                None
+            } else {
+                let fail_reason = match parse_err {
+                    MqttParseError::InvalidFlags => {
+                        "MQTT validation failed (passthrough): invalid header flags".to_string()
+                    }
+                    MqttParseError::TruncatedPacket => {
+                        "MQTT validation failed (passthrough): truncated packet".to_string()
+                    }
+                    MqttParseError::ForbiddenPacketType0 => {
+                        "MQTT validation failed (passthrough): forbidden packet type 0".to_string()
+                    }
+                    MqttParseError::VariableByteIntegerOverflow => {
+                        "MQTT validation failed (passthrough): variable byte integer overflow"
+                            .to_string()
+                    }
+                };
+                eprintln!(
+                    "[stream {}] MQTT validation failed (passthrough): {}",
+                    stream_id, fail_reason
+                );
+
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Failure,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_reason(fail_reason),
+                );
+                Some(ExtractedMqtt::default())
+            }
+        }
+        Ok(header) => {
+            let status = MqttParseStatus::Valid;
+            let qos = header.qos();
+            let dup = header.dup();
+            let retain = header.retain();
+
+            let mut packet_id = None;
+            if header.packet_type == MqttPacketType::Publish {
+                if let Some(q) = qos {
+                    if q > 0 && payload.len() >= header.header_length + 2 {
+                        let var_hdr = &payload[header.header_length..];
+                        if var_hdr.len() >= 2 {
+                            let topic_len = u16::from_be_bytes([var_hdr[0], var_hdr[1]]) as usize;
+                            let pid_offset = 2 + topic_len;
+                            if var_hdr.len() >= pid_offset + 2 {
+                                packet_id = Some(u16::from_be_bytes([
+                                    var_hdr[pid_offset],
+                                    var_hdr[pid_offset + 1],
+                                ]));
+                            }
+                        }
+                    }
+                }
+            } else if matches!(
+                header.packet_type,
+                MqttPacketType::Puback
+                    | MqttPacketType::Pubrec
+                    | MqttPacketType::Pubrel
+                    | MqttPacketType::Pubcomp
+                    | MqttPacketType::Subscribe
+                    | MqttPacketType::Suback
+                    | MqttPacketType::Unsubscribe
+                    | MqttPacketType::Unsuback
+            ) && payload.len() >= header.header_length + 2
+            {
+                let var_hdr = &payload[header.header_length..];
+                packet_id = Some(u16::from_be_bytes([var_hdr[0], var_hdr[1]]));
+            }
+
+            let metadata = MqttMetadata {
+                packet_type: header.packet_type.code(),
+                packet_type_name: header.packet_type.name().to_string(),
+                flags: Some(header.flags),
+                qos,
+                dup,
+                retain,
+                packet_identifier: packet_id,
+                remaining_length: Some(header.remaining_length),
+                total_packet_length: Some(header.total_packet_length),
+                topic: None,
+            };
+
+            let mut insp =
+                MqttInspection::new(header.packet_type.code(), header.packet_type.name());
+            insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+            insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+            insp.stream_id = Some(stream_id.to_string());
+            insp.qos = qos;
+            insp.packet_identifier = packet_id;
+            insp.parse_status = Some(status);
+            insp.mqtt_metadata = Some(metadata);
+
+            let mut insp_ev: DiagnosticEvent = insp.clone().into();
+            insp_ev.transport = transport;
+            insp_ev.payload_length = payload.len() as u64;
+            insp_ev.source_endpoint = Some(src_endpoint.to_string());
+            insp_ev.destination_endpoint = Some(primary_dest.to_string());
+            event_buffer.emit(insp_ev);
+
+            Some(ExtractedMqtt {
+                header: Some(header),
+                status: Some(status),
+                inspection: Some(insp),
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Bpv7IngressContext<'a> {
     bpv7_cfg: Option<&'a Bpv7InspectionConfig>,
@@ -1711,6 +1968,7 @@ impl StreamRunner {
                 let recv_ccsds_config = stream.ccsds.clone();
                 let recv_mavlink_tracker = mavlink_tracker.as_ref().map(Arc::clone);
                 let recv_mavlink_config = stream.mavlink.clone();
+                let recv_mqtt_config = stream.mqtt.clone();
                 let recv_bpv7_config = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let recv_ltp_config = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let recv_srt_config = stream.inspection.as_ref().and_then(|i| i.srt.clone());
@@ -1750,6 +2008,21 @@ impl StreamRunner {
                                     &MavlinkIngressContext {
                                         mavlink_cfg: recv_mavlink_config.as_ref(),
                                         mavlink_tracker: recv_mavlink_tracker.as_ref(),
+                                        stats: &recv_stats,
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                ) else {
+                                    continue;
+                                };
+
+                                let Some(mqtt_info) = process_mqtt_ingress(
+                                    payload_slice,
+                                    &MqttIngressContext {
+                                        mqtt_cfg: recv_mqtt_config.as_ref(),
                                         stats: &recv_stats,
                                         event_buffer: &recv_event_buffer,
                                         stream_id: &recv_stream_id,
@@ -1841,6 +2114,27 @@ impl StreamRunner {
                                     }
                                     if let Some(ref insp) = mavlink_info.inspection {
                                         ev.mavlink_inspection = Some(insp.clone());
+                                    }
+                                    if let Some(ref header) = mqtt_info.header {
+                                        ev = ev.with_mqtt_header(header);
+                                    }
+                                    if let Some(status) = mqtt_info.status {
+                                        ev.mqtt_parse_status = Some(status);
+                                    }
+                                    if let Some(ref insp) = mqtt_info.inspection {
+                                        ev.mqtt_inspection = Some(insp.clone());
+                                        if let Some(qos) = insp.qos {
+                                            ev.mqtt_qos = Some(qos);
+                                            if let Some(ref mut m) = ev.mqtt_metadata {
+                                                m.qos = Some(qos);
+                                            }
+                                        }
+                                        if let Some(pid) = insp.packet_identifier {
+                                            ev.mqtt_packet_id = Some(pid);
+                                            if let Some(ref mut m) = ev.mqtt_metadata {
+                                                m.packet_identifier = Some(pid);
+                                            }
+                                        }
                                     }
                                     if let Some(ref d) = bpv7_info.dest_eid {
                                         ev.bundle_destination = Some(d.clone());
@@ -2089,6 +2383,7 @@ impl StreamRunner {
                 let ccsds_config_for_tcp = stream.ccsds.clone();
                 let mavlink_tracker_for_tcp = mavlink_tracker.as_ref().map(Arc::clone);
                 let mavlink_config_for_tcp = stream.mavlink.clone();
+                let mqtt_config_for_tcp = stream.mqtt.clone();
                 let bpv7_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let ltp_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let srt_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.srt.clone());
@@ -2137,6 +2432,7 @@ impl StreamRunner {
                                         let cl_mavlink_tracker =
                                             mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
                                         let cl_mavlink_config = mavlink_config_for_tcp.clone();
+                                        let cl_mqtt_config = mqtt_config_for_tcp.clone();
                                         let cl_bpv7_config = bpv7_config_for_tcp.clone();
                                         let cl_ltp_config = ltp_config_for_tcp.clone();
                                         let cl_srt_config = srt_config_for_tcp.clone();
@@ -2196,6 +2492,21 @@ impl StreamRunner {
                                                                 },
                                                             )
                                                         else {
+                                                            continue;
+                                                        };
+
+                                                        let Some(mqtt_info) = process_mqtt_ingress(
+                                                            &payload,
+                                                            &MqttIngressContext {
+                                                                mqtt_cfg: cl_mqtt_config.as_ref(),
+                                                                stats: &cl_stats,
+                                                                event_buffer: &cl_event_buffer,
+                                                                stream_id: &cl_stream_id,
+                                                                src_endpoint: &src_endpoint,
+                                                                primary_dest: &cl_primary_dest,
+                                                                transport: TransportType::Tcp,
+                                                            },
+                                                        ) else {
                                                             continue;
                                                         };
 
@@ -2298,6 +2609,27 @@ impl StreamRunner {
                                                             {
                                                                 ev.mavlink_inspection =
                                                                     Some(insp.clone());
+                                                            }
+                                                            if let Some(ref header) = mqtt_info.header {
+                                                                ev = ev.with_mqtt_header(header);
+                                                            }
+                                                            if let Some(status) = mqtt_info.status {
+                                                                ev.mqtt_parse_status = Some(status);
+                                                            }
+                                                            if let Some(ref insp) = mqtt_info.inspection {
+                                                                ev.mqtt_inspection = Some(insp.clone());
+                                                                if let Some(qos) = insp.qos {
+                                                                    ev.mqtt_qos = Some(qos);
+                                                                    if let Some(ref mut m) = ev.mqtt_metadata {
+                                                                        m.qos = Some(qos);
+                                                                    }
+                                                                }
+                                                                if let Some(pid) = insp.packet_identifier {
+                                                                    ev.mqtt_packet_id = Some(pid);
+                                                                    if let Some(ref mut m) = ev.mqtt_metadata {
+                                                                        m.packet_identifier = Some(pid);
+                                                                    }
+                                                                }
                                                             }
                                                             if let Some(ref d) = bpv7_info.dest_eid {
                                                                 ev.bundle_destination = Some(d.clone());
@@ -2636,6 +2968,7 @@ impl StreamRunner {
                         let conn_srt_config = srt_config_for_tcp.clone();
                         let conn_mavlink_config = mavlink_config_for_tcp.clone();
                         let conn_mavlink_tracker = mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
+                        let conn_mqtt_config = mqtt_config_for_tcp.clone();
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
@@ -2732,6 +3065,21 @@ impl StreamRunner {
                                                         continue;
                                                     };
 
+                                                    let Some(mqtt_info) = process_mqtt_ingress(
+                                                        &payload,
+                                                        &MqttIngressContext {
+                                                            mqtt_cfg: conn_mqtt_config.as_ref(),
+                                                            stats: &recv_stats,
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
+                                                    ) else {
+                                                        continue;
+                                                    };
+
                                                     let bpv7_info = process_bpv7_ingress(
                                                         &payload,
                                                         &Bpv7IngressContext {
@@ -2820,6 +3168,27 @@ impl StreamRunner {
                                                         }
                                                         if let Some(ref insp) = mavlink_info.inspection {
                                                             ev.mavlink_inspection = Some(insp.clone());
+                                                        }
+                                                        if let Some(ref header) = mqtt_info.header {
+                                                            ev = ev.with_mqtt_header(header);
+                                                        }
+                                                        if let Some(status) = mqtt_info.status {
+                                                            ev.mqtt_parse_status = Some(status);
+                                                        }
+                                                        if let Some(ref insp) = mqtt_info.inspection {
+                                                            ev.mqtt_inspection = Some(insp.clone());
+                                                            if let Some(qos) = insp.qos {
+                                                                ev.mqtt_qos = Some(qos);
+                                                                if let Some(ref mut m) = ev.mqtt_metadata {
+                                                                    m.qos = Some(qos);
+                                                                }
+                                                            }
+                                                            if let Some(pid) = insp.packet_identifier {
+                                                                ev.mqtt_packet_id = Some(pid);
+                                                                if let Some(ref mut m) = ev.mqtt_metadata {
+                                                                    m.packet_identifier = Some(pid);
+                                                                }
+                                                            }
                                                         }
                                                         if let Some(ref d) = bpv7_info.dest_eid {
                                                             ev.bundle_destination = Some(d.clone());
@@ -3136,6 +3505,8 @@ impl StreamRunner {
         let fwd_stream_framing = stream.framing;
         let fwd_stream_ccsds_framing = stream.ccsds.as_ref().and_then(|c| c.framing);
         let fwd_stream_mavlink_framing = stream.mavlink.as_ref().and_then(|m| m.framing);
+        let fwd_stream_mqtt = stream.mqtt.clone();
+        let fwd_stream_mqtt_framing = stream.mqtt.as_ref().and_then(|m| m.framing);
 
         let fwd_handle = thread::spawn(move || {
             let ipv4_socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0))).ok();
@@ -3151,6 +3522,7 @@ impl StreamRunner {
                             .or(fwd_stream_framing)
                             .or(fwd_stream_ccsds_framing)
                             .or(fwd_stream_mavlink_framing)
+                            .or(fwd_stream_mqtt_framing)
                             .unwrap_or_default();
                         Some(TcpDestinationConnection::new(
                             d.address.clone(),
@@ -3281,25 +3653,46 @@ impl StreamRunner {
                                                         .forwarded_bytes
                                                         .fetch_add(sent as u64, Ordering::SeqCst);
                                                     if fwd_event_buffer.should_emit_packet_events()
+                                                        || fwd_stream_mqtt
+                                                            .as_ref()
+                                                            .is_some_and(|m| m.enabled)
                                                     {
-                                                        fwd_event_buffer.emit(
-                                                            DiagnosticEvent::new(
-                                                                fwd_event_buffer
-                                                                    .clock()
-                                                                    .monotonic_nanos(),
-                                                                fwd_event_buffer
-                                                                    .clock()
-                                                                    .wall_clock_nanos(),
-                                                                &fwd_stream_id,
-                                                                DiagnosticStage::SendSucceeded,
-                                                                TransportType::Udp,
-                                                                sent as u64,
-                                                            )
-                                                            .with_source(&src_addr_str)
-                                                            .with_destination(
-                                                                target_addr.to_string(),
-                                                            ),
-                                                        );
+                                                        let mut ev = DiagnosticEvent::new(
+                                                            fwd_event_buffer
+                                                                .clock()
+                                                                .monotonic_nanos(),
+                                                            fwd_event_buffer
+                                                                .clock()
+                                                                .wall_clock_nanos(),
+                                                            &fwd_stream_id,
+                                                            DiagnosticStage::SendSucceeded,
+                                                            TransportType::Udp,
+                                                            sent as u64,
+                                                        )
+                                                        .with_source(&src_addr_str)
+                                                        .with_destination(target_addr.to_string());
+
+                                                        if let Some(ref mqtt_cfg) = fwd_stream_mqtt
+                                                        {
+                                                            if mqtt_cfg.enabled {
+                                                                let parse_res = if mqtt_cfg
+                                                                    .validate_flags
+                                                                {
+                                                                    parse_mqtt_fixed_header(
+                                                                        &datagram.payload,
+                                                                    )
+                                                                } else {
+                                                                    parse_mqtt_fixed_header_relaxed(
+                                                                        &datagram.payload,
+                                                                    )
+                                                                };
+                                                                if let Ok(hdr) = parse_res {
+                                                                    ev = ev.with_mqtt_header(&hdr);
+                                                                }
+                                                            }
+                                                        }
+
+                                                        fwd_event_buffer.emit(ev);
                                                     }
                                                 }
                                                 Err(err) => {
@@ -3372,19 +3765,36 @@ impl StreamRunner {
                                                 "[stream {}] TCP destination error sending to {}: {}",
                                                 fwd_stream_id, format_endpoint(&dest.address), e
                                             );
-                                        } else if fwd_event_buffer.should_emit_packet_events() {
-                                            fwd_event_buffer.emit(
-                                                DiagnosticEvent::new(
-                                                    fwd_event_buffer.clock().monotonic_nanos(),
-                                                    fwd_event_buffer.clock().wall_clock_nanos(),
-                                                    &fwd_stream_id,
-                                                    DiagnosticStage::SendSucceeded,
-                                                    TransportType::Tcp,
-                                                    payload_len,
-                                                )
-                                                .with_source(&src_addr_str)
-                                                .with_destination(&dest_addr_str),
-                                            );
+                                        } else if fwd_event_buffer.should_emit_packet_events()
+                                            || fwd_stream_mqtt.as_ref().is_some_and(|m| m.enabled)
+                                        {
+                                            let mut ev = DiagnosticEvent::new(
+                                                fwd_event_buffer.clock().monotonic_nanos(),
+                                                fwd_event_buffer.clock().wall_clock_nanos(),
+                                                &fwd_stream_id,
+                                                DiagnosticStage::SendSucceeded,
+                                                TransportType::Tcp,
+                                                payload_len,
+                                            )
+                                            .with_source(&src_addr_str)
+                                            .with_destination(&dest_addr_str);
+
+                                            if let Some(ref mqtt_cfg) = fwd_stream_mqtt {
+                                                if mqtt_cfg.enabled {
+                                                    let parse_res = if mqtt_cfg.validate_flags {
+                                                        parse_mqtt_fixed_header(&datagram.payload)
+                                                    } else {
+                                                        parse_mqtt_fixed_header_relaxed(
+                                                            &datagram.payload,
+                                                        )
+                                                    };
+                                                    if let Ok(hdr) = parse_res {
+                                                        ev = ev.with_mqtt_header(&hdr);
+                                                    }
+                                                }
+                                            }
+
+                                            fwd_event_buffer.emit(ev);
                                         }
                                     }
                                 }
@@ -4415,6 +4825,380 @@ instances:
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.forwarded_packets, 1);
         assert_eq!(stats.dropped_packets, 0);
+
+        relay.stop();
+    }
+
+    fn make_test_mqtt_packet(packet_type: u8, flags: u8, payload_data: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.push((packet_type << 4) | (flags & 0x0F));
+        let mut varint = [0u8; 4];
+        let n = crate::mqtt::encode_variable_byte_integer(payload_data.len(), &mut varint).unwrap();
+        pkt.extend_from_slice(&varint[..n]);
+        pkt.extend_from_slice(payload_data);
+        pkt
+    }
+
+    #[test]
+    fn test_mqtt_udp_forwarding_preserves_payload_and_records_type_and_qos() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, forwarding a valid MQTT packet
+        // on a stream with MQTT inspection enabled transmits the payload unmodified to
+        // destination endpoints while recording packet type and QoS in diagnostic events.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mqtt-valid"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mqtt:
+          enabled: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        // Build a valid PUBLISH packet with QoS 1
+        let mut var_payload = Vec::new();
+        var_payload.extend_from_slice(&[0x00, 0x04]); // topic len 4
+        var_payload.extend_from_slice(b"test"); // topic
+        var_payload.extend_from_slice(&[0x00, 0x2A]); // packet id 42
+        var_payload.extend_from_slice(b"mqtt telemetry payload");
+        let pkt = make_test_mqtt_packet(crate::mqtt::MQTT_TYPE_PUBLISH, 0b0010, &var_payload);
+
+        sender.send_to(&pkt, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            pkt.as_slice(),
+            "payload must be transmitted unmodified"
+        );
+
+        let stats = relay.stream_stats("s-mqtt-valid").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        let insp_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::MqttInspection)
+            .expect("must emit MqttInspection diagnostic event");
+
+        assert_eq!(insp_ev.mqtt_packet_type, Some(3));
+        assert_eq!(insp_ev.mqtt_type_name.as_deref(), Some("PUBLISH"));
+        assert_eq!(insp_ev.mqtt_qos, Some(1));
+        assert_eq!(insp_ev.mqtt_packet_id, Some(42));
+        assert!(insp_ev.mqtt_metadata.is_some());
+
+        let meta = insp_ev.mqtt_metadata.as_ref().unwrap();
+        assert_eq!(meta.packet_type, 3);
+        assert_eq!(meta.qos, Some(1));
+        assert_eq!(meta.packet_identifier, Some(42));
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mqtt_malformed_invalid_header_flags_dropped_by_default() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, receiving a malformed MQTT packet
+        // with invalid header flags on a stream with MQTT inspection enabled drops the packet
+        // by default, increments dropped packet counters, and emits a dropped diagnostic event.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mqtt-drop"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mqtt:
+          enabled: true
+          passthrough_on_error: false
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        // PINGREQ flags must be 0000; here we set flags = 0001 (invalid flags)
+        let malformed_pkt = make_test_mqtt_packet(crate::mqtt::MQTT_TYPE_PINGREQ, 0b0001, &[]);
+        sender.send_to(&malformed_pkt, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let res = dest_sock.recv_from(&mut buf);
+        assert!(
+            res.is_err(),
+            "malformed packet with invalid flags must be dropped by default"
+        );
+
+        let stats = relay.stream_stats("s-mqtt-drop").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 0);
+        assert_eq!(stats.dropped_packets, 1);
+        assert_eq!(stats.drops_validation, 1);
+        assert_eq!(stats.validation_errors, 1);
+
+        let snap = relay.event_buffer().snapshot();
+        let drop_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::Dropped)
+            .expect("must emit Dropped diagnostic event");
+
+        assert!(drop_ev.reason.is_some());
+        assert!(drop_ev
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("invalid MQTT header flags"));
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mqtt_malformed_passthrough_on_error() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, receiving a malformed MQTT packet
+        // on an inspected stream configured with option passthrough_on_error forwards the
+        // payload unmodified to destination endpoints while recording a validation failure event.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mqtt-passthrough"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mqtt:
+          enabled: true
+          passthrough_on_error: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        // Malformed packet with invalid flags
+        let malformed_pkt = make_test_mqtt_packet(crate::mqtt::MQTT_TYPE_PINGREQ, 0b0001, &[]);
+        sender.send_to(&malformed_pkt, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            malformed_pkt.as_slice(),
+            "malformed packet must be forwarded unmodified"
+        );
+
+        let stats = relay.stream_stats("s-mqtt-passthrough").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+        assert_eq!(stats.validation_errors, 1);
+
+        let snap = relay.event_buffer().snapshot();
+        let fail_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::Failure)
+            .expect("must record validation failure event");
+
+        assert!(fail_ev.reason.is_some());
+        assert!(fail_ev
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("MQTT validation failed (passthrough)"));
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mqtt_unconfigured_stream_byte_identical_delivery_no_overhead() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, forwarding traffic on a stream
+        // without MQTT inspection enabled delivers packets byte-identically without invoking MQTT parsing overhead.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-unconfigured-mqtt"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+        let raw_payload = b"non-mqtt-raw-payload-\x00\xFF\x80\x7F".to_vec();
+        sender
+            .send_to(&raw_payload, format!("127.0.0.1:{listen_port}"))
+            .expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            raw_payload.as_slice(),
+            "unconfigured stream delivers byte-identically"
+        );
+
+        let stats = relay.stream_stats("s-unconfigured-mqtt").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+        assert_eq!(stats.validation_errors, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        assert!(
+            !snap
+                .events
+                .iter()
+                .any(|e| e.stage == DiagnosticStage::MqttInspection),
+            "unconfigured stream must not emit MqttInspection events"
+        );
+        assert!(
+            !snap.events.iter().any(|e| e.mqtt_packet_type.is_some()),
+            "unconfigured stream must not populate MQTT diagnostic fields"
+        );
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_mqtt_local_transmission_records_send_succeeded_not_downstream_broker_receipt() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, forwarding an inspected MQTT packet
+        // records successful local transmission with DiagnosticStage::SendSucceeded without claiming downstream broker receipt.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-mqtt-local-tx"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        mqtt:
+          enabled: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        let pkt = make_test_mqtt_packet(crate::mqtt::MQTT_TYPE_PINGREQ, 0b0000, &[]);
+        sender.send_to(&pkt, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(&buf[..n], pkt.as_slice());
+
+        let stats = relay.stream_stats("s-mqtt-local-tx").expect("stats");
+        assert_eq!(stats.forwarded_packets, 1);
+
+        let mut send_succeeded_ev = None;
+        for _ in 0..50 {
+            let snap = relay.event_buffer().snapshot();
+            if let Some(ev) = snap
+                .events
+                .iter()
+                .find(|e| e.stage == DiagnosticStage::SendSucceeded)
+                .cloned()
+            {
+                send_succeeded_ev = Some(ev);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let send_succeeded_ev =
+            send_succeeded_ev.expect("must record DiagnosticStage::SendSucceeded");
+
+        // Verify stage is SendSucceeded, not downstream broker delivery or application acknowledgment (SPEC §8)
+        assert_eq!(send_succeeded_ev.stage, DiagnosticStage::SendSucceeded);
+        assert_eq!(send_succeeded_ev.stage.to_string(), "send_succeeded");
+        assert_ne!(send_succeeded_ev.stage.to_string(), "delivered");
+        assert_ne!(send_succeeded_ev.stage.to_string(), "broker_accepted");
+
+        // Inspected MQTT metadata is recorded
+        assert_eq!(
+            send_succeeded_ev.mqtt_packet_type,
+            Some(crate::mqtt::MQTT_TYPE_PINGREQ)
+        );
+        assert_eq!(send_succeeded_ev.mqtt_type_name.as_deref(), Some("PINGREQ"));
 
         relay.stop();
     }
