@@ -509,7 +509,13 @@ fn test_cli_docs_acceptance_criteria() {
     assert!(readme_md.contains("rer health"));
     assert!(readme_md.contains("rer streams"));
     assert!(readme_md.contains("rer metrics"));
+    assert!(readme_md.contains("rer diagnose"));
+    assert!(readme_md.contains("rer replay"));
     assert!(readme_md.contains("rer version"));
+
+    // Author attribution and website
+    assert!(readme_md.contains("ronaldreeves.com"));
+    assert!(readme_md.contains("Ronald Edward Reeves Jr"));
 }
 
 #[test]

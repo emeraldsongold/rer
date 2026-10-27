@@ -3171,7 +3171,15 @@ impl DiagnosticBuffer {
             pending_event = ts.take_pending_end_event();
         }
 
-        let Ok(mut inner) = self.inner.try_lock() else {
+        let mut inner_guard = None;
+        for _ in 0..32 {
+            if let Ok(guard) = self.inner.try_lock() {
+                inner_guard = Some(guard);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        let Some(mut inner) = inner_guard else {
             self.dropped_count.fetch_add(1, Ordering::SeqCst);
             return false;
         };

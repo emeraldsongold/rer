@@ -4,7 +4,7 @@ RER (RER Engineering Relay) is an open-source, Rust-based network relay, telemet
 
 ## Current Status
 
-RER has completed **Milestone RER-F-001** (repository foundation and CI), **Milestone RER-F-002** (configuration model, validation CLI, and schema), **Milestone RER-F-003** (basic UDP relay engine, bounded queues, drop policies, and graceful shutdown), **Milestone RER-F-004** (deterministic traffic generator, verification test receiver, and unprivileged simulation harness), and **Milestone RER-F-015** (.deb, .rpm, and standalone binary packaging). The CLI summary lists commands `rer validate`, `rer inspect`, `rer run`, `rer test`, `rer status`, `rer health`, `rer streams`, `rer metrics` and `rer version`. Packaged artifacts (`.deb`, `.rpm`, `.tar.gz`) install safe defaults, example configuration, and systemd service units.
+RER has completed **Milestone RER-F-001** (repository foundation and CI), **Milestone RER-F-002** (configuration model, validation CLI, and schema), **Milestone RER-F-003** (basic UDP relay engine, bounded queues, drop policies, and graceful shutdown), **Milestone RER-F-004** (deterministic traffic generator, verification test receiver, and unprivileged simulation harness), and **Milestone RER-F-015** (.deb, .rpm, and standalone binary packaging). The CLI summary lists commands `rer validate`, `rer inspect`, `rer run`, `rer test`, `rer status`, `rer health`, `rer streams`, `rer metrics`, `rer diagnose`, `rer replay`, and `rer version`. Packaged artifacts (`.deb`, `.rpm`, `.tar.gz`) install safe defaults, example configuration, and systemd service units.
 
 Advanced transport features (TCP relays, paired streams, packet inspection, management API, and container orchestration) are defined in [`docs/SPEC.md`](docs/SPEC.md) and tracked in [`ROADMAP.md`](ROADMAP.md). They are scheduled for implementation in upcoming milestones.
 
@@ -50,6 +50,10 @@ cargo build --locked
 
 No local compilation is required for issue tracking or reviews; all builds and checks run on GitHub Actions hosted Linux runners.
 
+## Author
+
+RER was created and is maintained by Ronald Edward Reeves Jr, the project author and copyright holder ([ronaldreeves.com](https://ronaldreeves.com)).
+
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for details.
+This project is licensed under the Apache License, Version 2.0. Copyright 2026 Ronald Edward Reeves Jr. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for details.
