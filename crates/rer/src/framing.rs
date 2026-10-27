@@ -410,6 +410,126 @@ pub fn write_mqtt_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<(
     writer.write_all(packet)
 }
 
+/// KISS framing delimiter byte (Frame End).
+pub const KISS_FEND: u8 = 0xC0;
+
+/// KISS framing escape byte (Frame Escape).
+pub const KISS_FESC: u8 = 0xDB;
+
+/// KISS framing transposed frame end byte.
+pub const KISS_TFEND: u8 = 0xDC;
+
+/// KISS framing transposed frame escape byte.
+pub const KISS_TFESC: u8 = 0xDD;
+
+/// Encodes a payload into a KISS frame delimited by FEND bytes with byte escaping.
+#[must_use]
+pub fn encode_kiss_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 2);
+    frame.push(KISS_FEND);
+    for &b in payload {
+        match b {
+            KISS_FEND => {
+                frame.push(KISS_FESC);
+                frame.push(KISS_TFEND);
+            }
+            KISS_FESC => {
+                frame.push(KISS_FESC);
+                frame.push(KISS_TFESC);
+            }
+            other => frame.push(other),
+        }
+    }
+    frame.push(KISS_FEND);
+    frame
+}
+
+/// Reads a single KISS frame from `reader`.
+///
+/// In KISS TCP stream framing (SPEC §5, §8, §14):
+/// - Frames are delimited by `FEND` (`0xC0`) bytes.
+/// - Any leading or consecutive `FEND` bytes are discarded.
+/// - The escape byte `FESC` (`0xDB`) followed by `TFEND` (`0xDC`) decodes to `0xC0`.
+/// - The escape byte `FESC` (`0xDB`) followed by `TFESC` (`0xDD`) decodes to `0xDB`.
+/// - An escape byte followed by any unexpected byte returns an [`io::ErrorKind::InvalidData`] error.
+/// - Validates that unescaped frame length does not exceed `max_frame_size`.
+pub fn read_kiss_frame<R: Read>(
+    reader: &mut R,
+    max_frame_size: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut started = false;
+    let mut frame = Vec::new();
+    let mut b = [0u8; 1];
+
+    while read_exact_interruptible(reader, &mut b, shutdown)? {
+        let byte = b[0];
+        if byte == KISS_FEND {
+            if started {
+                return Ok(Some(frame));
+            }
+            // Discard leading or consecutive FEND delimiter bytes
+            continue;
+        }
+
+        started = true;
+        let decoded = if byte == KISS_FESC {
+            let mut esc_buf = [0u8; 1];
+            let ok = read_exact_interruptible(reader, &mut esc_buf, shutdown)?;
+            if !ok {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "stream closed unexpectedly after KISS escape byte",
+                ));
+            }
+            match esc_buf[0] {
+                KISS_TFEND => KISS_FEND,
+                KISS_TFESC => KISS_FESC,
+                unexpected => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "unexpected byte 0x{:02X} after KISS escape byte 0xDB",
+                            unexpected
+                        ),
+                    ));
+                }
+            }
+        } else {
+            byte
+        };
+
+        if frame.len() >= max_frame_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "KISS frame unescaped length exceeds maximum allowed {}",
+                    max_frame_size
+                ),
+            ));
+        }
+        frame.push(decoded);
+    }
+
+    if started {
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "stream closed before full KISS frame was read",
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Writes a single KISS frame to `writer`.
+///
+/// In KISS TCP stream framing, frames are delimited by `FEND` (`0xC0`) bytes
+/// and internal `FEND` and `FESC` bytes are escaped.
+pub fn write_kiss_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<()> {
+    let frame = encode_kiss_frame(packet);
+    writer.write_all(&frame)
+}
+
 /// Reads a single frame from `reader` using the specified [`FramingMode`].
 pub fn read_frame_with_mode<R: Read>(
     reader: &mut R,
@@ -422,6 +542,7 @@ pub fn read_frame_with_mode<R: Read>(
         FramingMode::Ccsds => read_ccsds_frame(reader, max_frame_size, shutdown),
         FramingMode::Mavlink => read_mavlink_frame(reader, max_frame_size, shutdown),
         FramingMode::Mqtt => read_mqtt_frame(reader, max_frame_size, shutdown),
+        FramingMode::Kiss => read_kiss_frame(reader, max_frame_size, shutdown),
     }
 }
 
@@ -442,6 +563,7 @@ pub fn write_frame_with_mode<W: Write>(
         FramingMode::Ccsds => write_ccsds_frame(writer, payload),
         FramingMode::Mavlink => write_mavlink_frame(writer, payload),
         FramingMode::Mqtt => write_mqtt_frame(writer, payload),
+        FramingMode::Kiss => write_kiss_frame(writer, payload),
     }
 }
 
@@ -1155,5 +1277,227 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let err = read_mqtt_frame(&mut cursor, 1024, &shutdown).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_criterion1_kiss_fragmented_one_byte_reads() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
+        // delivering a KISS frame fragmented across multiple 1-byte reads reassembles the
+        // complete unescaped frame matching the original transmitted payload bytes.
+        let shutdown = AtomicBool::new(false);
+
+        // 1. Unescaped payload
+        let payload1 = b"\x00hello kiss packet radio world".to_vec();
+        let wire1 = encode_kiss_frame(&payload1);
+        let cursor1 = Cursor::new(wire1);
+        let mut chunked1 = ChunkedReader {
+            inner: cursor1,
+            chunk_size: 1, // Deliver 1 byte per read()
+        };
+        let decoded1 = read_kiss_frame(&mut chunked1, 1024, &shutdown)
+            .expect("read chunked kiss frame")
+            .expect("some frame");
+        assert_eq!(decoded1, payload1);
+
+        // 2. Payload containing characters requiring escaping (FEND 0xC0 and FESC 0xDB)
+        let payload2 = vec![0x00, 0xC0, 0x11, 0xDB, 0x22, 0xC0, 0xDB];
+        let wire2 = encode_kiss_frame(&payload2);
+        let cursor2 = Cursor::new(wire2);
+        let mut chunked2 = ChunkedReader {
+            inner: cursor2,
+            chunk_size: 1,
+        };
+        let decoded2 = read_frame_with_mode(&mut chunked2, FramingMode::Kiss, 1024, &shutdown)
+            .expect("read chunked kiss frame with mode")
+            .expect("some frame");
+        assert_eq!(decoded2, payload2);
+    }
+
+    #[test]
+    fn test_criterion2_concatenated_kiss_frames_in_single_read_buffer() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
+        // delivering two concatenated KISS frames separated by FEND delimiter byte 0xC0
+        // in a single read buffer yields the two frames individually.
+        let shutdown = AtomicBool::new(false);
+
+        let frame1 = vec![0x00, 0x01, 0x02, 0x03];
+        let frame2 = vec![0x00, 0xAA, 0xBB, 0xCC, 0xDD];
+
+        // Frame 1 followed by FEND (0xC0), followed directly by Frame 2, ending with FEND
+        // Single FEND separator between frame1 and frame2
+        let mut stream_bytes = Vec::new();
+        stream_bytes.push(KISS_FEND);
+        stream_bytes.extend_from_slice(&frame1);
+        stream_bytes.push(KISS_FEND); // Delimiter ending frame 1 and separating from frame 2
+        stream_bytes.extend_from_slice(&frame2);
+        stream_bytes.push(KISS_FEND);
+
+        let mut cursor = Cursor::new(stream_bytes);
+        let r1 = read_kiss_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .expect("frame 1");
+        let r2 = read_kiss_frame(&mut cursor, 1024, &shutdown)
+            .unwrap()
+            .expect("frame 2");
+        let r3 = read_kiss_frame(&mut cursor, 1024, &shutdown).unwrap();
+
+        assert_eq!(r1, frame1);
+        assert_eq!(r2, frame2);
+        assert!(r3.is_none());
+
+        // Also test when both frames have their own leading and trailing FENDs
+        let mut stream_bytes2 = Vec::new();
+        stream_bytes2.extend_from_slice(&encode_kiss_frame(&frame1));
+        stream_bytes2.extend_from_slice(&encode_kiss_frame(&frame2));
+
+        let mut cursor2 = Cursor::new(stream_bytes2);
+        let r1_2 = read_frame_with_mode(&mut cursor2, FramingMode::Kiss, 1024, &shutdown)
+            .unwrap()
+            .expect("frame 1");
+        let r2_2 = read_frame_with_mode(&mut cursor2, FramingMode::Kiss, 1024, &shutdown)
+            .unwrap()
+            .expect("frame 2");
+        let r3_2 = read_frame_with_mode(&mut cursor2, FramingMode::Kiss, 1024, &shutdown).unwrap();
+
+        assert_eq!(r1_2, frame1);
+        assert_eq!(r2_2, frame2);
+        assert!(r3_2.is_none());
+    }
+
+    #[test]
+    fn test_criterion3_kiss_escape_sequences_decode() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading from a TCP stream
+        // delivering an escaped sequence of 0xDB followed by 0xDC decodes byte 0xC0,
+        // and 0xDB followed by 0xDD decodes byte 0xDB.
+        let shutdown = AtomicBool::new(false);
+
+        // 1. [0xDB, 0xDC] decodes to 0xC0
+        let raw1 = vec![KISS_FEND, 0x00, 0xDB, 0xDC, 0x01, KISS_FEND];
+        let mut c1 = Cursor::new(raw1);
+        let res1 = read_kiss_frame(&mut c1, 1024, &shutdown)
+            .unwrap()
+            .expect("frame");
+        assert_eq!(res1, vec![0x00, 0xC0, 0x01]);
+
+        // 2. [0xDB, 0xDD] decodes to 0xDB
+        let raw2 = vec![KISS_FEND, 0x00, 0xDB, 0xDD, 0x02, KISS_FEND];
+        let mut c2 = Cursor::new(raw2);
+        let res2 = read_kiss_frame(&mut c2, 1024, &shutdown)
+            .unwrap()
+            .expect("frame");
+        assert_eq!(res2, vec![0x00, 0xDB, 0x02]);
+
+        // 3. Combined in a single frame
+        let raw3 = vec![
+            KISS_FEND, 0x00, 0xDB, 0xDC, 0xAA, 0xDB, 0xDD, 0xBB, KISS_FEND,
+        ];
+        let mut c3 = Cursor::new(raw3);
+        let res3 = read_kiss_frame(&mut c3, 1024, &shutdown)
+            .unwrap()
+            .expect("frame");
+        assert_eq!(res3, vec![0x00, 0xC0, 0xAA, 0xDB, 0xBB]);
+    }
+
+    #[test]
+    fn test_criterion4_kiss_unexpected_escape_byte_returns_invalid_data() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading a KISS frame
+        // containing escape byte 0xDB followed by an unexpected byte returns
+        // an io::ErrorKind::InvalidData error.
+        let shutdown = AtomicBool::new(false);
+
+        // 0xDB followed by 0x42
+        let bad1 = vec![KISS_FEND, 0x00, 0xDB, 0x42, KISS_FEND];
+        let mut c1 = Cursor::new(bad1);
+        let err1 = read_kiss_frame(&mut c1, 1024, &shutdown).unwrap_err();
+        assert_eq!(err1.kind(), io::ErrorKind::InvalidData);
+        assert!(err1.to_string().contains("unexpected byte"));
+
+        // 0xDB followed by 0x00
+        let bad2 = vec![KISS_FEND, 0x00, 0xDB, 0x00, KISS_FEND];
+        let mut c2 = Cursor::new(bad2);
+        let err2 = read_kiss_frame(&mut c2, 1024, &shutdown).unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+
+        // 0xDB followed immediately by FEND (0xC0)
+        let bad3 = vec![KISS_FEND, 0x00, 0xDB, KISS_FEND];
+        let mut c3 = Cursor::new(bad3);
+        let err3 = read_kiss_frame(&mut c3, 1024, &shutdown).unwrap_err();
+        assert_eq!(err3.kind(), io::ErrorKind::InvalidData);
+
+        // Also test via read_frame_with_mode
+        let bad4 = vec![KISS_FEND, 0xDB, 0xFF, KISS_FEND];
+        let mut c4 = Cursor::new(bad4);
+        let err4 = read_frame_with_mode(&mut c4, FramingMode::Kiss, 1024, &shutdown).unwrap_err();
+        assert_eq!(err4.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_criterion5_oversized_kiss_frame_rejection() {
+        // Acceptance criterion: In crates/rer/src/framing.rs, reading a KISS frame
+        // whose unescaped length exceeds the configured max_frame_size returns
+        // an io::ErrorKind::InvalidData error.
+        let shutdown = AtomicBool::new(false);
+
+        // Frame with unescaped length 6, but max_frame_size is 5
+        let oversized = vec![KISS_FEND, 1, 2, 3, 4, 5, 6, KISS_FEND];
+        let mut c1 = Cursor::new(oversized);
+        let err1 = read_kiss_frame(&mut c1, 5, &shutdown).unwrap_err();
+        assert_eq!(err1.kind(), io::ErrorKind::InvalidData);
+        assert!(err1.to_string().contains("exceeds maximum allowed"));
+
+        // Escaped frame: on wire it is 8 bytes, unescapes to 6 bytes, max_frame_size is 5
+        let raw_escaped = vec![KISS_FEND, 1, 2, 3, 4, 5, 0xDB, 0xDC, KISS_FEND];
+        let mut c2 = Cursor::new(raw_escaped);
+        let err2 = read_kiss_frame(&mut c2, 5, &shutdown).unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+
+        // Frame with exact max_frame_size (5) should succeed
+        let exact = vec![KISS_FEND, 1, 2, 3, 4, 5, KISS_FEND];
+        let mut c3 = Cursor::new(exact);
+        let res3 = read_kiss_frame(&mut c3, 5, &shutdown).unwrap();
+        assert_eq!(res3, Some(vec![1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn test_kiss_write_frame_and_encoding() {
+        let payload = vec![0x00, 0xC0, 0x11, 0xDB, 0x22];
+        let wire = encode_kiss_frame(&payload);
+        assert_eq!(wire[0], KISS_FEND);
+        assert_eq!(*wire.last().unwrap(), KISS_FEND);
+        // 0xC0 escaped to [0xDB, 0xDC]
+        assert_eq!(&wire[2..4], &[0xDB, 0xDC]);
+        // 0xDB escaped to [0xDB, 0xDD]
+        assert_eq!(&wire[5..7], &[0xDB, 0xDD]);
+
+        let mut out = Vec::new();
+        write_kiss_frame(&mut out, &payload).unwrap();
+        assert_eq!(out, wire);
+
+        let mut out_mode = Vec::new();
+        write_frame_with_mode(&mut out_mode, FramingMode::Kiss, &payload).unwrap();
+        assert_eq!(out_mode, wire);
+    }
+
+    #[test]
+    fn test_kiss_eof_and_empty_handling() {
+        let shutdown = AtomicBool::new(false);
+
+        // Empty stream
+        let mut c1 = Cursor::new(Vec::new());
+        assert_eq!(read_kiss_frame(&mut c1, 1024, &shutdown).unwrap(), None);
+
+        // Stream with only FEND bytes
+        let mut c2 = Cursor::new(vec![KISS_FEND, KISS_FEND, KISS_FEND]);
+        assert_eq!(read_kiss_frame(&mut c2, 1024, &shutdown).unwrap(), None);
+
+        // Truncated frame (EOF before closing FEND)
+        let mut c3 = Cursor::new(vec![KISS_FEND, 0x00, 0x11, 0x22]);
+        let err3 = read_kiss_frame(&mut c3, 1024, &shutdown).unwrap_err();
+        assert_eq!(err3.kind(), io::ErrorKind::UnexpectedEof);
+
+        // Truncated escape (EOF after 0xDB)
+        let mut c4 = Cursor::new(vec![KISS_FEND, 0x00, 0xDB]);
+        let err4 = read_kiss_frame(&mut c4, 1024, &shutdown).unwrap_err();
+        assert_eq!(err4.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

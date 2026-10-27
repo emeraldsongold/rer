@@ -645,6 +645,10 @@ impl TcpDestinationConnection {
                 let frame = framing::encode_frame(payload);
                 s.write_all(&frame)
             }
+            FramingMode::Kiss => {
+                let frame = framing::encode_kiss_frame(payload);
+                s.write_all(&frame)
+            }
             FramingMode::Ccsds | FramingMode::Mavlink | FramingMode::Mqtt => s.write_all(payload),
         };
 
