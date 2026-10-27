@@ -3650,6 +3650,12 @@ impl StreamRunner {
 
                                             match socket_res {
                                                 Ok(sent) => {
+                                                    fwd_stats
+                                                        .forwarded_packets
+                                                        .fetch_add(1, Ordering::SeqCst);
+                                                    fwd_stats
+                                                        .forwarded_bytes
+                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                     if fwd_event_buffer.should_emit_packet_events()
                                                         || fwd_stream_mqtt
                                                             .as_ref()
@@ -3692,12 +3698,6 @@ impl StreamRunner {
 
                                                         fwd_event_buffer.emit(ev);
                                                     }
-                                                    fwd_stats
-                                                        .forwarded_packets
-                                                        .fetch_add(1, Ordering::SeqCst);
-                                                    fwd_stats
-                                                        .forwarded_bytes
-                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                 }
                                                 Err(err) => {
                                                     fwd_stats
@@ -4085,7 +4085,7 @@ impl RelayHealthHandle {
             + snap.queue_depth
             < snap.received_packets
         {
-            for _ in 0..10 {
+            for _ in 0..50 {
                 std::thread::sleep(Duration::from_millis(5));
                 snap = runner.stats.snapshot();
                 if snap.forwarded_packets
@@ -4348,7 +4348,7 @@ impl Relay {
             + snap.queue_depth
             < snap.received_packets
         {
-            for _ in 0..10 {
+            for _ in 0..50 {
                 std::thread::sleep(Duration::from_millis(5));
                 snap = runner.stats.snapshot();
                 if snap.forwarded_packets
@@ -5171,11 +5171,17 @@ instances:
         let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
         assert_eq!(&buf[..n], pkt.as_slice());
 
-        let stats = relay.stream_stats("s-mqtt-local-tx").expect("stats");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut stats = relay.stream_stats("s-mqtt-local-tx").expect("stats");
+        while stats.forwarded_packets < 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            stats = relay.stream_stats("s-mqtt-local-tx").expect("stats");
+        }
         assert_eq!(stats.forwarded_packets, 1);
 
         let mut send_succeeded_ev = None;
-        for _ in 0..50 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             let snap = relay.event_buffer().snapshot();
             if let Some(ev) = snap
                 .events
@@ -5186,7 +5192,7 @@ instances:
                 send_succeeded_ev = Some(ev);
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(5));
         }
         let send_succeeded_ev =
             send_succeeded_ev.expect("must record DiagnosticStage::SendSucceeded");

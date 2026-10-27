@@ -458,11 +458,17 @@ instances:
     let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
     assert_eq!(&buf[..n], pkt.as_slice());
 
-    let stats = relay.stream_stats("s-mqtt-sendsucceeded").expect("stats");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut stats = relay.stream_stats("s-mqtt-sendsucceeded").expect("stats");
+    while stats.forwarded_packets < 1 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        stats = relay.stream_stats("s-mqtt-sendsucceeded").expect("stats");
+    }
     assert_eq!(stats.forwarded_packets, 1);
 
     let mut send_succeeded_ev = None;
-    for _ in 0..50 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         let snap = relay.event_buffer().snapshot();
         if let Some(ev) = snap
             .events
@@ -473,7 +479,7 @@ instances:
             send_succeeded_ev = Some(ev);
             break;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(5));
     }
     let send_succeeded_ev = send_succeeded_ev.expect(
         "must record DiagnosticStage::SendSucceeded event on successful local transmission",
