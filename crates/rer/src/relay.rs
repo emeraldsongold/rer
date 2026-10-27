@@ -3650,12 +3650,6 @@ impl StreamRunner {
 
                                             match socket_res {
                                                 Ok(sent) => {
-                                                    fwd_stats
-                                                        .forwarded_packets
-                                                        .fetch_add(1, Ordering::SeqCst);
-                                                    fwd_stats
-                                                        .forwarded_bytes
-                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                     if fwd_event_buffer.should_emit_packet_events()
                                                         || fwd_stream_mqtt
                                                             .as_ref()
@@ -3698,6 +3692,12 @@ impl StreamRunner {
 
                                                         fwd_event_buffer.emit(ev);
                                                     }
+                                                    fwd_stats
+                                                        .forwarded_packets
+                                                        .fetch_add(1, Ordering::SeqCst);
+                                                    fwd_stats
+                                                        .forwarded_bytes
+                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                 }
                                                 Err(err) => {
                                                     fwd_stats
