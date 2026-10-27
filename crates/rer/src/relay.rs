@@ -8,16 +8,18 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ax25::{parse_ax25_frame, Ax25Frame};
 use crate::bpv7::{evaluate_bundle_header, BundleParseStatus};
 use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequenceTracker};
 use crate::config::{
     Bpv7InspectionConfig, CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig,
-    FramingMode, InstanceConfig, LtpInspectionConfig, MavlinkConfig, MqttConfig, OperationalMode,
-    SrtInspectionConfig, StreamConfig, TransportType,
+    FramingMode, InstanceConfig, KissConfig, LtpInspectionConfig, MavlinkConfig, MqttConfig,
+    OperationalMode, SrtInspectionConfig, StreamConfig, TransportType,
 };
 use crate::diagnostics::{
-    BundleInspection, DiagnosticBuffer, DiagnosticEvent, DiagnosticStage, DiagnosticTestState,
-    LtpInspection, MavlinkInspection, MavlinkMetadata, MqttInspection, MqttMetadata, SequenceState,
+    kiss_command_name, Ax25Metadata, BundleInspection, DiagnosticBuffer, DiagnosticEvent,
+    DiagnosticStage, DiagnosticTestState, KissInspection, KissMetadata, LtpInspection,
+    MavlinkInspection, MavlinkMetadata, MqttInspection, MqttMetadata, SequenceState,
     SequenceTracker, SequenceTrackingEvent, SrtInspection,
 };
 use crate::framing;
@@ -1469,6 +1471,305 @@ fn process_mqtt_ingress(payload: &[u8], ctx: &MqttIngressContext<'_>) -> Option<
 }
 
 #[derive(Debug, Clone, Copy)]
+struct KissIngressContext<'a> {
+    kiss_cfg: Option<&'a KissConfig>,
+    stats: &'a StreamStats,
+    event_buffer: &'a DiagnosticBuffer,
+    stream_id: &'a str,
+    src_endpoint: &'a str,
+    primary_dest: &'a str,
+    transport: TransportType,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExtractedKiss {
+    port: Option<u8>,
+    command: Option<u8>,
+    ax25_frame: Option<Ax25Frame>,
+    inspection: Option<KissInspection>,
+}
+
+fn process_kiss_ingress(payload: &[u8], ctx: &KissIngressContext<'_>) -> Option<ExtractedKiss> {
+    let KissIngressContext {
+        kiss_cfg,
+        stats,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+
+    let Some(kiss_cfg) = kiss_cfg else {
+        return Some(ExtractedKiss::default());
+    };
+    if !kiss_cfg.enabled {
+        return Some(ExtractedKiss::default());
+    }
+
+    if payload.is_empty() {
+        stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+        if !kiss_cfg.passthrough_on_error {
+            stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+            let drop_reason = "empty KISS frame: buffer has 0 bytes".to_string();
+            eprintln!(
+                "[stream {}] Dropped invalid KISS {} packet: {}",
+                stream_id, transport, drop_reason
+            );
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Dropped,
+                    transport,
+                    0,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_reason(drop_reason),
+            );
+            return None;
+        } else {
+            let fail_reason = "KISS validation failed (passthrough): empty frame".to_string();
+            eprintln!(
+                "[stream {}] KISS validation failed (passthrough): {}",
+                stream_id, fail_reason
+            );
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Failure,
+                    transport,
+                    0,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_reason(fail_reason),
+            );
+            return Some(ExtractedKiss::default());
+        }
+    }
+
+    let kiss_byte = payload[0];
+    let port = (kiss_byte >> 4) & 0x0F;
+    let cmd = kiss_byte & 0x0F;
+
+    // Check port filter
+    if let Some(filter_port) = kiss_cfg.port_filter {
+        if u32::from(port) != filter_port {
+            stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+            stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+            let drop_reason = format!(
+                "KISS port mismatch: frame port {port} does not match configured filter port {filter_port}"
+            );
+            eprintln!(
+                "[stream {}] Dropped KISS {} packet: {}",
+                stream_id, transport, drop_reason
+            );
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Dropped,
+                    transport,
+                    payload.len() as u64,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_kiss_port(port)
+                .with_kiss_command(cmd)
+                .with_reason(drop_reason),
+            );
+            return None;
+        }
+    }
+
+    if !kiss_cfg.inspect_ax25 {
+        let mut insp = KissInspection::new(port, cmd);
+        insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+        insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+        insp.stream_id = Some(stream_id.to_string());
+
+        let mut insp_ev: DiagnosticEvent = insp.clone().into();
+        insp_ev.transport = transport;
+        insp_ev.payload_length = payload.len() as u64;
+        insp_ev.source_endpoint = Some(src_endpoint.to_string());
+        insp_ev.destination_endpoint = Some(primary_dest.to_string());
+        event_buffer.emit(insp_ev);
+
+        return Some(ExtractedKiss {
+            port: Some(port),
+            command: Some(cmd),
+            ax25_frame: None,
+            inspection: Some(insp),
+        });
+    }
+
+    // Passive AX.25 packet inspection
+    // If command is DATA (0x00), the frame contains an AX.25 packet starting at byte 1.
+    // If command is not 0x00, check whether it is a valid KISS control command (e.g. TX_DELAY, P, etc.)
+    // or whether the whole payload is a raw AX.25 packet.
+    let is_kiss_control = matches!(cmd, 1..=6 | 15)
+        && (matches!(cmd, 1..=5) && payload.len() == 2
+            || cmd == 15 && payload.len() == 1
+            || cmd == 6);
+
+    let ax25_res = if cmd == 0 {
+        parse_ax25_frame(&payload[1..])
+    } else if !is_kiss_control {
+        parse_ax25_frame(&payload[1..]).or_else(|_| parse_ax25_frame(payload))
+    } else {
+        let mut insp = KissInspection::new(port, cmd);
+        insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+        insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+        insp.stream_id = Some(stream_id.to_string());
+
+        let mut insp_ev: DiagnosticEvent = insp.clone().into();
+        insp_ev.transport = transport;
+        insp_ev.payload_length = payload.len() as u64;
+        insp_ev.source_endpoint = Some(src_endpoint.to_string());
+        insp_ev.destination_endpoint = Some(primary_dest.to_string());
+        event_buffer.emit(insp_ev);
+
+        return Some(ExtractedKiss {
+            port: Some(port),
+            command: Some(cmd),
+            ax25_frame: None,
+            inspection: Some(insp),
+        });
+    };
+
+    match ax25_res {
+        Ok(frame) => {
+            let mut insp = KissInspection::new(port, cmd);
+            insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+            insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+            insp.stream_id = Some(stream_id.to_string());
+            insp.source_callsign = Some(frame.source_callsign.clone());
+            insp.destination_callsign = Some(frame.destination_callsign.clone());
+            insp.source_ssid = Some(frame.source_ssid);
+            insp.destination_ssid = Some(frame.destination_ssid);
+            insp.frame_type = Some(format!("{:?}", frame.frame_type));
+            insp.pid = frame.pid;
+            insp.parse_status = Some("Valid".to_string());
+
+            let digis = frame.repeater_callsign_strings();
+            let digis_opt = if digis.is_empty() {
+                None
+            } else {
+                Some(digis.clone())
+            };
+
+            let kiss_meta = KissMetadata {
+                port,
+                kiss_port: Some(port),
+                command: cmd,
+                kiss_command: Some(cmd),
+                command_name: Some(kiss_command_name(cmd).to_string()),
+                source_callsign: Some(frame.source_callsign.clone()),
+                destination_callsign: Some(frame.destination_callsign.clone()),
+                ax25_source_callsign: Some(frame.source_callsign.clone()),
+                ax25_destination_callsign: Some(frame.destination_callsign.clone()),
+                source_ssid: Some(frame.source_ssid),
+                destination_ssid: Some(frame.destination_ssid),
+                frame_type: Some(format!("{:?}", frame.frame_type)),
+                pid: frame.pid,
+                digipeaters: digis_opt.clone(),
+            };
+            insp.kiss_metadata = Some(kiss_meta);
+
+            let ax25_meta = Ax25Metadata {
+                source_callsign: frame.source_callsign.clone(),
+                destination_callsign: frame.destination_callsign.clone(),
+                ax25_source_callsign: Some(frame.source_callsign.clone()),
+                ax25_destination_callsign: Some(frame.destination_callsign.clone()),
+                source_ssid: Some(frame.source_ssid),
+                destination_ssid: Some(frame.destination_ssid),
+                frame_type: Some(format!("{:?}", frame.frame_type)),
+                pid: frame.pid,
+                digipeaters: digis_opt,
+            };
+            insp.ax25_metadata = Some(ax25_meta);
+
+            let mut insp_ev: DiagnosticEvent = insp.clone().into();
+            insp_ev.transport = transport;
+            insp_ev.payload_length = payload.len() as u64;
+            insp_ev.source_endpoint = Some(src_endpoint.to_string());
+            insp_ev.destination_endpoint = Some(primary_dest.to_string());
+            event_buffer.emit(insp_ev);
+
+            Some(ExtractedKiss {
+                port: Some(port),
+                command: Some(cmd),
+                ax25_frame: Some(frame),
+                inspection: Some(insp),
+            })
+        }
+        Err(err) => {
+            stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+            if !kiss_cfg.passthrough_on_error {
+                stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+                let drop_reason = format!("invalid AX.25 packet: {err}");
+                eprintln!(
+                    "[stream {}] Dropped invalid AX.25 {} packet: {}",
+                    stream_id, transport, drop_reason
+                );
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Dropped,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_kiss_port(port)
+                    .with_kiss_command(cmd)
+                    .with_reason(drop_reason),
+                );
+                None
+            } else {
+                let fail_reason = format!("AX.25 validation failed (passthrough): {err}");
+                eprintln!(
+                    "[stream {}] AX.25 validation failed (passthrough): {}",
+                    stream_id, fail_reason
+                );
+                event_buffer.emit(
+                    DiagnosticEvent::new(
+                        event_buffer.clock().monotonic_nanos(),
+                        event_buffer.clock().wall_clock_nanos(),
+                        stream_id,
+                        DiagnosticStage::Failure,
+                        transport,
+                        payload.len() as u64,
+                    )
+                    .with_source(src_endpoint)
+                    .with_destination(primary_dest)
+                    .with_kiss_port(port)
+                    .with_kiss_command(cmd)
+                    .with_reason(fail_reason),
+                );
+                Some(ExtractedKiss {
+                    port: Some(port),
+                    command: Some(cmd),
+                    ax25_frame: None,
+                    inspection: None,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct Bpv7IngressContext<'a> {
     bpv7_cfg: Option<&'a Bpv7InspectionConfig>,
     event_buffer: &'a DiagnosticBuffer,
@@ -1973,6 +2274,7 @@ impl StreamRunner {
                 let recv_mavlink_tracker = mavlink_tracker.as_ref().map(Arc::clone);
                 let recv_mavlink_config = stream.mavlink.clone();
                 let recv_mqtt_config = stream.mqtt.clone();
+                let recv_kiss_config = stream.kiss.clone();
                 let recv_bpv7_config = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let recv_ltp_config = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let recv_srt_config = stream.inspection.as_ref().and_then(|i| i.srt.clone());
@@ -2027,6 +2329,21 @@ impl StreamRunner {
                                     payload_slice,
                                     &MqttIngressContext {
                                         mqtt_cfg: recv_mqtt_config.as_ref(),
+                                        stats: &recv_stats,
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                ) else {
+                                    continue;
+                                };
+
+                                let Some(kiss_info) = process_kiss_ingress(
+                                    payload_slice,
+                                    &KissIngressContext {
+                                        kiss_cfg: recv_kiss_config.as_ref(),
                                         stats: &recv_stats,
                                         event_buffer: &recv_event_buffer,
                                         stream_id: &recv_stream_id,
@@ -2186,6 +2503,19 @@ impl StreamRunner {
                                         ev.srt_sequence_number = si.sequence_number;
                                         ev.srt_timestamp = Some(si.timestamp);
                                         ev.srt_timestamp_us = Some(si.timestamp);
+                                    }
+                                    if let Some(ref insp) = kiss_info.inspection {
+                                        ev = ev.with_kiss_inspection(insp.clone());
+                                    } else {
+                                        if let Some(port) = kiss_info.port {
+                                            ev = ev.with_kiss_port(port);
+                                        }
+                                        if let Some(cmd) = kiss_info.command {
+                                            ev = ev.with_kiss_command(cmd);
+                                        }
+                                        if let Some(ref ax25) = kiss_info.ax25_frame {
+                                            ev = ev.with_ax25_frame(ax25);
+                                        }
                                     }
                                     if let Some(ref h) = hex_prev {
                                         ev = ev.with_hex_preview(h);
@@ -2388,6 +2718,7 @@ impl StreamRunner {
                 let mavlink_tracker_for_tcp = mavlink_tracker.as_ref().map(Arc::clone);
                 let mavlink_config_for_tcp = stream.mavlink.clone();
                 let mqtt_config_for_tcp = stream.mqtt.clone();
+                let kiss_config_for_tcp = stream.kiss.clone();
                 let bpv7_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
                 let ltp_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.ltp.clone());
                 let srt_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.srt.clone());
@@ -2437,6 +2768,7 @@ impl StreamRunner {
                                             mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
                                         let cl_mavlink_config = mavlink_config_for_tcp.clone();
                                         let cl_mqtt_config = mqtt_config_for_tcp.clone();
+                                        let cl_kiss_config = kiss_config_for_tcp.clone();
                                         let cl_bpv7_config = bpv7_config_for_tcp.clone();
                                         let cl_ltp_config = ltp_config_for_tcp.clone();
                                         let cl_srt_config = srt_config_for_tcp.clone();
@@ -2503,6 +2835,21 @@ impl StreamRunner {
                                                             &payload,
                                                             &MqttIngressContext {
                                                                 mqtt_cfg: cl_mqtt_config.as_ref(),
+                                                                stats: &cl_stats,
+                                                                event_buffer: &cl_event_buffer,
+                                                                stream_id: &cl_stream_id,
+                                                                src_endpoint: &src_endpoint,
+                                                                primary_dest: &cl_primary_dest,
+                                                                transport: TransportType::Tcp,
+                                                            },
+                                                        ) else {
+                                                            continue;
+                                                        };
+
+                                                        let Some(kiss_info) = process_kiss_ingress(
+                                                            &payload,
+                                                            &KissIngressContext {
+                                                                kiss_cfg: cl_kiss_config.as_ref(),
                                                                 stats: &cl_stats,
                                                                 event_buffer: &cl_event_buffer,
                                                                 stream_id: &cl_stream_id,
@@ -2681,6 +3028,19 @@ impl StreamRunner {
                                                                 ev.srt_sequence_number = si.sequence_number;
                                                                 ev.srt_timestamp = Some(si.timestamp);
                                                                 ev.srt_timestamp_us = Some(si.timestamp);
+                                                            }
+                                                            if let Some(ref insp) = kiss_info.inspection {
+                                                                ev = ev.with_kiss_inspection(insp.clone());
+                                                            } else {
+                                                                if let Some(port) = kiss_info.port {
+                                                                    ev = ev.with_kiss_port(port);
+                                                                }
+                                                                if let Some(cmd) = kiss_info.command {
+                                                                    ev = ev.with_kiss_command(cmd);
+                                                                }
+                                                                if let Some(ref ax25) = kiss_info.ax25_frame {
+                                                                    ev = ev.with_ax25_frame(ax25);
+                                                                }
                                                             }
                                                             if let Some(ref h) = hex_prev {
                                                                 ev = ev.with_hex_preview(h);
@@ -2973,6 +3333,7 @@ impl StreamRunner {
                         let conn_mavlink_config = mavlink_config_for_tcp.clone();
                         let conn_mavlink_tracker = mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
                         let conn_mqtt_config = mqtt_config_for_tcp.clone();
+                        let conn_kiss_config = kiss_config_for_tcp.clone();
                         let recv_handle = thread::spawn(move || {
                             let mut backoff = Duration::from_millis(50);
                             let max_backoff = Duration::from_millis(1000);
@@ -3073,6 +3434,21 @@ impl StreamRunner {
                                                         &payload,
                                                         &MqttIngressContext {
                                                             mqtt_cfg: conn_mqtt_config.as_ref(),
+                                                            stats: &recv_stats,
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
+                                                    ) else {
+                                                        continue;
+                                                    };
+
+                                                    let Some(kiss_info) = process_kiss_ingress(
+                                                        &payload,
+                                                        &KissIngressContext {
+                                                            kiss_cfg: conn_kiss_config.as_ref(),
                                                             stats: &recv_stats,
                                                             event_buffer: &recv_event_buffer,
                                                             stream_id: &recv_stream_id,
@@ -3240,6 +3616,19 @@ impl StreamRunner {
                                                             ev.srt_sequence_number = si.sequence_number;
                                                             ev.srt_timestamp = Some(si.timestamp);
                                                             ev.srt_timestamp_us = Some(si.timestamp);
+                                                        }
+                                                        if let Some(ref insp) = kiss_info.inspection {
+                                                            ev = ev.with_kiss_inspection(insp.clone());
+                                                        } else {
+                                                            if let Some(port) = kiss_info.port {
+                                                                ev = ev.with_kiss_port(port);
+                                                            }
+                                                            if let Some(cmd) = kiss_info.command {
+                                                                ev = ev.with_kiss_command(cmd);
+                                                            }
+                                                            if let Some(ref ax25) = kiss_info.ax25_frame {
+                                                                ev = ev.with_ax25_frame(ax25);
+                                                            }
                                                         }
                                                         if let Some(ref h) = hex_prev {
                                                             ev = ev.with_hex_preview(h);
@@ -3511,6 +3900,8 @@ impl StreamRunner {
         let fwd_stream_mavlink_framing = stream.mavlink.as_ref().and_then(|m| m.framing);
         let fwd_stream_mqtt = stream.mqtt.clone();
         let fwd_stream_mqtt_framing = stream.mqtt.as_ref().and_then(|m| m.framing);
+        let fwd_stream_kiss = stream.kiss.clone();
+        let fwd_stream_kiss_framing = stream.kiss.as_ref().and_then(|k| k.framing);
 
         let fwd_handle = thread::spawn(move || {
             let ipv4_socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0))).ok();
@@ -3527,6 +3918,7 @@ impl StreamRunner {
                             .or(fwd_stream_ccsds_framing)
                             .or(fwd_stream_mavlink_framing)
                             .or(fwd_stream_mqtt_framing)
+                            .or(fwd_stream_kiss_framing)
                             .unwrap_or_default();
                         Some(TcpDestinationConnection::new(
                             d.address.clone(),
@@ -3654,6 +4046,9 @@ impl StreamRunner {
                                                         || fwd_stream_mqtt
                                                             .as_ref()
                                                             .is_some_and(|m| m.enabled)
+                                                        || fwd_stream_kiss
+                                                            .as_ref()
+                                                            .is_some_and(|k| k.enabled)
                                                     {
                                                         let mut ev = DiagnosticEvent::new(
                                                             fwd_event_buffer
@@ -3686,6 +4081,36 @@ impl StreamRunner {
                                                                 };
                                                                 if let Ok(hdr) = parse_res {
                                                                     ev = ev.with_mqtt_header(&hdr);
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if let Some(ref kiss_cfg) = fwd_stream_kiss
+                                                        {
+                                                            if kiss_cfg.enabled
+                                                                && !datagram.payload.is_empty()
+                                                            {
+                                                                let kiss_port =
+                                                                    (datagram.payload[0] >> 4)
+                                                                        & 0x0F;
+                                                                let kiss_cmd =
+                                                                    datagram.payload[0] & 0x0F;
+                                                                ev = ev
+                                                                    .with_kiss_port(kiss_port)
+                                                                    .with_kiss_command(kiss_cmd);
+                                                                if kiss_cfg.inspect_ax25
+                                                                    && kiss_cmd == 0
+                                                                    && datagram.payload.len() > 1
+                                                                {
+                                                                    if let Ok(frame) =
+                                                                        parse_ax25_frame(
+                                                                            &datagram.payload[1..],
+                                                                        )
+                                                                    {
+                                                                        ev = ev.with_ax25_frame(
+                                                                            &frame,
+                                                                        );
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -3771,6 +4196,7 @@ impl StreamRunner {
                                             );
                                         } else if fwd_event_buffer.should_emit_packet_events()
                                             || fwd_stream_mqtt.as_ref().is_some_and(|m| m.enabled)
+                                            || fwd_stream_kiss.as_ref().is_some_and(|k| k.enabled)
                                         {
                                             let mut ev = DiagnosticEvent::new(
                                                 fwd_event_buffer.clock().monotonic_nanos(),
@@ -3794,6 +4220,28 @@ impl StreamRunner {
                                                     };
                                                     if let Ok(hdr) = parse_res {
                                                         ev = ev.with_mqtt_header(&hdr);
+                                                    }
+                                                }
+                                            }
+
+                                            if let Some(ref kiss_cfg) = fwd_stream_kiss {
+                                                if kiss_cfg.enabled && !datagram.payload.is_empty()
+                                                {
+                                                    let kiss_port =
+                                                        (datagram.payload[0] >> 4) & 0x0F;
+                                                    let kiss_cmd = datagram.payload[0] & 0x0F;
+                                                    ev = ev
+                                                        .with_kiss_port(kiss_port)
+                                                        .with_kiss_command(kiss_cmd);
+                                                    if kiss_cfg.inspect_ax25
+                                                        && kiss_cmd == 0
+                                                        && datagram.payload.len() > 1
+                                                    {
+                                                        if let Ok(frame) =
+                                                            parse_ax25_frame(&datagram.payload[1..])
+                                                        {
+                                                            ev = ev.with_ax25_frame(&frame);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -5209,6 +5657,489 @@ instances:
             Some(crate::mqtt::MQTT_TYPE_PINGREQ)
         );
         assert_eq!(send_succeeded_ev.mqtt_type_name.as_deref(), Some("PINGREQ"));
+
+        relay.stop();
+    }
+
+    fn make_test_kiss_data_frame(port: u8, ax25_bytes: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(1 + ax25_bytes.len());
+        let cmd_byte = (port & 0x0F) << 4; // command 0 = DATA
+        v.push(cmd_byte);
+        v.extend_from_slice(ax25_bytes);
+        v
+    }
+
+    #[test]
+    fn test_kiss_forwarding_preserves_payload_and_records_ax25_metadata() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, forwarding a KISS data frame on a
+        // stream with KISS inspection enabled forwards the payload unmodified to destination
+        // endpoints while recording AX.25 metadata in diagnostic events.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-kiss-valid"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        kiss:
+          enabled: true
+          inspect_ax25: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+        let dest = crate::ax25::Ax25Address::new("CQ", 0);
+        let src = crate::ax25::Ax25Address::new("W1AW", 2);
+        let digi = crate::ax25::Ax25Address::new("RELAY", 0);
+        let ax25_bytes = crate::ax25::encode_ax25_frame(
+            &dest,
+            &src,
+            &[digi],
+            crate::ax25::AX25_CTRL_UI,
+            Some(crate::ax25::AX25_PID_NO_LAYER_3),
+            b"APRS telemetry message",
+        )
+        .expect("encode ax25 frame");
+        let kiss_frame = make_test_kiss_data_frame(0, &ax25_bytes);
+
+        sender
+            .send_to(&kiss_frame, format!("127.0.0.1:{listen_port}"))
+            .expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            kiss_frame.as_slice(),
+            "payload must be forwarded unmodified to destination"
+        );
+
+        let stats = relay.stream_stats("s-kiss-valid").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        let insp_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::KissInspection);
+        assert!(
+            insp_ev.is_some(),
+            "must emit diagnostic event for KISS inspection"
+        );
+        let ev = insp_ev.unwrap();
+        assert_eq!(ev.kiss_port, Some(0));
+        assert_eq!(ev.kiss_command, Some(0));
+        assert_eq!(ev.ax25_source_callsign.as_deref(), Some("W1AW"));
+        assert_eq!(ev.ax25_destination_callsign.as_deref(), Some("CQ"));
+        assert_eq!(ev.source_callsign.as_deref(), Some("W1AW"));
+        assert_eq!(ev.destination_callsign.as_deref(), Some("CQ"));
+        assert_eq!(ev.ax25_source_ssid, Some(2));
+        assert_eq!(ev.ax25_destination_ssid, Some(0));
+        assert_eq!(ev.ax25_pid, Some(crate::ax25::AX25_PID_NO_LAYER_3));
+        assert!(ev.kiss_metadata.is_some());
+        assert!(ev.ax25_metadata.is_some());
+
+        let ax25_meta = ev.ax25_metadata.as_ref().unwrap();
+        assert_eq!(ax25_meta.source_callsign, "W1AW");
+        assert_eq!(ax25_meta.destination_callsign, "CQ");
+        assert_eq!(
+            ax25_meta.digipeaters.as_deref(),
+            Some(&["RELAY".to_string()][..])
+        );
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_kiss_port_filter_mismatch_drops_packet() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, receiving a KISS frame with a
+        // port mismatch against the configured port filter drops the packet and increments
+        // dropped packet counters.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-kiss-port-filter"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        kiss:
+          enabled: true
+          port_filter: 3
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        let dest = crate::ax25::Ax25Address::new("CQ", 0);
+        let src = crate::ax25::Ax25Address::new("N0CALL", 0);
+        let ax25_bytes = crate::ax25::encode_ax25_frame(
+            &dest,
+            &src,
+            &[],
+            crate::ax25::AX25_CTRL_UI,
+            Some(crate::ax25::AX25_PID_NO_LAYER_3),
+            b"test payload",
+        )
+        .expect("encode ax25 frame");
+
+        // Send with port 0 (does not match filter port 3)
+        let mismatch_frame = make_test_kiss_data_frame(0, &ax25_bytes);
+        sender.send_to(&mismatch_frame, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let res = dest_sock.recv_from(&mut buf);
+        assert!(res.is_err(), "port mismatch packet must be dropped");
+
+        let stats = relay.stream_stats("s-kiss-port-filter").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 0);
+        assert_eq!(stats.dropped_packets, 1);
+
+        let snap = relay.event_buffer().snapshot();
+        let drops: Vec<&DiagnosticEvent> = snap
+            .events
+            .iter()
+            .filter(|e| e.stage == DiagnosticStage::Dropped)
+            .collect();
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("port mismatch"));
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_kiss_malformed_ax25_dropped_by_default() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, receiving a malformed AX.25 packet
+        // on an inspected stream drops the packet by default and increments dropped packet counters.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-kiss-malformed-drop"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        kiss:
+          enabled: true
+          passthrough_on_error: false
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        // 1. Truncated AX.25 packet in KISS data frame
+        let truncated_pkt = make_test_kiss_data_frame(0, &[1, 2, 3]);
+        sender.send_to(&truncated_pkt, &target).expect("send");
+
+        // 2. Corrupted packet not adhering to AX.25 address structure
+        let corrupted_pkt = b"not-an-ax25-packet".to_vec();
+        sender.send_to(&corrupted_pkt, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let res = dest_sock.recv_from(&mut buf);
+        assert!(res.is_err(), "malformed packets must be dropped by default");
+
+        let stats = relay.stream_stats("s-kiss-malformed-drop").expect("stats");
+        assert_eq!(stats.received_packets, 2);
+        assert_eq!(stats.forwarded_packets, 0);
+        assert_eq!(stats.dropped_packets, 2);
+
+        let snap = relay.event_buffer().snapshot();
+        let drops: Vec<&DiagnosticEvent> = snap
+            .events
+            .iter()
+            .filter(|e| e.stage == DiagnosticStage::Dropped)
+            .collect();
+        assert_eq!(drops.len(), 2);
+        assert!(drops[0].reason.is_some());
+        assert!(drops[1].reason.is_some());
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_kiss_malformed_ax25_passthrough_on_error() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, receiving a malformed AX.25 packet
+        // on an inspected stream configured with option passthrough_on_error forwards the payload
+        // unmodified to destination endpoints while recording a validation failure event.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-kiss-passthrough"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+        kiss:
+          enabled: true
+          passthrough_on_error: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let target = format!("127.0.0.1:{listen_port}");
+
+        let malformed_pkt = make_test_kiss_data_frame(0, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        sender.send_to(&malformed_pkt, &target).expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            malformed_pkt.as_slice(),
+            "malformed packet must be forwarded unmodified under passthrough_on_error"
+        );
+
+        let stats = relay.stream_stats("s-kiss-passthrough").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+        assert_eq!(stats.validation_errors, 1);
+
+        let snap = relay.event_buffer().snapshot();
+        let fails: Vec<&DiagnosticEvent> = snap
+            .events
+            .iter()
+            .filter(|e| e.stage == DiagnosticStage::Failure)
+            .collect();
+        assert_eq!(fails.len(), 1);
+        assert!(fails[0]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("validation failed"));
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_kiss_unconfigured_stream_byte_identical_delivery_no_overhead() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, forwarding traffic on a stream without
+        // KISS inspection configured delivers datagrams byte-identically without invoking KISS parsing overhead.
+        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
+        dest_sock
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set timeout");
+        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-unconfigured-kiss"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{listen_port}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{dest_port}"
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+        let raw_payload = b"non-kiss-raw-telemetry-\x00\xFF\x80\x7F".to_vec();
+        sender
+            .send_to(&raw_payload, format!("127.0.0.1:{listen_port}"))
+            .expect("send");
+
+        let mut buf = vec![0u8; 1024];
+        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        assert_eq!(
+            &buf[..n],
+            raw_payload.as_slice(),
+            "unconfigured stream delivers datagrams byte-identically"
+        );
+
+        let stats = relay.stream_stats("s-unconfigured-kiss").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+        assert_eq!(stats.validation_errors, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        assert!(
+            !snap
+                .events
+                .iter()
+                .any(|e| e.stage == DiagnosticStage::KissInspection),
+            "unconfigured stream must not emit KissInspection events"
+        );
+        assert!(
+            !snap.events.iter().any(|e| e.kiss_port.is_some()),
+            "unconfigured stream must not populate KISS port diagnostic field"
+        );
+        assert!(
+            !snap.events.iter().any(|e| e.ax25_source_callsign.is_some()),
+            "unconfigured stream must not populate AX.25 diagnostic fields"
+        );
+
+        relay.stop();
+    }
+
+    #[test]
+    fn test_kiss_tcp_stream_forwarding_with_kiss_framing() {
+        // Acceptance criterion / Requirement 1: KISS-over-TCP streams with FramingMode::Kiss,
+        // handling FEND delimiters and escape sequences, with AX.25 inspection.
+        let dest_listener = TcpListener::bind("127.0.0.1:0").expect("bind dest listener");
+        let dest_port = dest_listener.local_addr().expect("dest addr").port();
+        let listen_port = pick_test_port();
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-kiss-tcp"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:{listen_port}"
+          framing: "kiss"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:{dest_port}"
+          framing: "kiss"
+        kiss:
+          enabled: true
+          inspect_ax25: true
+"#
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("parse config");
+        let relay = Relay::start(&config).expect("start relay");
+
+        // Connect source client to relay
+        let mut client =
+            TcpStream::connect(format!("127.0.0.1:{listen_port}")).expect("connect to relay");
+
+        // Accept connection at destination
+        let (mut dest_conn, _) = dest_listener.accept().expect("accept at dest");
+        dest_conn
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set timeout");
+
+        let dest = crate::ax25::Ax25Address::new("CQ", 0);
+        let src = crate::ax25::Ax25Address::new("K1ABC", 1);
+        let ax25_bytes = crate::ax25::encode_ax25_frame(
+            &dest,
+            &src,
+            &[],
+            crate::ax25::AX25_CTRL_UI,
+            Some(crate::ax25::AX25_PID_NO_LAYER_3),
+            b"APRS over TCP with KISS framing",
+        )
+        .expect("encode ax25 frame");
+
+        // Packet with embedded FEND (0xC0) and FESC (0xDB) bytes to test escaping
+        let mut ax25_with_escapes = ax25_bytes.clone();
+        ax25_with_escapes.extend_from_slice(&[0xC0, 0xDB, 0x11]);
+        let kiss_payload = make_test_kiss_data_frame(0, &ax25_with_escapes);
+
+        // Encode using KISS framing (FEND ... FEND with escapes)
+        let wire_frame = crate::framing::encode_kiss_frame(&kiss_payload);
+        client
+            .write_all(&wire_frame)
+            .expect("send kiss frame over TCP");
+        client.flush().expect("flush client");
+
+        // Read single KISS frame at destination using read_kiss_frame
+        let shutdown = std::sync::atomic::AtomicBool::new(false);
+        let received = crate::framing::read_kiss_frame(&mut dest_conn, 1024, &shutdown)
+            .expect("read kiss frame at dest")
+            .expect("expected frame");
+
+        assert_eq!(
+            received, kiss_payload,
+            "TCP forwarding must deliver the un-escaped KISS frame identically"
+        );
+
+        let stats = relay.stream_stats("s-kiss-tcp").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        let insp_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::KissInspection);
+        assert!(insp_ev.is_some(), "must record KissInspection event");
+        let ev = insp_ev.unwrap();
+        assert_eq!(ev.ax25_source_callsign.as_deref(), Some("K1ABC"));
+        assert_eq!(ev.ax25_destination_callsign.as_deref(), Some("CQ"));
 
         relay.stop();
     }
