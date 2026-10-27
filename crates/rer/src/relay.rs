@@ -3650,6 +3650,14 @@ impl StreamRunner {
 
                                             match socket_res {
                                                 Ok(sent) => {
+                                                    // Update forwarded metrics immediately upon transmission so stats
+                                                    // accurately reflect forwarded traffic before event generation.
+                                                    fwd_stats
+                                                        .forwarded_packets
+                                                        .fetch_add(1, Ordering::SeqCst);
+                                                    fwd_stats
+                                                        .forwarded_bytes
+                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                     if fwd_event_buffer.should_emit_packet_events()
                                                         || fwd_stream_mqtt
                                                             .as_ref()
@@ -3692,12 +3700,6 @@ impl StreamRunner {
 
                                                         fwd_event_buffer.emit(ev);
                                                     }
-                                                    fwd_stats
-                                                        .forwarded_packets
-                                                        .fetch_add(1, Ordering::SeqCst);
-                                                    fwd_stats
-                                                        .forwarded_bytes
-                                                        .fetch_add(sent as u64, Ordering::SeqCst);
                                                 }
                                                 Err(err) => {
                                                     fwd_stats
@@ -5134,6 +5136,14 @@ instances:
     fn test_mqtt_local_transmission_records_send_succeeded_not_downstream_broker_receipt() {
         // Acceptance criterion: In crates/rer/src/relay.rs, forwarding an inspected MQTT packet
         // records successful local transmission with DiagnosticStage::SendSucceeded without claiming downstream broker receipt.
+        //
+        // Root cause of intermittent failure (RER-I-188): UDP forwarding occurs asynchronously in the
+        // StreamRunner worker thread. When dest_sock receives the forwarded datagram, the OS network stack
+        // has delivered the packet, but thread scheduling delays can cause the worker thread not to have finished
+        // updating stream_stats or emitting diagnostic events before the test thread inspects them. Without
+        // deadline-bounded polling, immediately reading stream_stats caused intermittent test failures with
+        // forwarded_packets == 0. Incrementing metrics immediately upon socket send completion and synchronizing
+        // via deadline-bounded polling eliminates this race condition without arbitrary fixed sleeps.
         let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
         dest_sock
             .set_read_timeout(Some(Duration::from_secs(2)))
