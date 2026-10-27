@@ -309,7 +309,7 @@ pub struct StreamConfig {
     )]
     pub mqtt: Option<MqttConfig>,
 
-    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", or "mqtt"). Defaults to length_prefix.
+    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 }
@@ -812,7 +812,7 @@ pub struct EndpointConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ConnectionMode>,
 
-    /// Optional framing mode for TCP endpoints ("length_prefix", "ccsds", "mavlink", or "mqtt"). Defaults to length_prefix.
+    /// Optional framing mode for TCP endpoints ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 }
@@ -839,6 +839,9 @@ pub enum FramingMode {
     /// MQTT packet framing (OASIS MQTT 3.1.1 and MQTT 5.0).
     #[serde(alias = "MQTT", alias = "mqtt")]
     Mqtt,
+    /// KISS framing (FEND-delimited with byte escaping).
+    #[serde(alias = "KISS", alias = "kiss")]
+    Kiss,
 }
 
 impl fmt::Display for FramingMode {
@@ -848,6 +851,7 @@ impl fmt::Display for FramingMode {
             Self::Ccsds => write!(f, "ccsds"),
             Self::Mavlink => write!(f, "mavlink"),
             Self::Mqtt => write!(f, "mqtt"),
+            Self::Kiss => write!(f, "kiss"),
         }
     }
 }
@@ -2161,5 +2165,72 @@ instances:
         let dest = stream.destination.as_ref().unwrap();
         assert_eq!(dest.address, "127.0.0.1:5001");
         assert_eq!(stream.destination_framing(dest), FramingMode::LengthPrefix);
+    }
+
+    #[test]
+    fn test_framing_mode_kiss_deserialization() {
+        // Acceptance criterion: In crates/rer/src/config.rs, configuring option framing
+        // with value kiss deserializes into FramingMode::Kiss.
+        let yaml_stream = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        framing: kiss
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_stream).expect("valid config with framing kiss");
+        assert_eq!(
+            config.instances[0].streams[0].framing,
+            Some(FramingMode::Kiss)
+        );
+        assert_eq!(
+            config.instances[0].streams[0].source_framing(),
+            FramingMode::Kiss
+        );
+
+        let yaml_endpoint = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+          framing: kiss
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+          framing: kiss
+"#;
+        let config_ep =
+            Config::from_yaml_str(yaml_endpoint).expect("valid config with endpoint framing kiss");
+        assert_eq!(
+            config_ep.instances[0].streams[0].source.framing,
+            Some(FramingMode::Kiss)
+        );
+        let dest = config_ep.instances[0].streams[0]
+            .destination
+            .as_ref()
+            .unwrap();
+        assert_eq!(dest.framing, Some(FramingMode::Kiss));
+        assert_eq!(
+            config_ep.instances[0].streams[0].destination_framing(dest),
+            FramingMode::Kiss
+        );
+
+        // Direct deserialization
+        let mode: FramingMode = serde_json::from_str("\"kiss\"").unwrap();
+        assert_eq!(mode, FramingMode::Kiss);
+        let mode_upper: FramingMode = serde_json::from_str("\"KISS\"").unwrap();
+        assert_eq!(mode_upper, FramingMode::Kiss);
+        assert_eq!(mode.to_string(), "kiss");
     }
 }

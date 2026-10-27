@@ -190,7 +190,7 @@
           "type": "string"
         },
         "framing": {
-          "description": "Optional framing mode for TCP endpoints (\"length_prefix\", \"ccsds\", \"mavlink\", or \"mqtt\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP endpoints (\"length_prefix\", \"ccsds\", \"mavlink\", \"mqtt\", or \"kiss\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"
@@ -251,6 +251,13 @@
           "type": "string",
           "enum": [
             "mqtt"
+          ]
+        },
+        {
+          "description": "KISS framing (FEND-delimited with byte escaping).",
+          "type": "string",
+          "enum": [
+            "kiss"
           ]
         }
       ]
@@ -819,7 +826,7 @@
           }
         },
         "framing": {
-          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", \"mavlink\", or \"mqtt\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", \"mavlink\", \"mqtt\", or \"kiss\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"
