@@ -309,6 +309,14 @@ pub struct StreamConfig {
     )]
     pub mqtt: Option<MqttConfig>,
 
+    /// Optional KISS framing and AX.25 inspection configuration (SPEC §5, §8, §14). Off by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_kiss_config"
+    )]
+    pub kiss: Option<KissConfig>,
+
     /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
@@ -419,6 +427,103 @@ where
     }
 
     deserializer.deserialize_any(MqttConfigVisitor)
+}
+
+/// Configuration for KISS framing and AX.25 packet inspection (SPEC §5, §8, §14, Task RER-F-062).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KissConfig {
+    /// Enable KISS framing and processing. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Enable passive AX.25 packet inspection for amateur radio, APRS, etc. Defaults to true.
+    #[serde(
+        default = "default_true",
+        alias = "ax25",
+        alias = "inspect",
+        alias = "inspect_ax25"
+    )]
+    pub inspect_ax25: bool,
+
+    /// Optional KISS TNC port filter (0–15). If set, only frames matching this port are forwarded.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "port",
+        alias = "filter_port"
+    )]
+    pub port_filter: Option<u32>,
+
+    /// When true, packets failing AX.25 validation are forwarded unchanged to destinations. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+impl Default for KissConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            inspect_ax25: true,
+            port_filter: None,
+            passthrough_on_error: false,
+            framing: None,
+        }
+    }
+}
+
+fn deserialize_optional_kiss_config<'de, D>(deserializer: D) -> Result<Option<KissConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct KissConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for KissConfigVisitor {
+        type Value = Option<KissConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean, null, or a KISS configuration mapping")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(KissConfig::default()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(KissConfig::default()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(KissConfig {
+                enabled: v,
+                ..KissConfig::default()
+            }))
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let config =
+                KissConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(config))
+        }
+    }
+
+    deserializer.deserialize_any(KissConfigVisitor)
 }
 
 /// Configuration for MAVLink packet inspection, validation, and sequence tracking (SPEC §14, §8).
@@ -561,6 +666,7 @@ impl StreamConfig {
             .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
             .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
             .or_else(|| self.mqtt.as_ref().and_then(|m| m.framing))
+            .or_else(|| self.kiss.as_ref().and_then(|k| k.framing))
             .unwrap_or_default()
     }
 
@@ -572,6 +678,7 @@ impl StreamConfig {
             .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
             .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
             .or_else(|| self.mqtt.as_ref().and_then(|m| m.framing))
+            .or_else(|| self.kiss.as_ref().and_then(|k| k.framing))
             .unwrap_or_default()
     }
 }
@@ -1389,6 +1496,20 @@ impl Config {
                                 crate::mqtt::MQTT_MAX_PACKET_SIZE
                             ),
                         });
+                    }
+                }
+
+                // Validate KISS configuration
+                if let Some(ref kiss) = stream.kiss {
+                    if let Some(port) = kiss.port_filter {
+                        if port > 15 {
+                            errors.push(ValidationError {
+                                path: format!("{}.kiss.port_filter", stream_prefix),
+                                reason: format!(
+                                    "invalid port number {port}: KISS port number must be between 0 and 15"
+                                ),
+                            });
+                        }
                     }
                 }
             }
@@ -2232,5 +2353,164 @@ instances:
         let mode_upper: FramingMode = serde_json::from_str("\"KISS\"").unwrap();
         assert_eq!(mode_upper, FramingMode::Kiss);
         assert_eq!(mode.to_string(), "kiss");
+    }
+
+    #[test]
+    fn test_criterion1_kiss_config_deserialization_defaults() {
+        // Acceptance criterion: Deserializing a configuration YAML containing stream option kiss
+        // defaults field enabled to true and field inspect_ax25 to true.
+        let yaml_empty = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        kiss: {}
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_empty).expect("valid config with kiss: {}");
+        let kiss = config.instances[0].streams[0]
+            .kiss
+            .as_ref()
+            .expect("kiss should be Some(KissConfig)");
+        assert!(kiss.enabled, "field enabled must default to true");
+        assert!(kiss.inspect_ax25, "field inspect_ax25 must default to true");
+        assert_eq!(kiss.port_filter, None);
+        assert!(!kiss.passthrough_on_error);
+        assert_eq!(kiss.framing, None);
+
+        // Also test with empty scalar (kiss:)
+        let yaml_scalar = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        kiss:
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config_scalar =
+            Config::from_yaml_str(yaml_scalar).expect("valid config with kiss: scalar");
+        let kiss_scalar = config_scalar.instances[0].streams[0]
+            .kiss
+            .as_ref()
+            .expect("kiss should be Some(KissConfig)");
+        assert!(kiss_scalar.enabled);
+        assert!(kiss_scalar.inspect_ax25);
+
+        // Also test with boolean true (kiss: true)
+        let yaml_bool = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        kiss: true
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config_bool = Config::from_yaml_str(yaml_bool).expect("valid config with kiss: true");
+        let kiss_bool = config_bool.instances[0].streams[0]
+            .kiss
+            .as_ref()
+            .expect("kiss should be Some(KissConfig)");
+        assert!(kiss_bool.enabled);
+        assert!(kiss_bool.inspect_ax25);
+    }
+
+    #[test]
+    fn test_criterion2_kiss_port_filter_greater_than_15_returns_validation_error() {
+        // Acceptance criterion: Running rer validate on a configuration with option kiss containing
+        // a port filter value greater than 15 returns a validation error reporting an invalid port number.
+        let yaml_invalid_port = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        kiss:
+          port_filter: 16
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_invalid_port).expect("parse yaml");
+        let errors = config.validate();
+        assert!(
+            !errors.is_empty(),
+            "port filter > 15 must produce validation error"
+        );
+        let port_err = errors
+            .iter()
+            .find(|e| e.reason.contains("invalid port number"));
+        assert!(
+            port_err.is_some(),
+            "expected error reporting an invalid port number, got: {:?}",
+            errors
+        );
+
+        // Valid port 15 should pass
+        let yaml_valid_port = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        kiss:
+          port_filter: 15
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config_valid = Config::from_yaml_str(yaml_valid_port).expect("parse yaml");
+        assert!(config_valid.validate().is_empty());
+    }
+
+    #[test]
+    fn test_criterion5_omitting_kiss_defaults_to_none_and_preserves_behavior() {
+        // Acceptance criterion: Deserializing a configuration YAML containing a stream without
+        // option kiss defaults to None and preserves existing configuration behavior.
+        let yaml_omitted = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config =
+            Config::from_yaml_str(yaml_omitted).expect("valid config omitting option kiss");
+        let stream = &config.instances[0].streams[0];
+        assert_eq!(stream.kiss, None);
+        assert_eq!(stream.id, "s1");
+        assert_eq!(stream.source.transport, TransportType::Tcp);
+        assert_eq!(stream.source.address, "127.0.0.1:5000");
+        assert_eq!(stream.source_framing(), FramingMode::LengthPrefix);
+        assert!(config.validate().is_empty());
     }
 }

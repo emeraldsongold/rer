@@ -52,14 +52,15 @@ pub use ccsds::{
 };
 pub use config::{
     Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
-    InspectionConfig, InstanceConfig, LogicalInterfaceConfig, LtpInspectionConfig, MavlinkConfig,
-    MetricsConfig, MqttConfig, OperationalMode, SequenceConfig, SrtInspectionConfig, StreamConfig,
-    TestModeConfig, ValidationError, ValidationReport,
+    InspectionConfig, InstanceConfig, KissConfig, LogicalInterfaceConfig, LtpInspectionConfig,
+    MavlinkConfig, MetricsConfig, MqttConfig, OperationalMode, SequenceConfig, SrtInspectionConfig,
+    StreamConfig, TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
-    format_ascii_preview, format_hex_preview, record_mqtt_local_transmission, BundleInspection,
-    BundleInspectionEvent, BundleMetadata, Clock, DiagnosticBuffer, DiagnosticBufferBuilder,
-    DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage, DiagnosticTestState, IntoDtnTimestamp,
+    format_ascii_preview, format_hex_preview, record_mqtt_local_transmission, Ax25Metadata,
+    BundleInspection, BundleInspectionEvent, BundleMetadata, Clock, DiagnosticBuffer,
+    DiagnosticBufferBuilder, DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage,
+    DiagnosticTestState, IntoDtnTimestamp, KissInspection, KissInspectionEvent, KissMetadata,
     LtpInspection, LtpInspectionEvent, LtpMetadata, ManualClock, MavlinkInspection,
     MavlinkInspectionEvent, MavlinkMetadata, MqttInspection, MqttInspectionEvent, MqttMetadata,
     RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent, SrtInspection,
