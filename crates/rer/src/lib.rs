@@ -3,6 +3,7 @@
 //! An open-source network relay, telemetry/command routing, and distributed
 //! network diagnostics tool.
 
+pub mod ax25;
 pub mod bpv7;
 pub mod capture;
 pub mod ccsds;
@@ -21,6 +22,15 @@ pub mod secret;
 pub mod signals;
 pub mod sim;
 pub mod srt;
+
+pub use ax25::{
+    encode_address, encode_ax25_frame, parse_address, parse_address_field, parse_ax25_address,
+    parse_ax25_frame, parse_ax25_header, parse_ax25_packet, Ax25Address, Ax25AddressField,
+    Ax25Frame, Ax25FrameType, Ax25Header, Ax25Packet, Ax25ParseError, FrameType,
+    AX25_ADDR_SUBFIELD_LEN, AX25_CTRL_UI, AX25_CTRL_UI_PF, AX25_MAX_DIGIPEATERS,
+    AX25_MIN_FRAME_LEN, AX25_PID_ARP, AX25_PID_ESCAPE, AX25_PID_FLEXNET, AX25_PID_ISO_8473,
+    AX25_PID_NETROM, AX25_PID_NO_LAYER_3, AX25_PID_TCP_IP, AX25_PID_TEXNET, AX25_STANDARD_ADDR_LEN,
+};
 
 pub use bpv7::{
     compute_crc16_x25, compute_crc32c, evaluate_bpv7_payload, evaluate_bundle_header,
