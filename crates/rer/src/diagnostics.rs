@@ -64,6 +64,9 @@ pub enum DiagnosticStage {
     /// MQTT passive inspection event (SPEC §5, §8, §14).
     #[serde(rename = "mqtt_inspection")]
     MqttInspection,
+    /// KISS framing / AX.25 passive inspection event (SPEC §5, §8, §14).
+    #[serde(rename = "kiss_inspection")]
+    KissInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -84,6 +87,7 @@ impl fmt::Display for DiagnosticStage {
             Self::SrtInspection => write!(f, "srt_inspection"),
             Self::MavlinkInspection => write!(f, "mavlink_inspection"),
             Self::MqttInspection => write!(f, "mqtt_inspection"),
+            Self::KissInspection => write!(f, "kiss_inspection"),
         }
     }
 }
@@ -106,6 +110,7 @@ impl FromStr for DiagnosticStage {
             "srt_inspection" => Ok(Self::SrtInspection),
             "mavlink_inspection" | "mavlink" => Ok(Self::MavlinkInspection),
             "mqtt_inspection" | "mqtt" => Ok(Self::MqttInspection),
+            "kiss_inspection" | "kiss" | "ax25_inspection" | "ax25" => Ok(Self::KissInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -1621,6 +1626,342 @@ impl From<MqttInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_kiss_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::KissInspection
+}
+
+/// Canonical uppercase name for a KISS command type code (low 4 bits of KISS command byte).
+#[must_use]
+pub fn kiss_command_name(command: u8) -> &'static str {
+    match command & 0x0F {
+        0x00 => "DATA",
+        0x01 => "TX_DELAY",
+        0x02 => "P_PERSISTENCE",
+        0x03 => "SLOT_TIME",
+        0x04 => "TX_TAIL",
+        0x05 => "FULL_DUPLEX",
+        0x06 => "SET_HARDWARE",
+        0x0F => "RETURN",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Structured KISS packet metadata extracted during passive packet inspection (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KissMetadata {
+    /// KISS TNC port index (0–15).
+    pub port: u8,
+
+    /// Alias for port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiss_port: Option<u8>,
+
+    /// KISS command type code (0x00 = Data frame, 0x01 = TX Delay, etc.).
+    pub command: u8,
+
+    /// Alias for command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiss_command: Option<u8>,
+
+    /// Canonical uppercase name of the KISS command (e.g. "DATA", "TX_DELAY").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_name: Option<String>,
+
+    /// Source callsign from AX.25 header if inspected.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ax25_source"
+    )]
+    pub source_callsign: Option<String>,
+
+    /// Destination callsign from AX.25 header if inspected.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ax25_destination"
+    )]
+    pub destination_callsign: Option<String>,
+
+    /// Alias for source callsign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_source_callsign: Option<String>,
+
+    /// Alias for destination callsign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_destination_callsign: Option<String>,
+
+    /// Source Secondary Station Identifier (SSID, 0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ssid: Option<u8>,
+
+    /// Destination Secondary Station Identifier (SSID, 0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_ssid: Option<u8>,
+
+    /// AX.25 classified frame type (e.g., "UnnumberedInformation", "UI", "Information").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_type: Option<String>,
+
+    /// Protocol Identifier (PID) byte if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u8>,
+
+    /// Digipeater relay callsigns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digipeaters: Option<Vec<String>>,
+}
+
+/// Structured AX.25 packet header metadata extracted during passive packet inspection (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ax25Metadata {
+    /// Station source callsign.
+    pub source_callsign: String,
+
+    /// Station destination callsign.
+    pub destination_callsign: String,
+
+    /// Alias for source callsign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_source_callsign: Option<String>,
+
+    /// Alias for destination callsign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_destination_callsign: Option<String>,
+
+    /// Source SSID (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ssid: Option<u8>,
+
+    /// Destination SSID (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_ssid: Option<u8>,
+
+    /// AX.25 classified frame type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_type: Option<String>,
+
+    /// Protocol Identifier (PID) byte if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u8>,
+
+    /// Digipeater relay callsigns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digipeaters: Option<Vec<String>>,
+}
+
+/// Diagnostic event representing a KISS / AX.25 passive inspection event (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KissInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `kiss_inspection`).
+    #[serde(default = "default_kiss_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// KISS TNC port index (0–15).
+    pub port: u8,
+
+    /// KISS command type code.
+    pub command: u8,
+
+    /// Canonical uppercase name of the KISS command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_name: Option<String>,
+
+    /// Extracted AX.25 source callsign.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ax25_source"
+    )]
+    pub source_callsign: Option<String>,
+
+    /// Extracted AX.25 destination callsign.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ax25_destination"
+    )]
+    pub destination_callsign: Option<String>,
+
+    /// Extracted AX.25 source SSID (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ssid: Option<u8>,
+
+    /// Extracted AX.25 destination SSID (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_ssid: Option<u8>,
+
+    /// Classified frame type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_type: Option<String>,
+
+    /// Protocol Identifier (PID) byte if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u8>,
+
+    /// Parse outcome status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<String>,
+
+    /// Structured KISS metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "kiss"
+    )]
+    pub kiss_metadata: Option<KissMetadata>,
+
+    /// Structured AX.25 metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "ax25")]
+    pub ax25_metadata: Option<Ax25Metadata>,
+}
+
+pub type KissInspectionEvent = KissInspection;
+
+impl KissInspection {
+    /// Creates a new `KissInspection` event.
+    #[must_use]
+    pub fn new(port: u8, command: u8) -> Self {
+        let cmd_name = kiss_command_name(command).to_string();
+        let metadata = KissMetadata {
+            port,
+            kiss_port: Some(port),
+            command,
+            kiss_command: Some(command),
+            command_name: Some(cmd_name.clone()),
+            source_callsign: None,
+            destination_callsign: None,
+            ax25_source_callsign: None,
+            ax25_destination_callsign: None,
+            source_ssid: None,
+            destination_ssid: None,
+            frame_type: None,
+            pid: None,
+            digipeaters: None,
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::KissInspection,
+            port,
+            command,
+            command_name: Some(cmd_name),
+            source_callsign: None,
+            destination_callsign: None,
+            source_ssid: None,
+            destination_ssid: None,
+            frame_type: None,
+            pid: None,
+            parse_status: None,
+            kiss_metadata: Some(metadata),
+            ax25_metadata: None,
+        }
+    }
+
+    /// Sets source callsign.
+    #[must_use]
+    pub fn with_source_callsign(mut self, callsign: impl Into<String>) -> Self {
+        let cs = callsign.into();
+        self.source_callsign = Some(cs.clone());
+        if let Some(ref mut m) = self.kiss_metadata {
+            m.source_callsign = Some(cs.clone());
+            m.ax25_source_callsign = Some(cs.clone());
+        }
+        let dst = self.destination_callsign.clone().unwrap_or_default();
+        let mut ax = self.ax25_metadata.unwrap_or(Ax25Metadata {
+            source_callsign: cs.clone(),
+            destination_callsign: dst.clone(),
+            ax25_source_callsign: Some(cs.clone()),
+            ax25_destination_callsign: Some(dst),
+            source_ssid: self.source_ssid,
+            destination_ssid: self.destination_ssid,
+            frame_type: self.frame_type.clone(),
+            pid: self.pid,
+            digipeaters: None,
+        });
+        ax.source_callsign = cs.clone();
+        ax.ax25_source_callsign = Some(cs);
+        self.ax25_metadata = Some(ax);
+        self
+    }
+
+    /// Sets destination callsign.
+    #[must_use]
+    pub fn with_destination_callsign(mut self, callsign: impl Into<String>) -> Self {
+        let cs = callsign.into();
+        self.destination_callsign = Some(cs.clone());
+        if let Some(ref mut m) = self.kiss_metadata {
+            m.destination_callsign = Some(cs.clone());
+            m.ax25_destination_callsign = Some(cs.clone());
+        }
+        let src = self.source_callsign.clone().unwrap_or_default();
+        let mut ax = self.ax25_metadata.unwrap_or(Ax25Metadata {
+            source_callsign: src.clone(),
+            destination_callsign: cs.clone(),
+            ax25_source_callsign: Some(src),
+            ax25_destination_callsign: Some(cs.clone()),
+            source_ssid: self.source_ssid,
+            destination_ssid: self.destination_ssid,
+            frame_type: self.frame_type.clone(),
+            pid: self.pid,
+            digipeaters: None,
+        });
+        ax.destination_callsign = cs.clone();
+        ax.ax25_destination_callsign = Some(cs);
+        self.ax25_metadata = Some(ax);
+        self
+    }
+
+    /// Alias for [`with_source_callsign`].
+    #[must_use]
+    pub fn with_ax25_source_callsign(self, callsign: impl Into<String>) -> Self {
+        self.with_source_callsign(callsign)
+    }
+
+    /// Alias for [`with_destination_callsign`].
+    #[must_use]
+    pub fn with_ax25_destination_callsign(self, callsign: impl Into<String>) -> Self {
+        self.with_destination_callsign(callsign)
+    }
+}
+
+impl From<KissInspection> for DiagnosticEvent {
+    fn from(insp: KissInspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp.stream_id.clone().unwrap_or_else(|| "kiss".to_string());
+        let mut event = DiagnosticEvent::new(mono, wall, stream, insp.stage, TransportType::Tcp, 0);
+        event.kiss_port = Some(insp.port);
+        event.kiss_command = Some(insp.command);
+        event.source_callsign = insp.source_callsign.clone();
+        event.destination_callsign = insp.destination_callsign.clone();
+        event.ax25_source_callsign = insp.source_callsign.clone();
+        event.ax25_destination_callsign = insp.destination_callsign.clone();
+        event.ax25_source_ssid = insp.source_ssid;
+        event.ax25_destination_ssid = insp.destination_ssid;
+        event.ax25_frame_type = insp.frame_type.clone();
+        event.ax25_pid = insp.pid;
+        event.kiss_metadata = insp.kiss_metadata.clone();
+        event.ax25_metadata = insp.ax25_metadata.clone();
+        event.kiss_inspection = Some(insp);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -1881,6 +2222,71 @@ pub struct DiagnosticEvent {
     /// Structured MQTT metadata (SPEC §14, §8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt_metadata: Option<MqttMetadata>,
+
+    /// KISS TNC port index (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "port")]
+    pub kiss_port: Option<u8>,
+
+    /// KISS command type code.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "command",
+        alias = "cmd"
+    )]
+    pub kiss_command: Option<u8>,
+
+    /// AX.25 source station callsign.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ax25_source"
+    )]
+    pub ax25_source_callsign: Option<String>,
+
+    /// AX.25 destination station callsign.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ax25_destination"
+    )]
+    pub ax25_destination_callsign: Option<String>,
+
+    /// Source callsign convenience field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_callsign: Option<String>,
+
+    /// Destination callsign convenience field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_callsign: Option<String>,
+
+    /// AX.25 source SSID (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_source_ssid: Option<u8>,
+
+    /// AX.25 destination SSID (0–15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_destination_ssid: Option<u8>,
+
+    /// AX.25 classified frame type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_frame_type: Option<String>,
+
+    /// AX.25 Protocol Identifier (PID) byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_pid: Option<u8>,
+
+    /// KISS inspection event.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "kiss")]
+    pub kiss_inspection: Option<KissInspection>,
+
+    /// Structured KISS metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiss_metadata: Option<KissMetadata>,
+
+    /// Structured AX.25 metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax25_metadata: Option<Ax25Metadata>,
 }
 
 impl DiagnosticEvent {
@@ -1949,6 +2355,19 @@ impl DiagnosticEvent {
             mqtt_parse_status: None,
             mqtt_inspection: None,
             mqtt_metadata: None,
+            kiss_port: None,
+            kiss_command: None,
+            ax25_source_callsign: None,
+            ax25_destination_callsign: None,
+            source_callsign: None,
+            destination_callsign: None,
+            ax25_source_ssid: None,
+            ax25_destination_ssid: None,
+            ax25_frame_type: None,
+            ax25_pid: None,
+            kiss_inspection: None,
+            kiss_metadata: None,
+            ax25_metadata: None,
         }
     }
 
@@ -2514,6 +2933,266 @@ impl DiagnosticEvent {
     #[must_use]
     pub fn mqtt_inspection(packet_type: u8, packet_type_name: impl Into<String>) -> Self {
         MqttInspection::new(packet_type, packet_type_name).into()
+    }
+
+    fn ensure_kiss_metadata(&mut self) -> &mut KissMetadata {
+        if self.kiss_metadata.is_none() {
+            let port = self.kiss_port.unwrap_or(0);
+            let cmd = self.kiss_command.unwrap_or(0);
+            self.kiss_metadata = Some(KissMetadata {
+                port,
+                kiss_port: Some(port),
+                command: cmd,
+                kiss_command: Some(cmd),
+                command_name: Some(kiss_command_name(cmd).to_string()),
+                source_callsign: self
+                    .ax25_source_callsign
+                    .clone()
+                    .or_else(|| self.source_callsign.clone()),
+                destination_callsign: self
+                    .ax25_destination_callsign
+                    .clone()
+                    .or_else(|| self.destination_callsign.clone()),
+                ax25_source_callsign: self
+                    .ax25_source_callsign
+                    .clone()
+                    .or_else(|| self.source_callsign.clone()),
+                ax25_destination_callsign: self
+                    .ax25_destination_callsign
+                    .clone()
+                    .or_else(|| self.destination_callsign.clone()),
+                source_ssid: self.ax25_source_ssid,
+                destination_ssid: self.ax25_destination_ssid,
+                frame_type: self.ax25_frame_type.clone(),
+                pid: self.ax25_pid,
+                digipeaters: None,
+            });
+        }
+        self.kiss_metadata.as_mut().unwrap()
+    }
+
+    fn ensure_ax25_metadata(&mut self) -> &mut Ax25Metadata {
+        if self.ax25_metadata.is_none() {
+            let src = self
+                .ax25_source_callsign
+                .clone()
+                .or_else(|| self.source_callsign.clone())
+                .unwrap_or_default();
+            let dst = self
+                .ax25_destination_callsign
+                .clone()
+                .or_else(|| self.destination_callsign.clone())
+                .unwrap_or_default();
+            self.ax25_metadata = Some(Ax25Metadata {
+                source_callsign: src.clone(),
+                destination_callsign: dst.clone(),
+                ax25_source_callsign: Some(src),
+                ax25_destination_callsign: Some(dst),
+                source_ssid: self.ax25_source_ssid,
+                destination_ssid: self.ax25_destination_ssid,
+                frame_type: self.ax25_frame_type.clone(),
+                pid: self.ax25_pid,
+                digipeaters: None,
+            });
+        }
+        self.ax25_metadata.as_mut().unwrap()
+    }
+
+    /// Sets KISS port index (0–15).
+    #[must_use]
+    pub fn with_kiss_port(mut self, port: u8) -> Self {
+        self.kiss_port = Some(port);
+        let m = self.ensure_kiss_metadata();
+        m.port = port;
+        m.kiss_port = Some(port);
+        self
+    }
+
+    /// Sets KISS command type code.
+    #[must_use]
+    pub fn with_kiss_command(mut self, cmd: u8) -> Self {
+        self.kiss_command = Some(cmd);
+        let m = self.ensure_kiss_metadata();
+        m.command = cmd;
+        m.kiss_command = Some(cmd);
+        m.command_name = Some(kiss_command_name(cmd).to_string());
+        self
+    }
+
+    /// Sets AX.25 source station callsign.
+    #[must_use]
+    pub fn with_ax25_source_callsign(mut self, callsign: impl Into<String>) -> Self {
+        let cs = callsign.into();
+        self.ax25_source_callsign = Some(cs.clone());
+        self.source_callsign = Some(cs.clone());
+        let m = self.ensure_kiss_metadata();
+        m.source_callsign = Some(cs.clone());
+        m.ax25_source_callsign = Some(cs.clone());
+        let ax = self.ensure_ax25_metadata();
+        ax.source_callsign = cs.clone();
+        ax.ax25_source_callsign = Some(cs);
+        self
+    }
+
+    /// Sets AX.25 destination station callsign.
+    #[must_use]
+    pub fn with_ax25_destination_callsign(mut self, callsign: impl Into<String>) -> Self {
+        let cs = callsign.into();
+        self.ax25_destination_callsign = Some(cs.clone());
+        self.destination_callsign = Some(cs.clone());
+        let m = self.ensure_kiss_metadata();
+        m.destination_callsign = Some(cs.clone());
+        m.ax25_destination_callsign = Some(cs.clone());
+        let ax = self.ensure_ax25_metadata();
+        ax.destination_callsign = cs.clone();
+        ax.ax25_destination_callsign = Some(cs);
+        self
+    }
+
+    /// Alias for [`with_ax25_source_callsign`].
+    #[must_use]
+    pub fn with_source_callsign(self, callsign: impl Into<String>) -> Self {
+        self.with_ax25_source_callsign(callsign)
+    }
+
+    /// Alias for [`with_ax25_destination_callsign`].
+    #[must_use]
+    pub fn with_destination_callsign(self, callsign: impl Into<String>) -> Self {
+        self.with_ax25_destination_callsign(callsign)
+    }
+
+    /// Sets AX.25 source SSID.
+    #[must_use]
+    pub fn with_ax25_source_ssid(mut self, ssid: u8) -> Self {
+        self.ax25_source_ssid = Some(ssid);
+        self.ensure_kiss_metadata().source_ssid = Some(ssid);
+        self.ensure_ax25_metadata().source_ssid = Some(ssid);
+        self
+    }
+
+    /// Sets AX.25 destination SSID.
+    #[must_use]
+    pub fn with_ax25_destination_ssid(mut self, ssid: u8) -> Self {
+        self.ax25_destination_ssid = Some(ssid);
+        self.ensure_kiss_metadata().destination_ssid = Some(ssid);
+        self.ensure_ax25_metadata().destination_ssid = Some(ssid);
+        self
+    }
+
+    /// Sets AX.25 frame type.
+    #[must_use]
+    pub fn with_ax25_frame_type(mut self, frame_type: impl Into<String>) -> Self {
+        let ft = frame_type.into();
+        self.ax25_frame_type = Some(ft.clone());
+        self.ensure_kiss_metadata().frame_type = Some(ft.clone());
+        self.ensure_ax25_metadata().frame_type = Some(ft);
+        self
+    }
+
+    /// Sets AX.25 PID.
+    #[must_use]
+    pub fn with_ax25_pid(mut self, pid: u8) -> Self {
+        self.ax25_pid = Some(pid);
+        self.ensure_kiss_metadata().pid = Some(pid);
+        self.ensure_ax25_metadata().pid = Some(pid);
+        self
+    }
+
+    /// Populates KISS structured metadata.
+    #[must_use]
+    pub fn with_kiss_metadata(mut self, metadata: KissMetadata) -> Self {
+        self.kiss_port = Some(metadata.port);
+        self.kiss_command = Some(metadata.command);
+        if let Some(ref src) = metadata.source_callsign {
+            self.ax25_source_callsign = Some(src.clone());
+            self.source_callsign = Some(src.clone());
+        }
+        if let Some(ref dst) = metadata.destination_callsign {
+            self.ax25_destination_callsign = Some(dst.clone());
+            self.destination_callsign = Some(dst.clone());
+        }
+        if let Some(ssid) = metadata.source_ssid {
+            self.ax25_source_ssid = Some(ssid);
+        }
+        if let Some(ssid) = metadata.destination_ssid {
+            self.ax25_destination_ssid = Some(ssid);
+        }
+        if let Some(ref ft) = metadata.frame_type {
+            self.ax25_frame_type = Some(ft.clone());
+        }
+        if let Some(pid) = metadata.pid {
+            self.ax25_pid = Some(pid);
+        }
+        self.kiss_metadata = Some(metadata);
+        self
+    }
+
+    /// Populates AX.25 structured metadata.
+    #[must_use]
+    pub fn with_ax25_metadata(mut self, metadata: Ax25Metadata) -> Self {
+        self.ax25_source_callsign = Some(metadata.source_callsign.clone());
+        self.source_callsign = Some(metadata.source_callsign.clone());
+        self.ax25_destination_callsign = Some(metadata.destination_callsign.clone());
+        self.destination_callsign = Some(metadata.destination_callsign.clone());
+        self.ax25_source_ssid = metadata.source_ssid;
+        self.ax25_destination_ssid = metadata.destination_ssid;
+        self.ax25_frame_type = metadata.frame_type.clone();
+        self.ax25_pid = metadata.pid;
+        self.ax25_metadata = Some(metadata);
+        self
+    }
+
+    /// Populates metadata from an existing [`crate::ax25::Ax25Frame`].
+    #[must_use]
+    pub fn with_ax25_frame(mut self, frame: &crate::ax25::Ax25Frame) -> Self {
+        self = self
+            .with_ax25_source_callsign(&frame.source_callsign)
+            .with_ax25_destination_callsign(&frame.destination_callsign)
+            .with_ax25_source_ssid(frame.source_ssid)
+            .with_ax25_destination_ssid(frame.destination_ssid)
+            .with_ax25_frame_type(format!("{:?}", frame.frame_type));
+        if let Some(pid) = frame.pid {
+            self = self.with_ax25_pid(pid);
+        }
+        let digis = frame.repeater_callsign_strings();
+        if !digis.is_empty() {
+            if let Some(ref mut km) = self.kiss_metadata {
+                km.digipeaters = Some(digis.clone());
+            }
+            if let Some(ref mut am) = self.ax25_metadata {
+                am.digipeaters = Some(digis);
+            }
+        }
+        self
+    }
+
+    /// Populates metadata from a [`KissInspection`] event.
+    #[must_use]
+    pub fn with_kiss_inspection(mut self, inspection: KissInspection) -> Self {
+        self.kiss_port = Some(inspection.port);
+        self.kiss_command = Some(inspection.command);
+        if let Some(ref src) = inspection.source_callsign {
+            self.ax25_source_callsign = Some(src.clone());
+            self.source_callsign = Some(src.clone());
+        }
+        if let Some(ref dst) = inspection.destination_callsign {
+            self.ax25_destination_callsign = Some(dst.clone());
+            self.destination_callsign = Some(dst.clone());
+        }
+        self.ax25_source_ssid = inspection.source_ssid;
+        self.ax25_destination_ssid = inspection.destination_ssid;
+        self.ax25_frame_type = inspection.frame_type.clone();
+        self.ax25_pid = inspection.pid;
+        self.kiss_metadata = inspection.kiss_metadata.clone();
+        self.ax25_metadata = inspection.ax25_metadata.clone();
+        self.kiss_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a diagnostic event specifically for KISS frame inspection.
+    #[must_use]
+    pub fn kiss_inspection(port: u8, command: u8) -> Self {
+        KissInspection::new(port, command).into()
     }
 
     /// Records local transmission of an inspected packet (including MQTT).
@@ -3276,6 +3955,26 @@ impl DiagnosticBuffer {
 
     /// Emits an [`MqttInspection`] event into the diagnostic buffer.
     pub fn emit_mqtt_inspection(&self, inspection: MqttInspection) -> bool {
+        self.emit(inspection)
+    }
+
+    /// Creates a [`KissInspection`] event with timestamps from the buffer's injected clock.
+    #[must_use]
+    pub fn create_kiss_inspection(
+        &self,
+        stream_id: impl Into<String>,
+        port: u8,
+        command: u8,
+    ) -> KissInspection {
+        let mut insp = KissInspection::new(port, command);
+        insp.stream_id = Some(stream_id.into());
+        insp.monotonic_timestamp = Some(self.clock.monotonic_nanos());
+        insp.wall_clock_timestamp = Some(self.clock.wall_clock_nanos());
+        insp
+    }
+
+    /// Emits a [`KissInspection`] event into the diagnostic buffer.
+    pub fn emit_kiss_inspection(&self, inspection: KissInspection) -> bool {
         self.emit(inspection)
     }
 
@@ -4639,5 +5338,159 @@ mod tests {
         let snap = buffer.snapshot();
         assert_eq!(snap.events.len(), 1);
         assert_eq!(snap.events[0].stage, DiagnosticStage::SendSucceeded);
+    }
+
+    #[test]
+    fn test_criterion3_kiss_diagnostic_event_serialization() {
+        // Acceptance criterion: In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent
+        // containing KISS port, KISS command, AX.25 source callsign, and destination callsign
+        // produces a JSON object containing the structured metadata fields.
+        let event = DiagnosticEvent::new(
+            1_000_000,
+            2_000_000,
+            "kiss-diagnostic-stream",
+            DiagnosticStage::KissInspection,
+            TransportType::Tcp,
+            128,
+        )
+        .with_kiss_port(2)
+        .with_kiss_command(0)
+        .with_ax25_source_callsign("W1AW")
+        .with_ax25_destination_callsign("CQ");
+
+        let json_str = serde_json::to_string(&event).expect("serialize diagnostic event to json");
+        let val: serde_json::Value =
+            serde_json::from_str(&json_str).expect("deserialize json value");
+        let obj = val.as_object().expect("json object expected");
+
+        // Top-level fields
+        assert_eq!(obj.get("kiss_port").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(obj.get("kiss_command").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            obj.get("ax25_source_callsign").and_then(|v| v.as_str()),
+            Some("W1AW")
+        );
+        assert_eq!(
+            obj.get("ax25_destination_callsign")
+                .and_then(|v| v.as_str()),
+            Some("CQ")
+        );
+
+        // Structured kiss_metadata object
+        let kiss_meta = obj
+            .get("kiss_metadata")
+            .and_then(|v| v.as_object())
+            .expect("kiss_metadata object expected");
+        assert_eq!(kiss_meta.get("port").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(kiss_meta.get("command").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            kiss_meta.get("command_name").and_then(|v| v.as_str()),
+            Some("DATA")
+        );
+        assert_eq!(
+            kiss_meta.get("source_callsign").and_then(|v| v.as_str()),
+            Some("W1AW")
+        );
+        assert_eq!(
+            kiss_meta
+                .get("destination_callsign")
+                .and_then(|v| v.as_str()),
+            Some("CQ")
+        );
+
+        // Structured ax25_metadata object
+        let ax25_meta = obj
+            .get("ax25_metadata")
+            .and_then(|v| v.as_object())
+            .expect("ax25_metadata object expected");
+        assert_eq!(
+            ax25_meta.get("source_callsign").and_then(|v| v.as_str()),
+            Some("W1AW")
+        );
+        assert_eq!(
+            ax25_meta
+                .get("destination_callsign")
+                .and_then(|v| v.as_str()),
+            Some("CQ")
+        );
+
+        // Also verify via KissInspection::new roundtrip
+        let insp = KissInspection::new(1, 0)
+            .with_source_callsign("N0CALL")
+            .with_destination_callsign("APRS");
+        let ev: DiagnosticEvent = insp.into();
+        let ev_json = serde_json::to_string(&ev).expect("serialize event from inspection");
+        let ev_val: serde_json::Value = serde_json::from_str(&ev_json).unwrap();
+        assert_eq!(ev_val["kiss_port"], 1);
+        assert_eq!(ev_val["kiss_command"], 0);
+        assert_eq!(ev_val["ax25_source_callsign"], "N0CALL");
+        assert_eq!(ev_val["ax25_destination_callsign"], "APRS");
+        assert_eq!(ev_val["kiss_metadata"]["port"], 1);
+        assert_eq!(ev_val["kiss_metadata"]["source_callsign"], "N0CALL");
+        assert_eq!(ev_val["ax25_metadata"]["destination_callsign"], "APRS");
+    }
+
+    #[test]
+    fn test_criterion4_emitting_kiss_metadata_into_full_buffer_drops_without_blocking_or_panicking()
+    {
+        // Acceptance criterion: In crates/rer/src/diagnostics.rs, emitting a DiagnosticEvent
+        // with KISS metadata into a full DiagnosticBuffer drops the event without blocking or panicking.
+        let clock = Arc::new(ManualClock::new(100, 200));
+        let buffer = DiagnosticBuffer::with_clock(2, clock);
+        assert_eq!(buffer.capacity(), 2);
+
+        // Fill buffer to capacity
+        let ev1 = buffer.create_event("s1", DiagnosticStage::Received, TransportType::Tcp, 50);
+        let ev2 = buffer.create_event("s1", DiagnosticStage::Accepted, TransportType::Tcp, 50);
+        assert!(buffer.emit(ev1));
+        assert!(buffer.emit(ev2));
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.dropped_count(), 0);
+
+        // Emitting a DiagnosticEvent with KISS metadata into the full buffer drops without blocking or panicking
+        let kiss_event = DiagnosticEvent::new(
+            300,
+            400,
+            "s1",
+            DiagnosticStage::KissInspection,
+            TransportType::Tcp,
+            50,
+        )
+        .with_kiss_port(0)
+        .with_kiss_command(0)
+        .with_ax25_source_callsign("W1AW")
+        .with_ax25_destination_callsign("CQ");
+
+        let emitted = buffer.emit(kiss_event);
+        assert!(emitted);
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(
+            buffer.dropped_count(),
+            1,
+            "emitting into full buffer must increment dropped_count"
+        );
+
+        // Verify snapshot contains the KISS event and records the dropped event
+        let snap = buffer.snapshot();
+        assert_eq!(snap.dropped_count, 1);
+        assert_eq!(snap.events.len(), 2);
+        assert_eq!(snap.events[1].stage, DiagnosticStage::KissInspection);
+        assert_eq!(snap.events[1].kiss_port, Some(0));
+        assert_eq!(snap.events[1].kiss_command, Some(0));
+        assert_eq!(snap.events[1].ax25_source_callsign.as_deref(), Some("W1AW"));
+        assert_eq!(
+            snap.events[1].ax25_destination_callsign.as_deref(),
+            Some("CQ")
+        );
+        assert!(snap.events[1].kiss_metadata.is_some());
+
+        // Also verify buffer with capacity 0 drops without blocking or panicking
+        let zero_buf = DiagnosticBuffer::new(0);
+        let kiss_event_zero = DiagnosticEvent::kiss_inspection(1, 0)
+            .with_ax25_source_callsign("K1ABC")
+            .with_ax25_destination_callsign("APRS");
+        let zero_emitted = zero_buf.emit(kiss_event_zero);
+        assert!(!zero_emitted);
+        assert_eq!(zero_buf.dropped_count(), 1);
     }
 }

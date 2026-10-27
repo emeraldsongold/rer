@@ -443,6 +443,48 @@
       },
       "additionalProperties": false
     },
+    "KissConfig": {
+      "description": "Configuration for KISS framing and AX.25 packet inspection (SPEC §5, §8, §14, Task RER-F-062).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable KISS framing and processing. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "framing": {
+          "description": "Optional framing mode override (\"length_prefix\", \"ccsds\", \"mavlink\", \"mqtt\", or \"kiss\").",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inspect_ax25": {
+          "description": "Enable passive AX.25 packet inspection for amateur radio, APRS, etc. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "passthrough_on_error": {
+          "description": "When true, packets failing AX.25 validation are forwarded unchanged to destinations. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "port_filter": {
+          "description": "Optional KISS TNC port filter (0–15). If set, only frames matching this port are forwarded.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "LogicalInterfaceConfig": {
       "description": "Logical interface pairing directional streams (SPEC §6).",
       "type": "object",
@@ -845,6 +887,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/InspectionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kiss": {
+          "description": "Optional KISS framing and AX.25 inspection configuration (SPEC §5, §8, §14). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/KissConfig"
             },
             {
               "type": "null"
