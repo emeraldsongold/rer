@@ -301,9 +301,124 @@ pub struct StreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mavlink: Option<MavlinkConfig>,
 
+    /// Optional MQTT packet inspection and framing configuration (SPEC §5, §8, §14). Off by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_mqtt_config"
+    )]
+    pub mqtt: Option<MqttConfig>,
+
     /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
+}
+
+const fn default_mqtt_max_packet_size() -> usize {
+    65_536
+}
+
+/// Configuration for MQTT packet parsing, validation, and framing (SPEC §5, §8, §14, Task RER-F-058).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MqttConfig {
+    /// Enable MQTT header parsing and validation. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Validate packet type flags strictly against OASIS specifications. Defaults to true.
+    #[serde(
+        default = "default_true",
+        alias = "strict_flags",
+        alias = "validate_header_flags"
+    )]
+    pub validate_flags: bool,
+
+    /// Maximum allowed packet length in octets (bounds buffer allocations). Defaults to 65,536.
+    #[serde(
+        default = "default_mqtt_max_packet_size",
+        alias = "max_size",
+        alias = "max_frame_size"
+    )]
+    pub max_packet_size: usize,
+
+    /// When true, packets failing validation are forwarded unchanged to destinations. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("length_prefix", "ccsds", "mavlink", or "mqtt").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            validate_flags: true,
+            max_packet_size: 65_536,
+            passthrough_on_error: false,
+            framing: None,
+        }
+    }
+}
+
+impl MqttConfig {
+    /// Returns true if validation is enabled for MQTT packets.
+    #[must_use]
+    pub fn is_validation_enabled(&self) -> bool {
+        self.enabled && self.validate_flags
+    }
+}
+
+fn deserialize_optional_mqtt_config<'de, D>(deserializer: D) -> Result<Option<MqttConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct MqttConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for MqttConfigVisitor {
+        type Value = Option<MqttConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean, null, or an MQTT configuration mapping")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(MqttConfig::default()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(MqttConfig::default()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(MqttConfig {
+                enabled: v,
+                ..MqttConfig::default()
+            }))
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let config =
+                MqttConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(config))
+        }
+    }
+
+    deserializer.deserialize_any(MqttConfigVisitor)
 }
 
 /// Configuration for MAVLink packet inspection, validation, and sequence tracking (SPEC §14, §8).
@@ -445,6 +560,7 @@ impl StreamConfig {
             .or(self.framing)
             .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
             .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
+            .or_else(|| self.mqtt.as_ref().and_then(|m| m.framing))
             .unwrap_or_default()
     }
 
@@ -455,6 +571,7 @@ impl StreamConfig {
             .or(self.framing)
             .or_else(|| self.ccsds.as_ref().and_then(|c| c.framing))
             .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
+            .or_else(|| self.mqtt.as_ref().and_then(|m| m.framing))
             .unwrap_or_default()
     }
 }
@@ -1254,6 +1371,26 @@ impl Config {
                         }
                     }
                 }
+
+                // Validate MQTT configuration
+                if let Some(ref mqtt) = stream.mqtt {
+                    if mqtt.max_packet_size == 0 {
+                        errors.push(ValidationError {
+                            path: format!("{}.mqtt.max_packet_size", stream_prefix),
+                            reason: "max_packet_size must be greater than 0".to_string(),
+                        });
+                    }
+                    if mqtt.max_packet_size > crate::mqtt::MQTT_MAX_PACKET_SIZE {
+                        errors.push(ValidationError {
+                            path: format!("{}.mqtt.max_packet_size", stream_prefix),
+                            reason: format!(
+                                "max_packet_size {} exceeds maximum allowed MQTT packet size {}",
+                                mqtt.max_packet_size,
+                                crate::mqtt::MQTT_MAX_PACKET_SIZE
+                            ),
+                        });
+                    }
+                }
             }
 
             // Check logical interfaces
@@ -1916,6 +2053,118 @@ instances:
         let mode: FramingMode = serde_json::from_str("\"mqtt\"").unwrap();
         assert_eq!(mode, FramingMode::Mqtt);
         assert_eq!(mode.to_string(), "mqtt");
+    }
+
+    #[test]
+    fn test_criterion1_mqtt_config_deserialization_defaults() {
+        // Acceptance criterion: In crates/rer/src/config.rs, configuring option mqtt
+        // deserializes into MqttConfig with default validation settings.
+        let yaml_empty_mapping = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        mqtt: {}
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_empty_mapping).expect("valid config with mqtt: {}");
+        let mqtt = config.instances[0].streams[0]
+            .mqtt
+            .as_ref()
+            .expect("mqtt should be Some(MqttConfig)");
+        assert!(mqtt.enabled);
+        assert!(mqtt.validate_flags);
+        assert!(mqtt.is_validation_enabled());
+        assert_eq!(mqtt.max_packet_size, 65_536);
+        assert!(!mqtt.passthrough_on_error);
+        assert_eq!(mqtt.framing, None);
+
+        // Also test with empty scalar
+        let yaml_scalar = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        mqtt:
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config_scalar = Config::from_yaml_str(yaml_scalar).expect("valid config with mqtt:");
+        let mqtt_scalar = config_scalar.instances[0].streams[0]
+            .mqtt
+            .as_ref()
+            .expect("mqtt should be Some(MqttConfig)");
+        assert!(mqtt_scalar.enabled);
+        assert!(mqtt_scalar.validate_flags);
+    }
+
+    #[test]
+    fn test_criterion2_stream_config_source_framing_with_mqtt_framing() {
+        // Acceptance criterion: In crates/rer/src/config.rs, calling source_framing
+        // on a StreamConfig configured with option mqtt specifying framing mqtt returns FramingMode::Mqtt.
+        let yaml_mqtt_framing = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        mqtt:
+          framing: mqtt
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config =
+            Config::from_yaml_str(yaml_mqtt_framing).expect("valid config with mqtt framing");
+        let stream = &config.instances[0].streams[0];
+        assert_eq!(stream.source_framing(), FramingMode::Mqtt);
+        let dest = stream.destination.as_ref().unwrap();
+        assert_eq!(stream.destination_framing(dest), FramingMode::Mqtt);
+    }
+
+    #[test]
+    fn test_criterion5_omitting_mqtt_defaults_to_none_and_preserves_values() {
+        // Acceptance criterion: In crates/rer/src/config.rs, deserializing a stream
+        // configuration YAML omitting option mqtt defaults field mqtt to None and
+        // preserves existing stream configuration values.
+        let yaml_omitted = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5001"
+"#;
+        let config =
+            Config::from_yaml_str(yaml_omitted).expect("valid config omitting option mqtt");
+        let stream = &config.instances[0].streams[0];
+        assert_eq!(stream.mqtt, None);
+        assert_eq!(stream.id, "s1");
+        assert_eq!(stream.source.transport, TransportType::Tcp);
+        assert_eq!(stream.source.address, "127.0.0.1:5000");
+        assert_eq!(stream.source_framing(), FramingMode::LengthPrefix);
+        let dest = stream.destination.as_ref().unwrap();
+        assert_eq!(dest.address, "127.0.0.1:5001");
+        assert_eq!(stream.destination_framing(dest), FramingMode::LengthPrefix);
     }
 
     #[test]

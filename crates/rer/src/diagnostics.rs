@@ -61,6 +61,9 @@ pub enum DiagnosticStage {
     /// MAVLink passive inspection event (SPEC §14, §8).
     #[serde(rename = "mavlink_inspection")]
     MavlinkInspection,
+    /// MQTT passive inspection event (SPEC §5, §8, §14).
+    #[serde(rename = "mqtt_inspection")]
+    MqttInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -80,6 +83,7 @@ impl fmt::Display for DiagnosticStage {
             Self::LtpInspection => write!(f, "ltp_inspection"),
             Self::SrtInspection => write!(f, "srt_inspection"),
             Self::MavlinkInspection => write!(f, "mavlink_inspection"),
+            Self::MqttInspection => write!(f, "mqtt_inspection"),
         }
     }
 }
@@ -101,6 +105,7 @@ impl FromStr for DiagnosticStage {
             "ltp_inspection" => Ok(Self::LtpInspection),
             "srt_inspection" => Ok(Self::SrtInspection),
             "mavlink_inspection" | "mavlink" => Ok(Self::MavlinkInspection),
+            "mqtt_inspection" | "mqtt" => Ok(Self::MqttInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -1435,6 +1440,187 @@ impl From<MavlinkInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_mqtt_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::MqttInspection
+}
+
+/// Structured MQTT packet metadata extracted during passive packet inspection (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqttMetadata {
+    /// MQTT Control Packet type code (1..=15).
+    pub packet_type: u8,
+
+    /// Canonical uppercase name of the MQTT packet type (e.g., "PUBLISH", "CONNECT").
+    #[serde(alias = "type_name")]
+    pub packet_type_name: String,
+
+    /// 4-bit header flags from the first octet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<u8>,
+
+    /// Extracted QoS level for PUBLISH packets (0, 1, or 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<u8>,
+
+    /// Duplicate delivery flag for PUBLISH packets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dup: Option<bool>,
+
+    /// Retain flag for PUBLISH packets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain: Option<bool>,
+
+    /// 16-bit Packet Identifier for packets where QoS > 0.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "packet_id")]
+    pub packet_identifier: Option<u16>,
+
+    /// Declared remaining length in octets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_length: Option<usize>,
+
+    /// Calculated total packet length in octets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_packet_length: Option<usize>,
+
+    /// Optional topic string (disabled by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+}
+
+/// Diagnostic event representing an MQTT passive inspection event (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MqttInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `mqtt_inspection`).
+    #[serde(default = "default_mqtt_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// MQTT Control Packet type code.
+    pub packet_type: u8,
+
+    /// Canonical uppercase name of the MQTT packet type.
+    pub packet_type_name: String,
+
+    /// Extracted QoS level if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<u8>,
+
+    /// Packet identifier if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "packet_id")]
+    pub packet_identifier: Option<u16>,
+
+    /// Parse outcome status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<crate::mqtt::MqttParseStatus>,
+
+    /// Structured MQTT metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "mqtt"
+    )]
+    pub mqtt_metadata: Option<MqttMetadata>,
+}
+
+pub type MqttInspectionEvent = MqttInspection;
+
+impl MqttInspection {
+    /// Creates a new `MqttInspection` event.
+    #[must_use]
+    pub fn new(packet_type: u8, packet_type_name: impl Into<String>) -> Self {
+        let name = packet_type_name.into();
+        let metadata = MqttMetadata {
+            packet_type,
+            packet_type_name: name.clone(),
+            flags: None,
+            qos: None,
+            dup: None,
+            retain: None,
+            packet_identifier: None,
+            remaining_length: None,
+            total_packet_length: None,
+            topic: None,
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::MqttInspection,
+            packet_type,
+            packet_type_name: name,
+            qos: None,
+            packet_identifier: None,
+            parse_status: None,
+            mqtt_metadata: Some(metadata),
+        }
+    }
+
+    /// Sets QoS level.
+    #[must_use]
+    pub fn with_qos(mut self, qos: u8) -> Self {
+        self.qos = Some(qos);
+        if let Some(ref mut m) = self.mqtt_metadata {
+            m.qos = Some(qos);
+        }
+        self
+    }
+
+    /// Sets packet identifier.
+    #[must_use]
+    pub fn with_packet_identifier(mut self, packet_id: u16) -> Self {
+        self.packet_identifier = Some(packet_id);
+        if let Some(ref mut m) = self.mqtt_metadata {
+            m.packet_identifier = Some(packet_id);
+        }
+        self
+    }
+
+    /// Alias for [`with_packet_identifier`].
+    #[must_use]
+    pub fn with_packet_id(self, packet_id: u16) -> Self {
+        self.with_packet_identifier(packet_id)
+    }
+
+    /// Records local transmission of this inspected MQTT packet.
+    ///
+    /// In accordance with SPEC §8, sets stage to [`DiagnosticStage::SendSucceeded`] representing
+    /// successful local socket send call without asserting downstream broker delivery or application acknowledgment.
+    #[must_use]
+    pub fn record_local_transmission(mut self) -> Self {
+        self.stage = DiagnosticStage::SendSucceeded;
+        self
+    }
+}
+
+impl From<MqttInspection> for DiagnosticEvent {
+    fn from(insp: MqttInspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp.stream_id.clone().unwrap_or_else(|| "mqtt".to_string());
+        let mut event = DiagnosticEvent::new(mono, wall, stream, insp.stage, TransportType::Tcp, 0);
+        event.mqtt_packet_type = Some(insp.packet_type);
+        event.mqtt_type_name = Some(insp.packet_type_name.clone());
+        event.mqtt_qos = insp.qos;
+        event.mqtt_packet_id = insp.packet_identifier;
+        event.mqtt_parse_status = insp.parse_status;
+        event.mqtt_metadata = insp.mqtt_metadata.clone();
+        event.mqtt_inspection = Some(insp);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -1647,6 +1833,54 @@ pub struct DiagnosticEvent {
     /// Structured MAVLink metadata (SPEC §14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mavlink_metadata: Option<MavlinkMetadata>,
+
+    /// MQTT Control Packet type (SPEC §5, §8, §14).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "packet_type"
+    )]
+    pub mqtt_packet_type: Option<u8>,
+
+    /// Canonical name of MQTT packet type (e.g., "PUBLISH", "CONNECT").
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "type_name",
+        alias = "mqtt_packet_type_name",
+        alias = "packet_type_name"
+    )]
+    pub mqtt_type_name: Option<String>,
+
+    /// MQTT header flags (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "flags")]
+    pub mqtt_flags: Option<u8>,
+
+    /// MQTT QoS level (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "qos")]
+    pub mqtt_qos: Option<u8>,
+
+    /// MQTT Packet Identifier (SPEC §5, §8, §14).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "packet_id",
+        alias = "packet_identifier",
+        alias = "mqtt_packet_identifier"
+    )]
+    pub mqtt_packet_id: Option<u16>,
+
+    /// MQTT parse evaluation status (SPEC §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mqtt_parse_status: Option<crate::mqtt::MqttParseStatus>,
+
+    /// MQTT inspection event metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "mqtt")]
+    pub mqtt_inspection: Option<MqttInspection>,
+
+    /// Structured MQTT metadata (SPEC §14, §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mqtt_metadata: Option<MqttMetadata>,
 }
 
 impl DiagnosticEvent {
@@ -1707,6 +1941,14 @@ impl DiagnosticEvent {
             mavlink_parse_status: None,
             mavlink_inspection: None,
             mavlink_metadata: None,
+            mqtt_packet_type: None,
+            mqtt_type_name: None,
+            mqtt_flags: None,
+            mqtt_qos: None,
+            mqtt_packet_id: None,
+            mqtt_parse_status: None,
+            mqtt_inspection: None,
+            mqtt_metadata: None,
         }
     }
 
@@ -2134,6 +2376,179 @@ impl DiagnosticEvent {
     ) -> Self {
         MavlinkInspection::new(system_id, component_id, sequence, message_id).into()
     }
+
+    fn ensure_mqtt_metadata(&mut self) -> &mut MqttMetadata {
+        if self.mqtt_metadata.is_none() {
+            let type_code = self.mqtt_packet_type.unwrap_or(0);
+            let type_name = self.mqtt_type_name.clone().unwrap_or_default();
+            self.mqtt_metadata = Some(MqttMetadata {
+                packet_type: type_code,
+                packet_type_name: type_name,
+                flags: self.mqtt_flags,
+                qos: self.mqtt_qos,
+                dup: None,
+                retain: None,
+                packet_identifier: self.mqtt_packet_id,
+                remaining_length: None,
+                total_packet_length: None,
+                topic: None,
+            });
+        }
+        self.mqtt_metadata.as_mut().unwrap()
+    }
+
+    /// Sets MQTT packet type and canonical name.
+    #[must_use]
+    pub fn with_mqtt_packet_type(mut self, packet_type: u8, name: impl Into<String>) -> Self {
+        let name_str = name.into();
+        self.mqtt_packet_type = Some(packet_type);
+        self.mqtt_type_name = Some(name_str.clone());
+        let m = self.ensure_mqtt_metadata();
+        m.packet_type = packet_type;
+        m.packet_type_name = name_str;
+        self
+    }
+
+    /// Sets MQTT packet type name.
+    #[must_use]
+    pub fn with_mqtt_type_name(mut self, name: impl Into<String>) -> Self {
+        let name_str = name.into();
+        self.mqtt_type_name = Some(name_str.clone());
+        let m = self.ensure_mqtt_metadata();
+        m.packet_type_name = name_str;
+        self
+    }
+
+    /// Sets MQTT QoS level.
+    #[must_use]
+    pub fn with_mqtt_qos(mut self, qos: u8) -> Self {
+        self.mqtt_qos = Some(qos);
+        let m = self.ensure_mqtt_metadata();
+        m.qos = Some(qos);
+        self
+    }
+
+    /// Sets MQTT packet identifier.
+    #[must_use]
+    pub fn with_mqtt_packet_identifier(mut self, packet_id: u16) -> Self {
+        self.mqtt_packet_id = Some(packet_id);
+        let m = self.ensure_mqtt_metadata();
+        m.packet_identifier = Some(packet_id);
+        self
+    }
+
+    /// Sets MQTT packet identifier (alias).
+    #[must_use]
+    pub fn with_mqtt_packet_id(self, packet_id: u16) -> Self {
+        self.with_mqtt_packet_identifier(packet_id)
+    }
+
+    /// Sets MQTT header flags.
+    #[must_use]
+    pub fn with_mqtt_flags(mut self, flags: u8) -> Self {
+        self.mqtt_flags = Some(flags);
+        let m = self.ensure_mqtt_metadata();
+        m.flags = Some(flags);
+        self
+    }
+
+    /// Sets structured MQTT metadata.
+    #[must_use]
+    pub fn with_mqtt_metadata(mut self, metadata: MqttMetadata) -> Self {
+        self.mqtt_packet_type = Some(metadata.packet_type);
+        self.mqtt_type_name = Some(metadata.packet_type_name.clone());
+        self.mqtt_flags = metadata.flags;
+        self.mqtt_qos = metadata.qos;
+        self.mqtt_packet_id = metadata.packet_identifier;
+        self.mqtt_metadata = Some(metadata);
+        self
+    }
+
+    /// Enriches event with a parsed MQTT fixed header.
+    #[must_use]
+    pub fn with_mqtt_header(self, header: &crate::mqtt::MqttFixedHeader) -> Self {
+        let meta = MqttMetadata {
+            packet_type: header.packet_type.code(),
+            packet_type_name: header.packet_type.name().to_string(),
+            flags: Some(header.flags),
+            qos: header.qos(),
+            dup: header.dup(),
+            retain: header.retain(),
+            packet_identifier: None,
+            remaining_length: Some(header.remaining_length),
+            total_packet_length: Some(header.total_packet_length),
+            topic: None,
+        };
+        self.with_mqtt_metadata(meta)
+    }
+
+    /// Attaches MQTT inspection event metadata.
+    #[must_use]
+    pub fn with_mqtt_inspection(mut self, inspection: MqttInspection) -> Self {
+        self.mqtt_packet_type = Some(inspection.packet_type);
+        self.mqtt_type_name = Some(inspection.packet_type_name.clone());
+        self.mqtt_qos = inspection.qos;
+        self.mqtt_packet_id = inspection.packet_identifier;
+        self.mqtt_parse_status = inspection.parse_status;
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = inspection.stage;
+        }
+        self.mqtt_metadata = inspection.mqtt_metadata.clone();
+        self.mqtt_inspection = Some(inspection);
+        self
+    }
+
+    /// Returns MQTT packet identifier if present.
+    #[must_use]
+    pub fn mqtt_packet_identifier(&self) -> Option<u16> {
+        self.mqtt_packet_id
+    }
+
+    /// Returns MQTT packet type name if present.
+    #[must_use]
+    pub fn mqtt_packet_type_name(&self) -> Option<&str> {
+        self.mqtt_type_name.as_deref()
+    }
+
+    /// Creates a diagnostic event specifically for MQTT packet inspection.
+    #[must_use]
+    pub fn mqtt_inspection(packet_type: u8, packet_type_name: impl Into<String>) -> Self {
+        MqttInspection::new(packet_type, packet_type_name).into()
+    }
+
+    /// Records local transmission of an inspected packet (including MQTT).
+    ///
+    /// In accordance with SPEC §8, sets stage to [`DiagnosticStage::SendSucceeded`] representing
+    /// successful local socket send call without asserting downstream broker delivery or application acknowledgment.
+    #[must_use]
+    pub fn record_local_transmission(mut self) -> Self {
+        self.stage = DiagnosticStage::SendSucceeded;
+        self
+    }
+
+    /// Records local transmission of an inspected MQTT packet.
+    ///
+    /// Sets stage to [`DiagnosticStage::SendSucceeded`] without asserting downstream broker delivery (SPEC §8).
+    #[must_use]
+    pub fn record_mqtt_local_transmission(self) -> Self {
+        self.record_local_transmission()
+    }
+
+    /// Sets stage to [`DiagnosticStage::SendSucceeded`] representing successful local transmission.
+    #[must_use]
+    pub fn record_send_succeeded(mut self) -> Self {
+        self.stage = DiagnosticStage::SendSucceeded;
+        self
+    }
+}
+
+/// Records local transmission of an inspected MQTT packet.
+///
+/// Sets stage to [`DiagnosticStage::SendSucceeded`] without asserting downstream broker delivery (SPEC §8).
+#[must_use]
+pub fn record_mqtt_local_transmission(mut event: DiagnosticEvent) -> DiagnosticEvent {
+    event.stage = DiagnosticStage::SendSucceeded;
+    event
 }
 
 /// Injected clock abstraction for deterministic testing without reading wall clock or sleeping.
@@ -2836,6 +3251,42 @@ impl DiagnosticBuffer {
         self.emit(inspection)
     }
 
+    /// Creates an [`MqttInspection`] event populated with buffer clock timestamps.
+    #[must_use]
+    pub fn create_mqtt_inspection(
+        &self,
+        stream_id: impl Into<String>,
+        packet_type: u8,
+        packet_type_name: impl Into<String>,
+    ) -> MqttInspection {
+        let mut insp = MqttInspection::new(packet_type, packet_type_name);
+        insp.stream_id = Some(stream_id.into());
+        insp.monotonic_timestamp = Some(self.clock.monotonic_nanos());
+        insp.wall_clock_timestamp = Some(self.clock.wall_clock_nanos());
+        insp
+    }
+
+    /// Emits an [`MqttInspection`] event into the diagnostic buffer.
+    pub fn emit_mqtt_inspection(&self, inspection: MqttInspection) -> bool {
+        self.emit(inspection)
+    }
+
+    /// Records local transmission of an inspected MQTT packet into the diagnostic buffer.
+    ///
+    /// Sets stage to [`DiagnosticStage::SendSucceeded`] without asserting downstream broker delivery (SPEC §8).
+    pub fn record_mqtt_transmission(&self, mut event: DiagnosticEvent) -> bool {
+        event.stage = DiagnosticStage::SendSucceeded;
+        self.emit(event)
+    }
+
+    /// Records local transmission of an inspected packet into the diagnostic buffer.
+    ///
+    /// Sets stage to [`DiagnosticStage::SendSucceeded`] without asserting downstream broker delivery (SPEC §8).
+    pub fn record_local_transmission(&self, mut event: DiagnosticEvent) -> bool {
+        event.stage = DiagnosticStage::SendSucceeded;
+        self.emit(event)
+    }
+
     /// Creates a diagnostic event using the buffer's injected clock timestamps.
     #[must_use]
     pub fn create_event(
@@ -3342,6 +3793,8 @@ mod tests {
             (DiagnosticStage::HealthTransition, "\"health_transition\""),
             (DiagnosticStage::BundleInspection, "\"bundle_inspection\""),
             (DiagnosticStage::LtpInspection, "\"ltp_inspection\""),
+            (DiagnosticStage::MavlinkInspection, "\"mavlink_inspection\""),
+            (DiagnosticStage::MqttInspection, "\"mqtt_inspection\""),
         ];
 
         for (stage, expected_json) in stages {
@@ -4073,5 +4526,110 @@ mod tests {
             meta.get("message_id").and_then(|v| v.as_u64()),
             Some(u64::from(msgid_24bit))
         );
+    }
+
+    #[test]
+    fn test_criterion3_mqtt_diagnostic_event_serialization() {
+        // Acceptance criterion: In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent
+        // populated with MQTT packet type 3, packet type name PUBLISH, QoS 1, and packet identifier 100
+        // emits a JSON object containing the structured MQTT metadata fields.
+        let event = DiagnosticEvent::new(
+            1000,
+            2000,
+            "mqtt-stream",
+            DiagnosticStage::MqttInspection,
+            TransportType::Tcp,
+            128,
+        )
+        .with_mqtt_packet_type(3, "PUBLISH")
+        .with_mqtt_qos(1)
+        .with_mqtt_packet_identifier(100);
+
+        let json_str = serde_json::to_string(&event).expect("serialize diagnostic event");
+        let val: serde_json::Value = serde_json::from_str(&json_str).expect("deserialize json");
+        let obj = val.as_object().expect("json object expected");
+
+        assert_eq!(
+            obj.get("mqtt_packet_type").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            obj.get("mqtt_type_name").and_then(|v| v.as_str()),
+            Some("PUBLISH")
+        );
+        assert_eq!(obj.get("mqtt_qos").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            obj.get("mqtt_packet_id").and_then(|v| v.as_u64()),
+            Some(100)
+        );
+
+        let meta = obj
+            .get("mqtt_metadata")
+            .and_then(|v| v.as_object())
+            .expect("mqtt_metadata object");
+        assert_eq!(meta.get("packet_type").and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(
+            meta.get("packet_type_name").and_then(|v| v.as_str()),
+            Some("PUBLISH")
+        );
+        assert_eq!(meta.get("qos").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            meta.get("packet_identifier").and_then(|v| v.as_u64()),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn test_criterion4_recording_local_transmission_sets_send_succeeded() {
+        // Acceptance criterion: In crates/rer/src/diagnostics.rs, recording local transmission
+        // of an inspected MQTT packet sets stage to DiagnosticStage::SendSucceeded without asserting
+        // downstream broker delivery.
+        let event = DiagnosticEvent::mqtt_inspection(3, "PUBLISH")
+            .with_mqtt_qos(1)
+            .with_mqtt_packet_identifier(100);
+        assert_eq!(event.stage, DiagnosticStage::MqttInspection);
+
+        // Record local transmission via method on DiagnosticEvent
+        let transmitted = event.record_local_transmission();
+        assert_eq!(transmitted.stage, DiagnosticStage::SendSucceeded);
+
+        // Verify that downstream broker delivery is NOT asserted (SPEC §8)
+        assert_ne!(transmitted.stage.to_string(), "delivered");
+        assert_ne!(transmitted.stage.to_string(), "broker_accepted");
+        assert_eq!(transmitted.stage.to_string(), "send_succeeded");
+
+        // Also test record_mqtt_local_transmission top-level helper
+        let event2 = DiagnosticEvent::new(
+            1000,
+            2000,
+            "mqtt-stream",
+            DiagnosticStage::MqttInspection,
+            TransportType::Tcp,
+            128,
+        )
+        .with_mqtt_packet_type(3, "PUBLISH")
+        .with_mqtt_qos(1)
+        .with_mqtt_packet_id(100);
+        let transmitted2 = record_mqtt_local_transmission(event2);
+        assert_eq!(transmitted2.stage, DiagnosticStage::SendSucceeded);
+
+        // Also test MqttInspection::record_local_transmission
+        let insp = MqttInspection::new(3, "PUBLISH")
+            .with_qos(1)
+            .with_packet_identifier(100)
+            .record_local_transmission();
+        assert_eq!(insp.stage, DiagnosticStage::SendSucceeded);
+        let event_from_insp: DiagnosticEvent = insp.into();
+        assert_eq!(event_from_insp.stage, DiagnosticStage::SendSucceeded);
+
+        // Also test DiagnosticBuffer::record_mqtt_transmission
+        let buffer = DiagnosticBuffer::new(10);
+        let event3 = DiagnosticEvent::mqtt_inspection(3, "PUBLISH")
+            .with_mqtt_qos(1)
+            .with_mqtt_packet_id(100);
+        assert!(buffer.record_mqtt_transmission(event3));
+        let snap = buffer.snapshot();
+        assert_eq!(snap.events.len(), 1);
+        assert_eq!(snap.events[0].stage, DiagnosticStage::SendSucceeded);
     }
 }

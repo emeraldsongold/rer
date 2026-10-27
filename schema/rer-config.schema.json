@@ -622,6 +622,46 @@
       },
       "additionalProperties": false
     },
+    "MqttConfig": {
+      "description": "Configuration for MQTT packet parsing, validation, and framing (SPEC §5, §8, §14, Task RER-F-058).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable MQTT header parsing and validation. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "framing": {
+          "description": "Optional framing mode override (\"length_prefix\", \"ccsds\", \"mavlink\", or \"mqtt\").",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_packet_size": {
+          "description": "Maximum allowed packet length in octets (bounds buffer allocations). Defaults to 65,536.",
+          "default": 65536,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "passthrough_on_error": {
+          "description": "When true, packets failing validation are forwarded unchanged to destinations. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "validate_flags": {
+          "description": "Validate packet type flags strictly against OASIS specifications. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "OperationalMode": {
       "description": "Operational diagnostic modes (SPEC §10).",
       "type": "string",
@@ -816,6 +856,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/MavlinkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mqtt": {
+          "description": "Optional MQTT packet inspection and framing configuration (SPEC §5, §8, §14). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MqttConfig"
             },
             {
               "type": "null"
