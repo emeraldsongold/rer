@@ -180,6 +180,70 @@ Options:
 - `--format <FORMAT>` (`-f`): Output format: `text` (default), `json`, or `prometheus`.
 - `--json`: Machine-readable JSON output (convenience alias for `--format json`).
 
+## Management Diagnostic Events (`rer diagnose`)
+
+Query operational mode, correlation ID, expiry, dropped events count, and recorded diagnostic events in arrival order from a running relay instance:
+
+```bash
+# Query diagnostic events via Unix domain socket (default human-readable text)
+rer diagnose --socket /tmp/relay_health.sock
+
+# Output diagnostic events in JSON format
+rer diagnose --socket /tmp/relay_health.sock --json
+rer diagnose --socket /tmp/relay_health.sock --format json
+
+# Limit the number of returned events (bounded limit, newest event ordered last)
+rer diagnose --socket /tmp/relay_health.sock --limit 10
+
+# Query remote management endpoint with authentication token
+rer diagnose --endpoint 127.0.0.1:9090 --auth-token "token" --timeout 2.0 --json
+```
+
+Options:
+- `--socket <PATH>`: Path to Unix domain socket for management diagnostic probe (defaults to `/tmp/relay_health.sock` or `RER_MGMT_SOCKET`).
+- `--endpoint <ENDPOINT>`: Remote management endpoint for diagnostic probe (e.g. `127.0.0.1:9090`).
+- `--auth-token <TOKEN>`: Authentication token for querying management probe.
+- `--limit <LIMIT>` (`-l`): Maximum number of diagnostic events to return (bounded limit, newest event ordered last).
+- `--timeout <SECONDS>` (`-t`): Timeout in seconds to wait for diagnostic response (default: `2.0`).
+- `--json`: Output report as JSON (convenience alias for `--format json`).
+- `--format <FORMAT>` (`-f`): Output format: `text` (default) or `json`.
+
+## Traffic Capture Replay (`rer replay`)
+
+Replay PCAP and PCAPNG traffic captures against test endpoints with timing control, packet filtering, and safety guardrails:
+
+```bash
+# Replay capture file to a test destination with original packet timing
+rer replay capture.pcap --destination 127.0.0.1:5000
+
+# Replay using --capture flag at 2x speed
+rer replay --capture capture.pcapng --destination 127.0.0.1:5000 --speed 2.0
+
+# Replay at maximum rate without delays
+rer replay capture.pcap --destination 127.0.0.1:5000 --max-rate
+
+# Replay throttled to a maximum rate in packets per second
+rer replay capture.pcap --destination 127.0.0.1:5000 --pps 500
+
+# Replay over TCP transport
+rer replay capture.pcap --destination 127.0.0.1:5000 --transport tcp
+
+# Output replay statistics as JSON
+rer replay capture.pcap --destination 127.0.0.1:5000 --max-rate --json
+rer replay capture.pcap --destination 127.0.0.1:5000 --format json
+```
+
+Options:
+- `FILE`: Path to PCAP or PCAPNG capture file (positional argument).
+- `--capture <FILE>` (`-c`): Path to PCAP or PCAPNG capture file (alternative flag).
+- `--destination <ENDPOINT>` (`-d`): Explicit destination endpoint for replayed packets (e.g. `127.0.0.1:5000`). By default, non-test/production endpoints are refused for safety unless `--allow-non-test-destinations` is supplied.
+- `--transport <TRANSPORT>` (`-t`): Destination transport protocol: `udp` (default) or `tcp`.
+- `--speed <MULTIPLIER>`: Replay speed multiplier (1.0 = original timing, >1.0 = faster, <1.0 = slower, 0 = max rate, default: `1.0`).
+- `--max-rate`: Replay at maximum feasible rate without timing delays (equivalent to `--speed 0`).
+- `--pps <RATE>`: Maximum rate limit in packets per second (optional throttle).
+- `--json`: Machine-readable JSON output (convenience alias for `--format json`).
+- `--format <FORMAT>` (`-f`): Output format for replay report: `text` (default) or `json`.
+
 ## Network Simulation and Verification Testing (`rer test`)
 
 RER includes unprivileged network simulation, traffic generation, and verification test tooling:
@@ -196,6 +260,15 @@ rer test generate --target 127.0.0.1:5000 --count 1000 --size 256 --rate 500 --b
 
 # Run standalone traffic receiver bound to a local UDP port
 rer test receive --bind 127.0.0.1:5000 --count 1000 --timeout 5.0
+
+# Run adversarial fault-injection scenarios
+rer test fault-injection --scenario loss --json
+
+# Run performance benchmarks with JSON baseline report
+rer test benchmark --json
+
+# Run long-duration stability tests reporting memory and queue metrics
+rer test long-duration --duration 10.0 --rate 1000 --size 256 --json
 ```
 
 Subcommands and options:
@@ -225,25 +298,37 @@ Subcommands and options:
   - `--count <COUNT>` (`-c`): Expected packet count to receive before completing.
   - `--timeout <SECONDS>` (`-t`): Timeout in seconds to wait for packets (default: `2.0`).
 
-## Version Information and Roadmap Commands (`rer version`, `rer diagnose`, `rer capture`, `rer replay`)
+- **`rer test fault-injection`**: Runs adversarial fault-injection scenarios outside the unprivileged simulation suite to verify relay behavior under severe network impairments and disruptions:
+  - `--scenario <SCENARIO>` (`-s`): Specific scenario to run (`loss`, `delay`, `jitter`, `reorder`, `disconnect`, `slow-reader`, `saturation`, `restart`, `all`; default: `all`).
+  - `--json`: Output report as JSON.
+
+- **`rer test benchmark`**: Runs repeatable performance benchmarks and reports throughput, latency, and resource baselines:
+  - `--json`: Output benchmark results and performance report as JSON.
+
+- **`rer test long-duration`**: Runs long-duration stress and stability tests reporting memory stability, queue metrics, and packet accounting:
+  - `--duration <SECONDS>` (`-d`): Test duration in seconds (default: `3`).
+  - `--rate <PPS>` (`-r`): Packet rate in packets per second (0 for unthrottled, default: `1000`).
+  - `--size <BYTES>` (`-s`): Packet payload size in bytes (default: `256`).
+  - `--queue-capacity <CAP>` (`-q`): Relay queue capacity limit (default: `128`).
+  - `--json`: Output stability report as JSON.
+
+## Version Information (`rer version`)
 
 ```bash
 # Print binary version information
 rer version
-
-# Planned roadmap commands (exit status 1)
-rer diagnose
-rer capture
-rer replay
 ```
 
-RER provides version inspection and reserves command slots for roadmap capabilities: `rer version` prints binary version information and exits with status 0 while `rer diagnose`, `rer capture` and `rer replay` exit with status 1 as planned roadmap features.
+`rer version` prints binary version information (e.g. `rer 0.1.0`) and exits with status 0.
 
-- **`rer version`**:
-  `rer version` prints binary version information (e.g. `rer 0.1.0`) and exits with status 0.
-- **`rer diagnose`**:
-  Planned roadmap feature for network diagnostics and troubleshooting (scheduled in milestone RER-F-008). Exits with status 1 as planned roadmap features.
+## Planned Roadmap Commands (`rer capture`)
+
+```bash
+# Planned roadmap commands (exit status 1)
+rer capture
+```
+
+RER reserves command slots for planned roadmap capabilities: `rer version` prints binary version information and exits with status 0 while `rer capture` is documented under planned roadmap commands with a note that it exits with status 1 (scheduled in roadmap milestone RER-F-011). Commands reserved for future implementation exit with status 1 as planned roadmap features.
+
 - **`rer capture`**:
-  Planned roadmap feature for network traffic capture (scheduled in milestone RER-F-011). Exits with status 1 as planned roadmap features.
-- **`rer replay`**:
-  Planned roadmap feature for traffic replay (scheduled in milestone RER-F-011). Exits with status 1 as planned roadmap features.
+  Planned roadmap feature for network traffic capture (scheduled in milestone RER-F-011). `rer capture` is not yet implemented and exits with status 1 as planned roadmap features (see KNOWN_ISSUES.md).
