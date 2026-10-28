@@ -1269,6 +1269,25 @@ items:
       - The proposal document in docs/proposals explicitly states that full RTCP session control, RTSP streaming, media decoding, and multicast routing daemon functionality are not claimed.
       - The proposal in docs/proposals identifies the smallest first implementation step for in-tree RTP fixed header parsing and sequence tracking.
 
+  - id: RER-F-068
+    order: 68
+    title: Modbus and DNP3 research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-055]
+    spec_refs: [§5, §8, §14]
+    test_profile: fast
+    notes: 'Research and create a proposal for adding Modbus/DNP3. Relevant code: docs/SPEC.md, crates/rer/src/config.rs, crates/rer/src/framing.rs.'
+    acceptance:
+      - A survey of Modbus Application Protocol V1.1b3 and DNP3 IEEE 1815 specifications in docs/proposals details Modbus MBAP headers, function codes, DNP3 data link framing sync octets 0x0564, and transport control flags.
+      - A review of existing open-source Modbus and DNP3 implementations in docs/proposals evaluates library licenses for compatibility with the Apache-2.0 license.
+      - An integration proposal in docs/proposals outlines modular stream inspection, TCP framing, and diagnostic events for crates/rer/src/config.rs, crates/rer/src/framing.rs, crates/rer/src/diagnostics.rs, and crates/rer/src/relay.rs.
+      - The proposal document in docs/proposals explicitly states that full Modbus master or slave PLC emulation, DNP3 outstation state machines, and SCADA control execution are not claimed.
+      - The proposal in docs/proposals identifies the smallest first implementation step for in-tree Modbus MBAP header parsing and TCP length-based framing.
+
   - id: RER-T-001
     kind: track
     order: 101
