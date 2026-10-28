@@ -523,6 +523,32 @@ fn test_cli_docs_acceptance_criteria() {
     // Author attribution and website
     assert!(readme_md.contains("ronaldreeves.com"));
     assert!(readme_md.contains("Ronald Edward Reeves Jr"));
+
+    // Acceptance criterion: docs/CONFIGURATION.md contains the 6 configuration example filenames
+    let example_filenames = [
+        "minimal.yaml",
+        "paired_streams.yaml",
+        "fan_out.yaml",
+        "multi_instance.yaml",
+        "multi_interface.yaml",
+        "management_auth.yaml",
+    ];
+    for filename in &example_filenames {
+        assert!(
+            config_md.contains(filename),
+            "docs/CONFIGURATION.md must contain example filename '{filename}'"
+        );
+    }
+
+    // Acceptance criterion: docs/SPEC.md Section 3 includes author name and website
+    let spec_md = std::fs::read_to_string(repo_root().join("docs").join("SPEC.md"))
+        .expect("failed to read docs/SPEC.md");
+    assert!(spec_md.contains("Ronald Edward Reeves Jr"));
+    assert!(spec_md.contains("ronaldreeves.com"));
+
+    // Acceptance criterion: README.md describes YAML syntax and catalog of 6 configuration examples
+    assert!(readme_md.contains("YAML configuration syntax"));
+    assert!(readme_md.contains("catalog of 6 configuration examples in the examples directory"));
 }
 
 #[test]
