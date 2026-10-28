@@ -1250,6 +1250,25 @@ items:
       - In README.md, the Documentation Index entry for docs/CONFIGURATION.md describes both YAML configuration syntax and the catalog of 6 configuration examples in the examples directory.
       - In crates/rer/tests/cli_tests.rs, test_cli_docs_acceptance_criteria asserts that docs/CONFIGURATION.md contains the 6 example filenames "minimal.yaml", "paired_streams.yaml", "fan_out.yaml", "multi_instance.yaml", "multi_interface.yaml", and "management_auth.yaml".
 
+  - id: RER-F-067
+    order: 67
+    title: RTP and multicast IGMP research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-055]
+    spec_refs: [§5, §8, §14]
+    test_profile: fast
+    notes: 'Research and create a proposal for adding RTP/Multicast (IGMP). Relevant code: docs/SPEC.md, crates/rer/src/config.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - A survey of RTP specification RFC 3550 and IGMP multicast protocol standards in docs/proposals details the 12-byte RTP fixed header, sequence numbers, timestamps, synchronization source identifiers, and IGMP membership report formats.
+      - A review of existing open-source RTP and multicast implementations in docs/proposals evaluates library licenses for compatibility with the Apache-2.0 license.
+      - An integration proposal in docs/proposals outlines modular stream inspection, multicast socket binding, and diagnostic events for crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, and crates/rer/src/relay.rs.
+      - The proposal document in docs/proposals explicitly states that full RTCP session control, RTSP streaming, media decoding, and multicast routing daemon functionality are not claimed.
+      - The proposal in docs/proposals identifies the smallest first implementation step for in-tree RTP fixed header parsing and sequence tracking.
+
   - id: RER-F-068
     order: 68
     title: Modbus and DNP3 research and integration proposal
