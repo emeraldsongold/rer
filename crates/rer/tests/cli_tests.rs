@@ -495,6 +495,13 @@ fn test_cli_docs_acceptance_criteria() {
     assert!(usage_md.contains("prints binary version information and exits with status 0"));
     assert!(usage_md.contains("exit with status 1 as planned roadmap features"));
 
+    assert!(usage_md.contains("--scenario"));
+    assert!(usage_md.contains("--pps"));
+    assert!(usage_md.contains("--max-rate"));
+    assert!(usage_md.contains("fault-injection"));
+    assert!(usage_md.contains("benchmark"));
+    assert!(usage_md.contains("long-duration"));
+
     // Acceptance criterion: README.md documentation list references USAGE document alongside CONFIGURATION.md and SPEC.md
     assert!(readme_md.contains("docs/USAGE.md"));
     assert!(readme_md.contains("docs/CONFIGURATION.md"));
