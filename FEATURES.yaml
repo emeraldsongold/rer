@@ -1288,6 +1288,25 @@ items:
       - The proposal document in docs/proposals explicitly states that full Modbus master or slave PLC emulation, DNP3 outstation state machines, and SCADA control execution are not claimed.
       - The proposal in docs/proposals identifies the smallest first implementation step for in-tree Modbus MBAP header parsing and TCP length-based framing.
 
+  - id: RER-F-069
+    order: 69
+    title: QUIC research and integration proposal
+    type: research
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-055]
+    spec_refs: [§14, §8]
+    test_profile: fast
+    notes: 'Research and create a proposal for adding QUIC. Relevant code: docs/SPEC.md, Cargo.toml, crates/rer/src/config.rs.'
+    acceptance:
+      - A survey of the QUIC transport protocol specifications in docs/proposals details long and short header packet formats, Connection ID semantics, and TLS 1.3 handshake encapsulation.
+      - A review of existing open-source QUIC implementations in docs/proposals evaluates license terms for compatibility with the Apache-2.0 license.
+      - An integration proposal in docs/proposals outlines modular stream inspection and diagnostic events for crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, and crates/rer/src/relay.rs.
+      - The proposal document in docs/proposals explicitly states that full QUIC endpoint termination, TLS decryption, and stateful congestion control are not claimed.
+      - The proposal in docs/proposals identifies the smallest first implementation step for in-tree QUIC packet header parsing and Connection ID extraction.
+
   - id: RER-T-001
     kind: track
     order: 101
