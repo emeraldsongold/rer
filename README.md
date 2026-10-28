@@ -21,7 +21,7 @@ Advanced transport features (TCP relays, paired streams, packet inspection, mana
 - [`CHANGELOG.md`](CHANGELOG.md): History of changes and milestone completions.
 - [`ROADMAP.md`](ROADMAP.md): Sequenced implementation milestones derived from [`FEATURES.yaml`](FEATURES.yaml).
 - [`docs/SPEC.md`](docs/SPEC.md): Master technical specification.
-- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md): YAML configuration format and validation reference.
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md): YAML configuration syntax and the catalog of 6 configuration examples in the examples directory.
 - [`docs/USAGE.md`](docs/USAGE.md): Command-line interface (CLI) usage and execution reference.
 
 ## Building and Testing

@@ -45,6 +45,8 @@ RER is not initially a replacement for a spacecraft ground system, a full networ
 
 ## 3. Licensing and attribution
 
+The project author and copyright holder is Ronald Edward Reeves Jr ([ronaldreeves.com](https://ronaldreeves.com)).
+
 Recommended license: Apache License 2.0.
 
 Before publishing or adding a final license file, ask the owner to confirm the license choice. Until confirmed, prepare the project for Apache-2.0 without falsely claiming that licensing approval has been given.
@@ -55,7 +57,7 @@ The intended policy is:
 - Free use is permitted.
 - Modification, redistribution, and inclusion in commercial products are permitted under the chosen license.
 - Required copyright, license, NOTICE, and attribution information must be preserved as applicable.
-- Clearly identify the original RER project and copyright holder in project documentation.
+- Clearly identify the original RER project and copyright holder (Ronald Edward Reeves Jr, [ronaldreeves.com](https://ronaldreeves.com)) in project documentation.
 - Do not impose custom attribution restrictions that could undermine standard open-source licensing without explicit owner approval and legal advice.
 - Do not promise royalties or control over downstream products unless separately agreed.
 - Track third-party dependencies and their licenses. Avoid incompatible dependencies and retain required notices.

@@ -421,3 +421,61 @@ The management plane provides a read-only diagnostics query operation (`events` 
 ## 10. Safety and Secret Handling
 
 Sensitive fields (such as `auth_token`) are typed as `SecretString` and are masked as `[REDACTED]` when printing effective configuration via `rer validate --effective` or `rer inspect`. Remote management across network interfaces requires authentication and TLS encryption (SPEC §9, §17).
+
+## 11. Configuration Examples Catalog
+
+The repository includes a catalog of 6 configuration examples in the `examples/` directory:
+
+### 1. `minimal.yaml` — Minimal UDP Relay
+
+The simplest valid configuration defining a single relay instance forwarding UDP datagrams:
+- **Instance**: `relay-minimal` operating in `production` mode.
+- **Data Flow**: Ingress UDP stream listening on `127.0.0.1:5000` (`mode: "listen"`) forwarding datagrams to egress UDP destination `127.0.0.1:5001` (`mode: "connect"`).
+- **Use Case**: Quick smoke testing, loopback verification, and baseline forwarding with default buffer bounds and quiet logging.
+
+### 2. `paired_streams.yaml` — Paired Directional Streams
+
+Models command uplink and telemetry downlink as a paired logical interface (SPEC §6):
+- **Instance**: `relay-paired` operating in `debug` mode.
+- **Streams**:
+  - `cmd-uplink`: Command transmission converting TCP listening on `127.0.0.1:6001` to UDP connect at `127.0.0.1:6002`, with a `reject` overload drop policy and bounded queue of 1,024 packets.
+  - `telem-downlink`: Telemetry reception converting UDP listening on `127.0.0.1:7001` to TCP connect at `127.0.0.1:7002`, with a `drop_oldest` overload drop policy and bounded queue of 4,096 packets.
+- **Logical Interface**: `spacecraft-link-0` pairs `cmd-uplink` as `tx_stream` and `telem-downlink` as `rx_stream`.
+- **Key Concept**: Directional pairing establishes operational and administrative context for monitoring. It does not perform in-band packet correlation; TX and RX paths retain independent endpoints, transports, queue bounds, and error accounting.
+
+### 3. `fan_out.yaml` — Multi-Destination Fan-Out
+
+Distributes incoming datagrams from a single ingress endpoint to multiple independent destinations (SPEC §5):
+- **Instance**: `relay-fanout` operating in `production` mode.
+- **Data Flow**: Stream `telem-fanout` listens for UDP on `127.0.0.1:9000` and replicates incoming packets across three destinations concurrently:
+  - UDP to `127.0.0.1:9001` (primary telemetry recorder).
+  - UDP to `127.0.0.1:9002` (real-time operator display).
+  - TCP to `127.0.0.1:9003` (length-prefixed stream observer).
+- **Key Concept**: Egress endpoints are configured via the `destinations` list instead of `destination`. Destination fault isolation ensures network errors or slow consumers on one destination do not block forwarding to the remaining destinations.
+
+### 4. `multi_instance.yaml` — Multi-Instance Topology
+
+Defines multiple independent relay instances within a single configuration file (SPEC §5):
+- **Instance 1**: `relay-gateway-edge` binds an edge UDP receiver on `0.0.0.0:8001`, forwards over TCP to `10.0.1.5:8002`, and exposes an isolated management endpoint on `127.0.0.1:9091`.
+- **Instance 2**: `relay-core-hub` receives the forwarded TCP stream on `0.0.0.0:8002`, redistributes to internal UDP destination `10.0.2.10:8003`, and exposes an isolated management endpoint on `127.0.0.1:9092`.
+- **Key Concept**: Multiple distinct instances run concurrently with isolated queues, separate stream topologies, and independent management listeners.
+
+### 5. `multi_interface.yaml` — Multiple Simultaneous Logical Interfaces
+
+Demonstrates complex ground-station routing with multiple concurrent logical interfaces and fan-out on a single relay instance (SPEC §5, §6):
+- **Instance**: `relay-multi-iface` in `debug` mode.
+- **Logical Interfaces**:
+  - `primary-comm-link`: Paired bidirectional interface linking `primary-cmd-uplink` (TCP to UDP) and `primary-telem-downlink` (UDP to TCP).
+  - `emergency-cmd-link`: Single-direction interface for emergency UHF uplink (`tx_stream: "backup-cmd-uplink"`, UDP to UDP).
+  - `payload-downlink`: Single-direction interface for science payload data (`rx_stream: "science-payload-fanout"`), utilizing fan-out to forward UDP to both `127.0.0.1:8402` and `127.0.0.1:8403`.
+- **Key Concept**: A single relay instance seamlessly handles multiple logical interfaces of differing topologies (paired TX/RX, TX-only, and RX-only with fan-out) without crosstalk.
+
+### 6. `management_auth.yaml` — Authenticated and Encrypted Management Plane
+
+Demonstrates securing the management control plane with authentication and TLS encryption (SPEC §9, §17):
+- **Instance**: `relay-secure-mgmt` with management plane enabled on `127.0.0.1:9443`.
+- **Security Configuration**:
+  - `auth_token`: Bearer token required for all management operations (`SecretString`, masked in effective configuration displays).
+  - `tls`: Configures server TLS certificate (`cert_file`) and private key (`key_file`) paths.
+- **Streams**: Accompanied by standard UDP forwarding on ports 4000 to 4001.
+- **Key Concept**: Remote management across non-loopback network interfaces requires authentication and TLS encryption to prevent unauthorized inspection or control.
