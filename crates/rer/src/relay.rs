@@ -5670,15 +5670,14 @@ instances:
     }
 
     #[test]
-    fn test_kiss_forwarding_preserves_payload_and_records_ax25_metadata() {
+    fn test_kiss_forwarding_preserves_payload_and_records_ax25_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Acceptance criterion: In crates/rer/src/relay.rs, forwarding a KISS data frame on a
         // stream with KISS inspection enabled forwards the payload unmodified to destination
         // endpoints while recording AX.25 metadata in diagnostic events.
-        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
-        dest_sock
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set timeout");
-        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let dest_sock = UdpSocket::bind("127.0.0.1:0")?;
+        dest_sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let dest_port = dest_sock.local_addr()?.port();
         let listen_port = pick_test_port();
 
         let yaml = format!(
@@ -5700,9 +5699,9 @@ instances:
 "#
         );
 
-        let config = Config::from_yaml_str(&yaml).expect("parse config");
-        let relay = Relay::start(&config).expect("start relay");
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let config = Config::from_yaml_str(&yaml).map_err(|e| format!("{e:?}"))?;
+        let relay = Relay::start(&config)?;
+        let sender = UdpSocket::bind("127.0.0.1:0")?;
 
         let dest = crate::ax25::Ax25Address::new("CQ", 0);
         let src = crate::ax25::Ax25Address::new("W1AW", 2);
@@ -5714,23 +5713,20 @@ instances:
             crate::ax25::AX25_CTRL_UI,
             Some(crate::ax25::AX25_PID_NO_LAYER_3),
             b"APRS telemetry message",
-        )
-        .expect("encode ax25 frame");
+        )?;
         let kiss_frame = make_test_kiss_data_frame(0, &ax25_bytes);
 
-        sender
-            .send_to(&kiss_frame, format!("127.0.0.1:{listen_port}"))
-            .expect("send");
+        sender.send_to(&kiss_frame, format!("127.0.0.1:{listen_port}"))?;
 
         let mut buf = vec![0u8; 1024];
-        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        let (n, _) = dest_sock.recv_from(&mut buf)?;
         assert_eq!(
             &buf[..n],
             kiss_frame.as_slice(),
             "payload must be forwarded unmodified to destination"
         );
 
-        let stats = relay.stream_stats("s-kiss-valid").expect("stats");
+        let stats = relay.stream_stats("s-kiss-valid").ok_or("stats")?;
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.forwarded_packets, 1);
         assert_eq!(stats.dropped_packets, 0);
@@ -5744,7 +5740,7 @@ instances:
             insp_ev.is_some(),
             "must emit diagnostic event for KISS inspection"
         );
-        let ev = insp_ev.unwrap();
+        let ev = insp_ev.ok_or("insp_ev")?;
         assert_eq!(ev.kiss_port, Some(0));
         assert_eq!(ev.kiss_command, Some(0));
         assert_eq!(ev.ax25_source_callsign.as_deref(), Some("W1AW"));
@@ -5757,7 +5753,7 @@ instances:
         assert!(ev.kiss_metadata.is_some());
         assert!(ev.ax25_metadata.is_some());
 
-        let ax25_meta = ev.ax25_metadata.as_ref().unwrap();
+        let ax25_meta = ev.ax25_metadata.as_ref().ok_or("ax25_meta")?;
         assert_eq!(ax25_meta.source_callsign, "W1AW");
         assert_eq!(ax25_meta.destination_callsign, "CQ");
         assert_eq!(
@@ -5766,18 +5762,17 @@ instances:
         );
 
         relay.stop();
+        Ok(())
     }
 
     #[test]
-    fn test_kiss_port_filter_mismatch_drops_packet() {
+    fn test_kiss_port_filter_mismatch_drops_packet() -> Result<(), Box<dyn std::error::Error>> {
         // Acceptance criterion: In crates/rer/src/relay.rs, receiving a KISS frame with a
         // port mismatch against the configured port filter drops the packet and increments
         // dropped packet counters.
-        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
-        dest_sock
-            .set_read_timeout(Some(Duration::from_millis(300)))
-            .expect("set timeout");
-        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let dest_sock = UdpSocket::bind("127.0.0.1:0")?;
+        dest_sock.set_read_timeout(Some(Duration::from_millis(300)))?;
+        let dest_port = dest_sock.local_addr()?.port();
         let listen_port = pick_test_port();
 
         let yaml = format!(
@@ -5799,9 +5794,9 @@ instances:
 "#
         );
 
-        let config = Config::from_yaml_str(&yaml).expect("parse config");
-        let relay = Relay::start(&config).expect("start relay");
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let config = Config::from_yaml_str(&yaml).map_err(|e| format!("{e:?}"))?;
+        let relay = Relay::start(&config)?;
+        let sender = UdpSocket::bind("127.0.0.1:0")?;
         let target = format!("127.0.0.1:{listen_port}");
 
         let dest = crate::ax25::Ax25Address::new("CQ", 0);
@@ -5813,18 +5808,17 @@ instances:
             crate::ax25::AX25_CTRL_UI,
             Some(crate::ax25::AX25_PID_NO_LAYER_3),
             b"test payload",
-        )
-        .expect("encode ax25 frame");
+        )?;
 
         // Send with port 0 (does not match filter port 3)
         let mismatch_frame = make_test_kiss_data_frame(0, &ax25_bytes);
-        sender.send_to(&mismatch_frame, &target).expect("send");
+        sender.send_to(&mismatch_frame, &target)?;
 
         let mut buf = vec![0u8; 1024];
         let res = dest_sock.recv_from(&mut buf);
         assert!(res.is_err(), "port mismatch packet must be dropped");
 
-        let stats = relay.stream_stats("s-kiss-port-filter").expect("stats");
+        let stats = relay.stream_stats("s-kiss-port-filter").ok_or("stats")?;
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.forwarded_packets, 0);
         assert_eq!(stats.dropped_packets, 1);
@@ -5836,24 +5830,22 @@ instances:
             .filter(|e| e.stage == DiagnosticStage::Dropped)
             .collect();
         assert_eq!(drops.len(), 1);
-        assert!(drops[0]
-            .reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("port mismatch"));
+        assert!(matches!(
+            drops[0].reason.as_deref(),
+            Some(r) if r.contains("port mismatch")
+        ));
 
         relay.stop();
+        Ok(())
     }
 
     #[test]
-    fn test_kiss_malformed_ax25_dropped_by_default() {
+    fn test_kiss_malformed_ax25_dropped_by_default() -> Result<(), Box<dyn std::error::Error>> {
         // Acceptance criterion: In crates/rer/src/relay.rs, receiving a malformed AX.25 packet
         // on an inspected stream drops the packet by default and increments dropped packet counters.
-        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
-        dest_sock
-            .set_read_timeout(Some(Duration::from_millis(300)))
-            .expect("set timeout");
-        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let dest_sock = UdpSocket::bind("127.0.0.1:0")?;
+        dest_sock.set_read_timeout(Some(Duration::from_millis(300)))?;
+        let dest_port = dest_sock.local_addr()?.port();
         let listen_port = pick_test_port();
 
         let yaml = format!(
@@ -5875,24 +5867,24 @@ instances:
 "#
         );
 
-        let config = Config::from_yaml_str(&yaml).expect("parse config");
-        let relay = Relay::start(&config).expect("start relay");
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let config = Config::from_yaml_str(&yaml).map_err(|e| format!("{e:?}"))?;
+        let relay = Relay::start(&config)?;
+        let sender = UdpSocket::bind("127.0.0.1:0")?;
         let target = format!("127.0.0.1:{listen_port}");
 
         // 1. Truncated AX.25 packet in KISS data frame
         let truncated_pkt = make_test_kiss_data_frame(0, &[1, 2, 3]);
-        sender.send_to(&truncated_pkt, &target).expect("send");
+        sender.send_to(&truncated_pkt, &target)?;
 
         // 2. Corrupted packet not adhering to AX.25 address structure
         let corrupted_pkt = b"not-an-ax25-packet".to_vec();
-        sender.send_to(&corrupted_pkt, &target).expect("send");
+        sender.send_to(&corrupted_pkt, &target)?;
 
         let mut buf = vec![0u8; 1024];
         let res = dest_sock.recv_from(&mut buf);
         assert!(res.is_err(), "malformed packets must be dropped by default");
 
-        let stats = relay.stream_stats("s-kiss-malformed-drop").expect("stats");
+        let stats = relay.stream_stats("s-kiss-malformed-drop").ok_or("stats")?;
         assert_eq!(stats.received_packets, 2);
         assert_eq!(stats.forwarded_packets, 0);
         assert_eq!(stats.dropped_packets, 2);
@@ -5908,18 +5900,17 @@ instances:
         assert!(drops[1].reason.is_some());
 
         relay.stop();
+        Ok(())
     }
 
     #[test]
-    fn test_kiss_malformed_ax25_passthrough_on_error() {
+    fn test_kiss_malformed_ax25_passthrough_on_error() -> Result<(), Box<dyn std::error::Error>> {
         // Acceptance criterion: In crates/rer/src/relay.rs, receiving a malformed AX.25 packet
         // on an inspected stream configured with option passthrough_on_error forwards the payload
         // unmodified to destination endpoints while recording a validation failure event.
-        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
-        dest_sock
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set timeout");
-        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let dest_sock = UdpSocket::bind("127.0.0.1:0")?;
+        dest_sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let dest_port = dest_sock.local_addr()?.port();
         let listen_port = pick_test_port();
 
         let yaml = format!(
@@ -5941,23 +5932,23 @@ instances:
 "#
         );
 
-        let config = Config::from_yaml_str(&yaml).expect("parse config");
-        let relay = Relay::start(&config).expect("start relay");
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let config = Config::from_yaml_str(&yaml).map_err(|e| format!("{e:?}"))?;
+        let relay = Relay::start(&config)?;
+        let sender = UdpSocket::bind("127.0.0.1:0")?;
         let target = format!("127.0.0.1:{listen_port}");
 
         let malformed_pkt = make_test_kiss_data_frame(0, &[0xDE, 0xAD, 0xBE, 0xEF]);
-        sender.send_to(&malformed_pkt, &target).expect("send");
+        sender.send_to(&malformed_pkt, &target)?;
 
         let mut buf = vec![0u8; 1024];
-        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        let (n, _) = dest_sock.recv_from(&mut buf)?;
         assert_eq!(
             &buf[..n],
             malformed_pkt.as_slice(),
             "malformed packet must be forwarded unmodified under passthrough_on_error"
         );
 
-        let stats = relay.stream_stats("s-kiss-passthrough").expect("stats");
+        let stats = relay.stream_stats("s-kiss-passthrough").ok_or("stats")?;
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.forwarded_packets, 1);
         assert_eq!(stats.dropped_packets, 0);
@@ -5970,24 +5961,23 @@ instances:
             .filter(|e| e.stage == DiagnosticStage::Failure)
             .collect();
         assert_eq!(fails.len(), 1);
-        assert!(fails[0]
-            .reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("validation failed"));
+        assert!(matches!(
+            fails[0].reason.as_deref(),
+            Some(r) if r.contains("validation failed")
+        ));
 
         relay.stop();
+        Ok(())
     }
 
     #[test]
-    fn test_kiss_unconfigured_stream_byte_identical_delivery_no_overhead() {
+    fn test_kiss_unconfigured_stream_byte_identical_delivery_no_overhead(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Acceptance criterion: In crates/rer/src/relay.rs, forwarding traffic on a stream without
         // KISS inspection configured delivers datagrams byte-identically without invoking KISS parsing overhead.
-        let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
-        dest_sock
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set timeout");
-        let dest_port = dest_sock.local_addr().expect("dest addr").port();
+        let dest_sock = UdpSocket::bind("127.0.0.1:0")?;
+        dest_sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let dest_port = dest_sock.local_addr()?.port();
         let listen_port = pick_test_port();
 
         let yaml = format!(
@@ -6006,24 +5996,22 @@ instances:
 "#
         );
 
-        let config = Config::from_yaml_str(&yaml).expect("parse config");
-        let relay = Relay::start(&config).expect("start relay");
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let config = Config::from_yaml_str(&yaml).map_err(|e| format!("{e:?}"))?;
+        let relay = Relay::start(&config)?;
+        let sender = UdpSocket::bind("127.0.0.1:0")?;
 
         let raw_payload = b"non-kiss-raw-telemetry-\x00\xFF\x80\x7F".to_vec();
-        sender
-            .send_to(&raw_payload, format!("127.0.0.1:{listen_port}"))
-            .expect("send");
+        sender.send_to(&raw_payload, format!("127.0.0.1:{listen_port}"))?;
 
         let mut buf = vec![0u8; 1024];
-        let (n, _) = dest_sock.recv_from(&mut buf).expect("recv");
+        let (n, _) = dest_sock.recv_from(&mut buf)?;
         assert_eq!(
             &buf[..n],
             raw_payload.as_slice(),
             "unconfigured stream delivers datagrams byte-identically"
         );
 
-        let stats = relay.stream_stats("s-unconfigured-kiss").expect("stats");
+        let stats = relay.stream_stats("s-unconfigured-kiss").ok_or("stats")?;
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.forwarded_packets, 1);
         assert_eq!(stats.dropped_packets, 0);
@@ -6047,14 +6035,16 @@ instances:
         );
 
         relay.stop();
+        Ok(())
     }
 
     #[test]
-    fn test_kiss_tcp_stream_forwarding_with_kiss_framing() {
+    fn test_kiss_tcp_stream_forwarding_with_kiss_framing() -> Result<(), Box<dyn std::error::Error>>
+    {
         // Acceptance criterion / Requirement 1: KISS-over-TCP streams with FramingMode::Kiss,
         // handling FEND delimiters and escape sequences, with AX.25 inspection.
-        let dest_listener = TcpListener::bind("127.0.0.1:0").expect("bind dest listener");
-        let dest_port = dest_listener.local_addr().expect("dest addr").port();
+        let dest_listener = TcpListener::bind("127.0.0.1:0")?;
+        let dest_port = dest_listener.local_addr()?.port();
         let listen_port = pick_test_port();
 
         let yaml = format!(
@@ -6078,18 +6068,15 @@ instances:
 "#
         );
 
-        let config = Config::from_yaml_str(&yaml).expect("parse config");
-        let relay = Relay::start(&config).expect("start relay");
+        let config = Config::from_yaml_str(&yaml).map_err(|e| format!("{e:?}"))?;
+        let relay = Relay::start(&config)?;
 
         // Connect source client to relay
-        let mut client =
-            TcpStream::connect(format!("127.0.0.1:{listen_port}")).expect("connect to relay");
+        let mut client = TcpStream::connect(format!("127.0.0.1:{listen_port}"))?;
 
         // Accept connection at destination
-        let (mut dest_conn, _) = dest_listener.accept().expect("accept at dest");
-        dest_conn
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .expect("set timeout");
+        let (mut dest_conn, _) = dest_listener.accept()?;
+        dest_conn.set_read_timeout(Some(Duration::from_secs(3)))?;
 
         let dest = crate::ax25::Ax25Address::new("CQ", 0);
         let src = crate::ax25::Ax25Address::new("K1ABC", 1);
@@ -6100,8 +6087,7 @@ instances:
             crate::ax25::AX25_CTRL_UI,
             Some(crate::ax25::AX25_PID_NO_LAYER_3),
             b"APRS over TCP with KISS framing",
-        )
-        .expect("encode ax25 frame");
+        )?;
 
         // Packet with embedded FEND (0xC0) and FESC (0xDB) bytes to test escaping
         let mut ax25_with_escapes = ax25_bytes.clone();
@@ -6110,23 +6096,20 @@ instances:
 
         // Encode using KISS framing (FEND ... FEND with escapes)
         let wire_frame = crate::framing::encode_kiss_frame(&kiss_payload);
-        client
-            .write_all(&wire_frame)
-            .expect("send kiss frame over TCP");
-        client.flush().expect("flush client");
+        client.write_all(&wire_frame)?;
+        client.flush()?;
 
         // Read single KISS frame at destination using read_kiss_frame
         let shutdown = std::sync::atomic::AtomicBool::new(false);
-        let received = crate::framing::read_kiss_frame(&mut dest_conn, 1024, &shutdown)
-            .expect("read kiss frame at dest")
-            .expect("expected frame");
+        let received = crate::framing::read_kiss_frame(&mut dest_conn, 1024, &shutdown)?
+            .ok_or("expected frame")?;
 
         assert_eq!(
             received, kiss_payload,
             "TCP forwarding must deliver the un-escaped KISS frame identically"
         );
 
-        let stats = relay.stream_stats("s-kiss-tcp").expect("stats");
+        let stats = relay.stream_stats("s-kiss-tcp").ok_or("stats")?;
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.forwarded_packets, 1);
         assert_eq!(stats.dropped_packets, 0);
@@ -6137,10 +6120,11 @@ instances:
             .iter()
             .find(|e| e.stage == DiagnosticStage::KissInspection);
         assert!(insp_ev.is_some(), "must record KissInspection event");
-        let ev = insp_ev.unwrap();
+        let ev = insp_ev.ok_or("insp_ev")?;
         assert_eq!(ev.ax25_source_callsign.as_deref(), Some("K1ABC"));
         assert_eq!(ev.ax25_destination_callsign.as_deref(), Some("CQ"));
 
         relay.stop();
+        Ok(())
     }
 }
