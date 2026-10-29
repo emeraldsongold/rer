@@ -1307,6 +1307,86 @@ items:
       - The proposal document in docs/proposals explicitly states that full QUIC endpoint termination, TLS decryption, and stateful congestion control are not claimed.
       - The proposal in docs/proposals identifies the smallest first implementation step for in-tree QUIC packet header parsing and Connection ID extraction.
 
+  - id: RER-F-074
+    order: 74
+    title: In-tree Modbus TCP header parser and stream framing
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-068]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. Implement RER-F-068 as a modular, zero-dependency Modbus TCP and DNP3 framing and inspection feature, preserving RER''s role as a transparent engineering relay. Requirements Add Modbus TCP MBAP framing with length validation, transaction IDs, unit IDs, function codes, and exception detection. Add DNP3 FT3 framing with sync detection, CRC validation, station addresses, control flags, and transport/application metadata. Integrate optional address/function-code filtering and diagnostics with existing configuration and relay pipelines. Add comprehensive tests for malformed frames, partial TCP reads, CRC failures, sequence rollover, filtering, and graceful shutdown. Recommendations Implement Modbus TCP framing first as the smallest independently testable milestone. Restrict initial Modbus support to standard MBAP encapsulation; consider RTU-over-TCP separately. Inspect DNP3 link frames independently initially. Defer application-fragment reassembly until a clear diagnostic requirement justifies its buffering complexity. On DNP3 corruption, use bounded byte-by-byte resynchronization with strict size limits and diagnostic counters rather than immediately terminating every connection. Start with explicit address/function-code allowlists; defer range and wildcard syntax. Keep configurations consistent with existing top-level protocol configuration patterns. Preserve zero external dependencies, bounded memory, and byte-for-byte forwarding. Never execute SCADA commands or emulate PLCs. Acceptance Criteria: Framing handles TCP fragmentation correctly, malformed input cannot crash the relay, CRC and length validation are tested, filtering is predictable, and existing relay behavior remains unchanged when inspection is disabled. Implement Modbus first, followed by DNP3 framing, CRC validation, diagnostics, and filtering. This staged approach adds valuable industrial telemetry visibility without turning RER into a SCADA controller. Relevant code: crates/rer/src/framing.rs, crates/rer/src/config.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/modbus.rs, parsing a 7-octet MBAP header with transaction ID 1, protocol ID 0, length 6, unit ID 1, and function code 3 returns an MbapHeader with matching fields.
+      - In crates/rer/src/modbus.rs, parsing an MBAP header with a protocol ID other than 0 returns an error rejecting invalid protocol identifiers.
+      - In crates/rer/src/modbus.rs, parsing an MBAP header declaring a length less than 2 or greater than 254 returns an error indicating an out-of-range length field.
+      - In crates/rer/src/modbus.rs, parsing a frame with function code 0x83 and exception code 0x02 identifies an exception response with illegal data address.
+      - In crates/rer/src/framing.rs, reading a Modbus frame fragmented across multiple 1-byte reads reassembles the complete frame matching the transmitted payload bytes.
+      - In crates/rer/src/framing.rs, reading a Modbus frame declaring a length exceeding max_frame_size returns an invalid data error without allocating the declared length.
+
+  - id: RER-F-075
+    order: 75
+    title: In-tree DNP3 FT3 stream framing and CRC validation
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-074]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. Implement RER-F-068 as a modular, zero-dependency Modbus TCP and DNP3 framing and inspection feature, preserving RER''s role as a transparent engineering relay. Requirements Add Modbus TCP MBAP framing with length validation, transaction IDs, unit IDs, function codes, and exception detection. Add DNP3 FT3 framing with sync detection, CRC validation, station addresses, control flags, and transport/application metadata. Integrate optional address/function-code filtering and diagnostics with existing configuration and relay pipelines. Add comprehensive tests for malformed frames, partial TCP reads, CRC failures, sequence rollover, filtering, and graceful shutdown. Recommendations Implement Modbus TCP framing first as the smallest independently testable milestone. Restrict initial Modbus support to standard MBAP encapsulation; consider RTU-over-TCP separately. Inspect DNP3 link frames independently initially. Defer application-fragment reassembly until a clear diagnostic requirement justifies its buffering complexity. On DNP3 corruption, use bounded byte-by-byte resynchronization with strict size limits and diagnostic counters rather than immediately terminating every connection. Start with explicit address/function-code allowlists; defer range and wildcard syntax. Keep configurations consistent with existing top-level protocol configuration patterns. Preserve zero external dependencies, bounded memory, and byte-for-byte forwarding. Never execute SCADA commands or emulate PLCs. Acceptance Criteria: Framing handles TCP fragmentation correctly, malformed input cannot crash the relay, CRC and length validation are tested, filtering is predictable, and existing relay behavior remains unchanged when inspection is disabled. Implement Modbus first, followed by DNP3 framing, CRC validation, diagnostics, and filtering. This staged approach adds valuable industrial telemetry visibility without turning RER into a SCADA controller. Relevant code: crates/rer/src/framing.rs, crates/rer/src/config.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/dnp3.rs, parsing a 10-octet FT3 header with sync octets 0x05 and 0x64, length 5, control 0xC0, destination address 1, and source address 2 validates the header CRC and extracts the link header fields.
+      - In crates/rer/src/dnp3.rs, calculating the 16-bit CRC over an 8-octet header using polynomial 0xA653 with inverted output produces the matching expected CRC value.
+      - In crates/rer/src/dnp3.rs, parsing a frame with an invalid header CRC returns an error indicating CRC verification failure.
+      - In crates/rer/src/dnp3.rs, parsing an FT3 user data block containing transport control octet 0xC0 extracts first segment flag FIR, final segment flag FIN, and transport sequence number 0.
+      - In crates/rer/src/framing.rs, reading from a TCP stream containing leading noise bytes before sync octets 0x05 and 0x64 scans through up to a bounded limit to synchronize on the valid FT3 frame.
+      - In crates/rer/src/framing.rs, reading a DNP3 frame declaring a length exceeding max_frame_size returns an invalid data error without allocating the declared frame size.
+
+  - id: RER-F-076
+    order: 76
+    title: Modbus and DNP3 stream configuration models and diagnostic telemetry
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-075]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. Implement RER-F-068 as a modular, zero-dependency Modbus TCP and DNP3 framing and inspection feature, preserving RER''s role as a transparent engineering relay. Requirements Add Modbus TCP MBAP framing with length validation, transaction IDs, unit IDs, function codes, and exception detection. Add DNP3 FT3 framing with sync detection, CRC validation, station addresses, control flags, and transport/application metadata. Integrate optional address/function-code filtering and diagnostics with existing configuration and relay pipelines. Add comprehensive tests for malformed frames, partial TCP reads, CRC failures, sequence rollover, filtering, and graceful shutdown. Recommendations Implement Modbus TCP framing first as the smallest independently testable milestone. Restrict initial Modbus support to standard MBAP encapsulation; consider RTU-over-TCP separately. Inspect DNP3 link frames independently initially. Defer application-fragment reassembly until a clear diagnostic requirement justifies its buffering complexity. On DNP3 corruption, use bounded byte-by-byte resynchronization with strict size limits and diagnostic counters rather than immediately terminating every connection. Start with explicit address/function-code allowlists; defer range and wildcard syntax. Keep configurations consistent with existing top-level protocol configuration patterns. Preserve zero external dependencies, bounded memory, and byte-for-byte forwarding. Never execute SCADA commands or emulate PLCs. Acceptance Criteria: Framing handles TCP fragmentation correctly, malformed input cannot crash the relay, CRC and length validation are tested, filtering is predictable, and existing relay behavior remains unchanged when inspection is disabled. Implement Modbus first, followed by DNP3 framing, CRC validation, diagnostics, and filtering. This staged approach adds valuable industrial telemetry visibility without turning RER into a SCADA controller. Relevant code: crates/rer/src/framing.rs, crates/rer/src/config.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/config.rs, deserializing a stream configuration YAML containing option modbus produces a ModbusConfig with enabled set to true.
+      - In crates/rer/src/config.rs, deserializing a stream configuration YAML containing option dnp3 produces a Dnp3Config with validate_crc set to true.
+      - In crates/rer/src/config.rs, validating a configuration where option modbus contains a function code greater than 127 returns a validation error reporting an invalid function code.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent containing Modbus transaction ID, unit ID, and function code produces a JSON object containing the structured Modbus metadata fields.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent containing DNP3 source address, destination address, and control function produces a JSON object containing the structured DNP3 metadata fields.
+      - In crates/rer/src/diagnostics.rs, emitting a DiagnosticEvent with Modbus metadata into a full DiagnosticBuffer drops the event without blocking or panicking.
+
+  - id: RER-F-077
+    order: 77
+    title: Modbus and DNP3 relay forwarding integration and ingress filtering
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-076]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. Implement RER-F-068 as a modular, zero-dependency Modbus TCP and DNP3 framing and inspection feature, preserving RER''s role as a transparent engineering relay. Requirements Add Modbus TCP MBAP framing with length validation, transaction IDs, unit IDs, function codes, and exception detection. Add DNP3 FT3 framing with sync detection, CRC validation, station addresses, control flags, and transport/application metadata. Integrate optional address/function-code filtering and diagnostics with existing configuration and relay pipelines. Add comprehensive tests for malformed frames, partial TCP reads, CRC failures, sequence rollover, filtering, and graceful shutdown. Recommendations Implement Modbus TCP framing first as the smallest independently testable milestone. Restrict initial Modbus support to standard MBAP encapsulation; consider RTU-over-TCP separately. Inspect DNP3 link frames independently initially. Defer application-fragment reassembly until a clear diagnostic requirement justifies its buffering complexity. On DNP3 corruption, use bounded byte-by-byte resynchronization with strict size limits and diagnostic counters rather than immediately terminating every connection. Start with explicit address/function-code allowlists; defer range and wildcard syntax. Keep configurations consistent with existing top-level protocol configuration patterns. Preserve zero external dependencies, bounded memory, and byte-for-byte forwarding. Never execute SCADA commands or emulate PLCs. Acceptance Criteria: Framing handles TCP fragmentation correctly, malformed input cannot crash the relay, CRC and length validation are tested, filtering is predictable, and existing relay behavior remains unchanged when inspection is disabled. Implement Modbus first, followed by DNP3 framing, CRC validation, diagnostics, and filtering. This staged approach adds valuable industrial telemetry visibility without turning RER into a SCADA controller. Relevant code: crates/rer/src/framing.rs, crates/rer/src/config.rs, crates/rer/src/diagnostics.rs.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a valid Modbus TCP packet on a stream with Modbus inspection enabled transmits the payload unmodified to destination endpoints while recording Modbus metadata in diagnostic events.
+      - In crates/rer/src/relay.rs, receiving a Modbus packet with a unit ID not matching the configured unit ID allowlist drops the packet and increments dropped packet counters.
+      - In crates/rer/src/relay.rs, receiving a malformed Modbus packet on an inspected stream drops the packet by default and increments dropped packet counters.
+      - In crates/rer/src/relay.rs, receiving a malformed Modbus packet on an inspected stream configured with option passthrough_on_error forwards the payload unmodified to destination endpoints while recording a validation failure event.
+      - In crates/rer/src/relay.rs, receiving a DNP3 packet with a destination address not matching the configured destination allowlist drops the packet and increments dropped packet counters.
+      - In crates/rer/src/relay.rs, forwarding traffic on a stream without industrial protocol inspection configured delivers datagrams byte-identically without invoking Modbus or DNP3 parsing overhead.
+
   - id: RER-T-001
     kind: track
     order: 101
