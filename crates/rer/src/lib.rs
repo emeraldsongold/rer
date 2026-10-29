@@ -18,6 +18,7 @@ pub mod mavlink;
 pub mod mqtt;
 pub mod relay;
 pub mod replay;
+pub mod rtp;
 pub mod secret;
 pub mod signals;
 pub mod sim;
@@ -151,6 +152,16 @@ pub use srt::{
     SRT_HANDSHAKE_MIN_LEN, SRT_HANDSHAKE_PAYLOAD_LEN, SRT_HEADER_LEN, SRT_HS_AGREEMENT,
     SRT_HS_CONCLUSION, SRT_HS_DONE, SRT_HS_INDUCTION, SRT_HS_WAVEAHAND, SRT_VERSION_5,
     UDT_VERSION_4,
+};
+
+pub use rtp::{
+    encode_rtp_header, evaluate_payload as evaluate_rtp_payload_status, evaluate_rtp_header,
+    evaluate_rtp_payload, parse_header as parse_rtp_header_alias,
+    parse_packet as parse_rtp_packet_alias, parse_rtp, parse_rtp_header, parse_rtp_packet,
+    RtpEndpointSequenceTracker, RtpHeader, RtpHeaderExtension, RtpMultiSequenceTracker, RtpPacket,
+    RtpParseError, RtpParseStatus, RtpSequenceTracker, RtpSessionSequenceTracker,
+    RtpSourceSequenceTracker, RtpSsrcSequenceTracker, RtpStreamSequenceTracker,
+    RTP_FIXED_HEADER_LEN, RTP_HEADER_LEN, RTP_MAX_CSRC_COUNT, RTP_SEQUENCE_MODULUS, RTP_VERSION_2,
 };
 
 /// Returns the current version of RER.
