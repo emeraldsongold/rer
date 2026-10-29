@@ -83,6 +83,10 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 | 71 | RER-F-071 | RTP stream configuration and relay inspection diagnostics | BACKLOG | feature | medium | needs-impl-approval | RER-F-070 | §5, §8, §14 |
 | 72 | RER-F-072 | IPv4 and IPv6 multicast socket membership and egress configuration | BACKLOG | feature | medium | needs-impl-approval | RER-F-071 | §5, §8, §14 |
 | 73 | RER-F-073 | RTP and multicast integration tests and platform documentation | BACKLOG | feature | low | needs-impl-approval | RER-F-072 | §5, §8, §14 |
+| 74 | RER-F-074 | In-tree Modbus TCP header parser and stream framing | BACKLOG | feature | low | needs-impl-approval | RER-F-068 | §5, §8, §14 |
+| 75 | RER-F-075 | In-tree DNP3 FT3 stream framing and CRC validation | BACKLOG | feature | low | needs-impl-approval | RER-F-074 | §5, §8, §14 |
+| 76 | RER-F-076 | Modbus and DNP3 stream configuration models and diagnostic telemetry | BACKLOG | feature | low | needs-impl-approval | RER-F-075 | §5, §8, §14 |
+| 77 | RER-F-077 | Modbus and DNP3 relay forwarding integration and ingress filtering | BACKLOG | feature | medium | needs-impl-approval | RER-F-076 | §5, §8, §14 |
 | 78 | RER-F-078 | In-tree QUIC packet header parser and variable-length integer codec | BACKLOG | feature | low | needs-impl-approval | RER-F-069 | §8, §14 |
 | 79 | RER-F-079 | QUIC stream configuration model and diagnostic event telemetry | BACKLOG | feature | medium | needs-impl-approval | RER-F-078 | §8, §14 |
 | 80 | RER-F-080 | QUIC UDP relay forwarding integration and policy filtering | BACKLOG | feature | medium | needs-impl-approval | RER-F-079 | §8, §14 |
@@ -98,7 +102,7 @@ criteria live in `FEATURES.yaml`; `§` references point into `docs/SPEC.md`.
 
 One valid implementation order that respects every dependency:
 
-RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-039 → RER-F-040 → RER-F-041 → RER-F-042 → RER-F-043 → RER-F-044 → RER-F-045 → RER-F-046 → RER-F-047 → RER-F-048 → RER-F-049 → RER-F-050 → RER-F-051 → RER-F-052 → RER-F-053 → RER-F-054 → RER-F-055 → RER-F-056 → RER-F-057 → RER-F-058 → RER-F-059 → RER-F-060 → RER-F-061 → RER-F-062 → RER-F-063 → RER-F-064 → RER-F-065 → RER-F-066 → RER-F-067 → RER-F-068 → RER-F-069 → RER-F-070 → RER-F-071 → RER-F-072 → RER-F-073 → RER-F-078 → RER-F-079 → RER-F-080
+RER-F-001 → RER-F-002 → RER-F-003 → RER-F-004 → RER-F-005 → RER-F-006 → RER-F-007 → RER-F-008 → RER-F-012 → RER-F-013 → RER-F-014 → RER-F-015 → RER-F-018 → RER-F-022 → RER-F-023 → RER-F-024 → RER-F-025 → RER-F-026 → RER-F-027 → RER-F-009 → RER-F-016 → RER-F-028 → RER-F-010 → RER-F-011 → RER-F-017 → RER-F-019 → RER-F-020 → RER-F-021 → RER-F-029 → RER-F-030 → RER-F-031 → RER-F-032 → RER-F-033 → RER-F-034 → RER-F-035 → RER-F-036 → RER-F-037 → RER-F-038 → RER-F-039 → RER-F-040 → RER-F-041 → RER-F-042 → RER-F-043 → RER-F-044 → RER-F-045 → RER-F-046 → RER-F-047 → RER-F-048 → RER-F-049 → RER-F-050 → RER-F-051 → RER-F-052 → RER-F-053 → RER-F-054 → RER-F-055 → RER-F-056 → RER-F-057 → RER-F-058 → RER-F-059 → RER-F-060 → RER-F-061 → RER-F-062 → RER-F-063 → RER-F-064 → RER-F-065 → RER-F-066 → RER-F-067 → RER-F-068 → RER-F-069 → RER-F-070 → RER-F-071 → RER-F-072 → RER-F-073 → RER-F-074 → RER-F-075 → RER-F-076 → RER-F-077 → RER-F-078 → RER-F-079 → RER-F-080
 
 ## Owner approval gates
 
