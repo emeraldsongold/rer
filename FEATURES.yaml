@@ -1307,6 +1307,83 @@ items:
       - The proposal document in docs/proposals explicitly states that full QUIC endpoint termination, TLS decryption, and stateful congestion control are not claimed.
       - The proposal in docs/proposals identifies the smallest first implementation step for in-tree QUIC packet header parsing and Connection ID extraction.
 
+  - id: RER-F-070
+    order: 70
+    title: In-tree RTP packet header parser and sequence tracker
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-067]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 1 of 4 of one request. Implement RER-F-067 as a modular RTP inspection and IP multicast feature while preserving RER''s lightweight, transparent relay architecture. Requirements Add a zero-dependency RTP parser supporting version, payload type, marker, sequence number, timestamp, SSRC, CSRC lists, and header extensions. Add IPv4/IPv6 multicast membership, configurable interfaces, and egress settings using existing socket APIs. Integrate sequence tracking and multicast status with existing non-blocking diagnostics. Test malformed headers, extensions, sequence rollover, multicast configuration, and forwarding integrity. Recommendations Implement RTP inspection first, followed by multicast support as a separate stage. Distinguish sequence gaps from confirmed packet loss; account for reordering, duplicates, and rollover. Validate all header lengths, CSRC counts, extensions, and padding before accessing packet contents. Document platform-specific multicast limitations and support source-specific multicast only where practical. Make TTL/hop limits, interface selection, and loopback configurable. Preserve packets byte-for-byte. Keep RTCP session management, RTSP, media decoding, and routing-daemon functionality out of scope. Avoid unnecessary dependencies and maintain license compatibility. Acceptance Criteria: Inspection is opt-in, malformed packets cannot crash the relay, diagnostics remain bounded and non-blocking, multicast membership is managed correctly, and existing unicast behavior remains unchanged. Implement the parser and tests first, then multicast support and platform-specific integration tests. This adds valuable real-time stream diagnostics without expanding RER into a media server. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/src/rtp.rs, parsing a 12-byte buffer with version 2, payload type 96, sequence number 1000, timestamp 160000, and SSRC 0x12345678 returns an RtpHeader with matching field values.
+      - In crates/rer/src/rtp.rs, parsing a buffer shorter than 12 bytes returns an error indicating a truncated header.
+      - In crates/rer/src/rtp.rs, parsing a buffer with version field set to 0, 1, or 3 returns an error indicating an unsupported version.
+      - In crates/rer/src/rtp.rs, parsing a buffer declaring a CSRC count of 2 but containing fewer than 8 bytes of CSRC data returns an error indicating a truncated CSRC list.
+      - In crates/rer/src/rtp.rs, parsing a buffer with extension flag set and a valid 4-byte extension header extracts the extension profile identifier and extension data bytes.
+      - In crates/rer/src/rtp.rs, sequence tracking receiving sequence number 0 immediately following sequence number 65535 records a sequence rollover event without reporting packet loss.
+
+  - id: RER-F-071
+    order: 71
+    title: RTP stream configuration and relay inspection diagnostics
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-070]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 2 of 4 of one request. Implement RER-F-067 as a modular RTP inspection and IP multicast feature while preserving RER''s lightweight, transparent relay architecture. Requirements Add a zero-dependency RTP parser supporting version, payload type, marker, sequence number, timestamp, SSRC, CSRC lists, and header extensions. Add IPv4/IPv6 multicast membership, configurable interfaces, and egress settings using existing socket APIs. Integrate sequence tracking and multicast status with existing non-blocking diagnostics. Test malformed headers, extensions, sequence rollover, multicast configuration, and forwarding integrity. Recommendations Implement RTP inspection first, followed by multicast support as a separate stage. Distinguish sequence gaps from confirmed packet loss; account for reordering, duplicates, and rollover. Validate all header lengths, CSRC counts, extensions, and padding before accessing packet contents. Document platform-specific multicast limitations and support source-specific multicast only where practical. Make TTL/hop limits, interface selection, and loopback configurable. Preserve packets byte-for-byte. Keep RTCP session management, RTSP, media decoding, and routing-daemon functionality out of scope. Avoid unnecessary dependencies and maintain license compatibility. Acceptance Criteria: Inspection is opt-in, malformed packets cannot crash the relay, diagnostics remain bounded and non-blocking, multicast membership is managed correctly, and existing unicast behavior remains unchanged. Implement the parser and tests first, then multicast support and platform-specific integration tests. This adds valuable real-time stream diagnostics without expanding RER into a media server. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/src/config.rs, deserializing a YAML configuration with an rtp mapping on a stream populates RtpConfig with default enabled set to true.
+      - In crates/rer/src/config.rs, calling validate on a Config containing an RtpConfig with payload_type value 128 returns a ValidationError reporting an invalid payload type.
+      - In crates/rer/src/relay.rs, calling process_rtp_ingress with an invalid 4-byte datagram payload drops the datagram and increments drops_validation on StreamStats.
+      - In crates/rer/src/relay.rs, calling process_rtp_ingress with an invalid datagram on a stream where passthrough_on_error is true forwards the datagram payload unmodified and records a validation failure event.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent containing RTP sequence number 1000 and payload type 96 produces a JSON object containing the structured RTP metadata fields.
+
+  - id: RER-F-072
+    order: 72
+    title: IPv4 and IPv6 multicast socket membership and egress configuration
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-071]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 3 of 4 of one request. Implement RER-F-067 as a modular RTP inspection and IP multicast feature while preserving RER''s lightweight, transparent relay architecture. Requirements Add a zero-dependency RTP parser supporting version, payload type, marker, sequence number, timestamp, SSRC, CSRC lists, and header extensions. Add IPv4/IPv6 multicast membership, configurable interfaces, and egress settings using existing socket APIs. Integrate sequence tracking and multicast status with existing non-blocking diagnostics. Test malformed headers, extensions, sequence rollover, multicast configuration, and forwarding integrity. Recommendations Implement RTP inspection first, followed by multicast support as a separate stage. Distinguish sequence gaps from confirmed packet loss; account for reordering, duplicates, and rollover. Validate all header lengths, CSRC counts, extensions, and padding before accessing packet contents. Document platform-specific multicast limitations and support source-specific multicast only where practical. Make TTL/hop limits, interface selection, and loopback configurable. Preserve packets byte-for-byte. Keep RTCP session management, RTSP, media decoding, and routing-daemon functionality out of scope. Avoid unnecessary dependencies and maintain license compatibility. Acceptance Criteria: Inspection is opt-in, malformed packets cannot crash the relay, diagnostics remain bounded and non-blocking, multicast membership is managed correctly, and existing unicast behavior remains unchanged. Implement the parser and tests first, then multicast support and platform-specific integration tests. This adds valuable real-time stream diagnostics without expanding RER into a media server. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/src/config.rs, calling validate on a Config where an endpoint with transport set to TransportType::Tcp specifies a multicast address returns a ValidationError rejecting multicast over TCP.
+      - In crates/rer/src/config.rs, calling validate on a Config containing a MulticastConfig with a ttl value of 0 returns a ValidationError rejecting an out-of-range TTL.
+      - In crates/rer/src/relay.rs, calling bind_udp_socket with IPv4 multicast address 239.255.0.1 joins the multicast group on the specified interface using join_multicast_v4.
+      - In crates/rer/src/relay.rs, calling bind_udp_socket with IPv6 multicast address ff02::1 joins the multicast group on the interface using join_multicast_v6.
+      - In crates/rer/src/relay.rs, forwarding a datagram to an IPv4 multicast destination endpoint applies the configured multicast time-to-live to the egress socket while preserving datagram payload bytes.
+
+  - id: RER-F-073
+    order: 73
+    title: RTP and multicast integration tests and platform documentation
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-072]
+    spec_refs: [§5, §8, §14]
+    test_profile: standard
+    notes: 'Part 4 of 4 of one request. Implement RER-F-067 as a modular RTP inspection and IP multicast feature while preserving RER''s lightweight, transparent relay architecture. Requirements Add a zero-dependency RTP parser supporting version, payload type, marker, sequence number, timestamp, SSRC, CSRC lists, and header extensions. Add IPv4/IPv6 multicast membership, configurable interfaces, and egress settings using existing socket APIs. Integrate sequence tracking and multicast status with existing non-blocking diagnostics. Test malformed headers, extensions, sequence rollover, multicast configuration, and forwarding integrity. Recommendations Implement RTP inspection first, followed by multicast support as a separate stage. Distinguish sequence gaps from confirmed packet loss; account for reordering, duplicates, and rollover. Validate all header lengths, CSRC counts, extensions, and padding before accessing packet contents. Document platform-specific multicast limitations and support source-specific multicast only where practical. Make TTL/hop limits, interface selection, and loopback configurable. Preserve packets byte-for-byte. Keep RTCP session management, RTSP, media decoding, and routing-daemon functionality out of scope. Avoid unnecessary dependencies and maintain license compatibility. Acceptance Criteria: Inspection is opt-in, malformed packets cannot crash the relay, diagnostics remain bounded and non-blocking, multicast membership is managed correctly, and existing unicast behavior remains unchanged. Implement the parser and tests first, then multicast support and platform-specific integration tests. This adds valuable real-time stream diagnostics without expanding RER into a media server. Relevant code: crates/rer/src/config.rs, crates/rer/src/diagnostics.rs, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/tests/rtp_multicast_integration_tests.rs, forwarding 100 consecutive RTP datagrams across a relay stream verifies that the destination receives the exact payload bytes of the transmitted packets.
+      - In crates/rer/tests/rtp_multicast_integration_tests.rs, streaming RTP packets through sequence number 65535 to sequence number 0 verifies that sequence rollover is tracked without incrementing gap counters.
+      - In crates/rer/tests/rtp_multicast_integration_tests.rs, sending a truncated 8-byte datagram to a stream with RTP inspection enabled verifies that the packet is dropped and not delivered to the destination.
+      - In crates/rer/tests/rtp_multicast_integration_tests.rs, sending a truncated 8-byte datagram to an inspected stream configured with passthrough_on_error set to true forwards the datagram to the destination.
+      - In PLATFORM_SUPPORT.md, a dedicated section documents operating system multicast limitations including Source-Specific Multicast kernel support and container loopback multicast constraints.
+
   - id: RER-F-074
     order: 74
     title: In-tree Modbus TCP header parser and stream framing
