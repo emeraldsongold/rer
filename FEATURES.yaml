@@ -1384,6 +1384,65 @@ items:
       - In crates/rer/tests/rtp_multicast_integration_tests.rs, sending a truncated 8-byte datagram to an inspected stream configured with passthrough_on_error set to true forwards the datagram to the destination.
       - In PLATFORM_SUPPORT.md, a dedicated section documents operating system multicast limitations including Source-Specific Multicast kernel support and container loopback multicast constraints.
 
+  - id: RER-F-078
+    order: 78
+    title: In-tree QUIC packet header parser and variable-length integer codec
+    type: feature
+    priority: P2
+    risk: low
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-069]
+    spec_refs: [§8, §14]
+    test_profile: fast
+    notes: 'Part 1 of 3 of one request. Implement RER-F-069 as a modular, zero-dependency QUIC packet inspection feature, preserving RER''s transparent UDP relay architecture. Requirements Parse QUIC long headers to extract version, packet type, Destination Connection ID (DCID), and Source Connection ID (SCID). Detect Version Negotiation packets and validate header lengths. Support short-header inspection only when the expected DCID length is explicitly configured. Integrate structured QUIC metadata and parse status into existing diagnostics. Add optional filtering by connection ID, version, and packet type, with explicit malformed-packet handling. Recommendations Keep inspection opt-in and forward packets byte-for-byte when permitted. Default to forwarding malformed or unrecognized datagrams with diagnostic warnings; dropping should require explicit configuration. Do not claim to inspect encrypted payloads or recover protected packet numbers. Short-header bits are protected by header protection, limiting what passive inspection can reliably determine. Treat connection IDs as sensitive metadata; provide redaction options and avoid logging unnecessarily. Enforce strict bounds checking, validate hexadecimal configuration, and prevent malformed packets from causing panics or excessive processing. Keep QUIC termination, TLS decryption, stream reassembly, and active connection management out of scope. Acceptance Criteria: Zero new dependencies, bounded processing, correct long-header parsing, configurable short-header DCID extraction, accurate diagnostics, and unchanged forwarding when inspection is disabled. Implement the parser and unit tests first, then diagnostics and filtering. This adds useful visibility into modern encrypted UDP traffic without turning RER into a QUIC endpoint. Relevant code: FEATURES.yaml, docs/proposals/RER-F-069.md, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/src/quic.rs, decoding a QUIC variable-length integer from byte buffer [0x40, 0x25] returns a decoded value of 37 and 2 bytes consumed.
+      - In crates/rer/src/quic.rs, parsing a Long Header packet with first byte 0xC0, 32-bit version 0x00000001, an 8-byte Destination Connection ID, and an 8-byte Source Connection ID returns decoded packet type Initial, version 1, and the extracted connection identifiers.
+      - In crates/rer/src/quic.rs, parsing a Long Header packet with first byte 0x80 and 32-bit version 0x00000000 returns decoded packet type Version Negotiation and extracts the list of supported 32-bit versions.
+      - In crates/rer/src/quic.rs, parsing a Short Header packet with first byte 0x40 when expected Destination Connection ID length is configured to 8 bytes returns decoded packet type Short and extracts the 8-byte Destination Connection ID.
+      - In crates/rer/src/quic.rs, parsing a Short Header packet with first byte 0x40 when expected Destination Connection ID length is not configured returns decoded packet type Short without extracting a Destination Connection ID.
+      - In crates/rer/src/quic.rs, parsing a Long Header packet declaring a Destination Connection ID length of 21 bytes returns an error rejecting connection identifiers exceeding 20 bytes.
+
+  - id: RER-F-079
+    order: 79
+    title: QUIC stream configuration model and diagnostic event telemetry
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-078]
+    spec_refs: [§8, §14]
+    test_profile: standard
+    notes: 'Part 2 of 3 of one request. Implement RER-F-069 as a modular, zero-dependency QUIC packet inspection feature, preserving RER''s transparent UDP relay architecture. Requirements Parse QUIC long headers to extract version, packet type, Destination Connection ID (DCID), and Source Connection ID (SCID). Detect Version Negotiation packets and validate header lengths. Support short-header inspection only when the expected DCID length is explicitly configured. Integrate structured QUIC metadata and parse status into existing diagnostics. Add optional filtering by connection ID, version, and packet type, with explicit malformed-packet handling. Recommendations Keep inspection opt-in and forward packets byte-for-byte when permitted. Default to forwarding malformed or unrecognized datagrams with diagnostic warnings; dropping should require explicit configuration. Do not claim to inspect encrypted payloads or recover protected packet numbers. Short-header bits are protected by header protection, limiting what passive inspection can reliably determine. Treat connection IDs as sensitive metadata; provide redaction options and avoid logging unnecessarily. Enforce strict bounds checking, validate hexadecimal configuration, and prevent malformed packets from causing panics or excessive processing. Keep QUIC termination, TLS decryption, stream reassembly, and active connection management out of scope. Acceptance Criteria: Zero new dependencies, bounded processing, correct long-header parsing, configurable short-header DCID extraction, accurate diagnostics, and unchanged forwarding when inspection is disabled. Implement the parser and unit tests first, then diagnostics and filtering. This adds useful visibility into modern encrypted UDP traffic without turning RER into a QUIC endpoint. Relevant code: FEATURES.yaml, docs/proposals/RER-F-069.md, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/src/config.rs, configuring option quic deserializes into QuicConfig with default inspection settings.
+      - In crates/rer/src/config.rs, configuring option fixed_short_dcid_len with value 21 returns a configuration validation error rejecting lengths exceeding 20 bytes.
+      - In crates/rer/src/config.rs, configuring option filter_connection_ids with a non-hexadecimal string returns a configuration validation error.
+      - In crates/rer/src/config.rs, configuring option quic on a stream whose source transport is TCP returns a configuration validation error requiring UDP transport.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent populated with QUIC packet type Initial, version 1, and Destination Connection ID emits a JSON object containing the structured QUIC metadata fields.
+      - In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent when option redact_connection_ids is enabled redacts connection identifier strings in the emitted diagnostic event.
+
+  - id: RER-F-080
+    order: 80
+    title: QUIC UDP relay forwarding integration and policy filtering
+    type: feature
+    priority: P2
+    risk: medium
+    autonomy: needs-impl-approval
+    approvals_required: []
+    depends_on: [RER-F-079]
+    spec_refs: [§8, §14]
+    test_profile: standard
+    notes: 'Part 3 of 3 of one request. Implement RER-F-069 as a modular, zero-dependency QUIC packet inspection feature, preserving RER''s transparent UDP relay architecture. Requirements Parse QUIC long headers to extract version, packet type, Destination Connection ID (DCID), and Source Connection ID (SCID). Detect Version Negotiation packets and validate header lengths. Support short-header inspection only when the expected DCID length is explicitly configured. Integrate structured QUIC metadata and parse status into existing diagnostics. Add optional filtering by connection ID, version, and packet type, with explicit malformed-packet handling. Recommendations Keep inspection opt-in and forward packets byte-for-byte when permitted. Default to forwarding malformed or unrecognized datagrams with diagnostic warnings; dropping should require explicit configuration. Do not claim to inspect encrypted payloads or recover protected packet numbers. Short-header bits are protected by header protection, limiting what passive inspection can reliably determine. Treat connection IDs as sensitive metadata; provide redaction options and avoid logging unnecessarily. Enforce strict bounds checking, validate hexadecimal configuration, and prevent malformed packets from causing panics or excessive processing. Keep QUIC termination, TLS decryption, stream reassembly, and active connection management out of scope. Acceptance Criteria: Zero new dependencies, bounded processing, correct long-header parsing, configurable short-header DCID extraction, accurate diagnostics, and unchanged forwarding when inspection is disabled. Implement the parser and unit tests first, then diagnostics and filtering. This adds useful visibility into modern encrypted UDP traffic without turning RER into a QUIC endpoint. Relevant code: FEATURES.yaml, docs/proposals/RER-F-069.md, docs/SPEC.md.'
+    acceptance:
+      - In crates/rer/src/relay.rs, forwarding a valid QUIC Initial packet on a UDP stream with QUIC inspection enabled transmits the datagram unmodified to destination endpoints while recording packet type Initial and connection identifiers in diagnostic events.
+      - In crates/rer/src/relay.rs, receiving a malformed QUIC packet on an inspected UDP stream drops the datagram by default, increments dropped packet counters, and emits a dropped diagnostic event.
+      - In crates/rer/src/relay.rs, receiving a malformed QUIC packet on an inspected UDP stream when passthrough on error is configured forwards the datagram unmodified to destination endpoints while emitting a diagnostic warning event.
+      - In crates/rer/src/relay.rs, receiving a QUIC packet whose Destination Connection ID does not match any entry in the configured Connection ID allowlist drops the datagram and records a filtering drop event.
+      - In crates/rer/src/relay.rs, forwarding UDP datagrams on a stream without QUIC inspection enabled transmits datagrams byte-for-byte without invoking QUIC parsing.
+
   - id: RER-T-001
     kind: track
     order: 101
