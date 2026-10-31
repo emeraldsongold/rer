@@ -301,6 +301,14 @@ pub struct StreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mavlink: Option<MavlinkConfig>,
 
+    /// Optional RTP packet inspection, validation, and sequence tracking configuration (SPEC §5, §8, §14). Off by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_rtp_config"
+    )]
+    pub rtp: Option<RtpConfig>,
+
     /// Optional MQTT packet inspection and framing configuration (SPEC §5, §8, §14). Off by default.
     #[serde(
         default,
@@ -593,6 +601,99 @@ impl MavlinkConfig {
     pub fn is_sequence_tracking_enabled(&self) -> bool {
         self.enabled && self.track_sequences
     }
+}
+
+/// Configuration for RTP packet inspection, validation, and sequence tracking (SPEC §5, §8, §14).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RtpConfig {
+    /// Enable RTP packet inspection and validation. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Optional expected payload type (0 to 127).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_type: Option<u8>,
+
+    /// Track sequence continuity independently per SSRC. Defaults to true.
+    #[serde(
+        default = "default_true",
+        alias = "sequence_tracking",
+        alias = "track_sequence"
+    )]
+    pub track_sequences: bool,
+
+    /// When true, datagrams failing RTP validation are forwarded unchanged to destination. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+}
+
+impl Default for RtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            payload_type: None,
+            track_sequences: true,
+            passthrough_on_error: false,
+        }
+    }
+}
+
+impl RtpConfig {
+    /// Returns true if sequence tracking is enabled for RTP.
+    #[must_use]
+    pub fn is_sequence_tracking_enabled(&self) -> bool {
+        self.enabled && self.track_sequences
+    }
+}
+
+fn deserialize_optional_rtp_config<'de, D>(deserializer: D) -> Result<Option<RtpConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RtpConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for RtpConfigVisitor {
+        type Value = Option<RtpConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean, null, or an RTP configuration mapping")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(RtpConfig::default()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(RtpConfig::default()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(RtpConfig {
+                enabled: v,
+                ..RtpConfig::default()
+            }))
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let config = RtpConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(config))
+        }
+    }
+
+    deserializer.deserialize_any(RtpConfigVisitor)
 }
 
 /// Configuration for CCSDS Space Packet parsing, validation, and sequence tracking (SPEC §14).
@@ -1475,6 +1576,51 @@ impl Config {
                                     reason: "invalid component ID 0: MAVLink component ID must be between 1 and 255".to_string(),
                                 });
                             }
+                        }
+                    }
+                }
+
+                // Validate RTP configuration and check conflicting sequence tracking
+                if let Some(ref rtp) = stream.rtp {
+                    let rtp_seq_enabled = rtp.enabled && rtp.track_sequences;
+                    let generic_seq_enabled = stream.sequence.as_ref().is_some_and(|s| s.enabled);
+
+                    if rtp_seq_enabled && generic_seq_enabled {
+                        errors.push(ValidationError {
+                            path: format!("{}.rtp.track_sequences", stream_prefix),
+                            reason: "conflicting sequence tracking: both RTP sequence tracking and generic sequence tracking cannot be enabled simultaneously".to_string(),
+                        });
+                    }
+
+                    if let Some(ref ccsds) = stream.ccsds {
+                        let ccsds_seq_enabled = ccsds.enabled && ccsds.track_sequences;
+                        if rtp_seq_enabled && ccsds_seq_enabled {
+                            errors.push(ValidationError {
+                                path: format!("{}.rtp.track_sequences", stream_prefix),
+                                reason: "conflicting sequence tracking: both RTP sequence tracking and CCSDS sequence tracking cannot be enabled simultaneously".to_string(),
+                            });
+                        }
+                    }
+
+                    if let Some(ref mavlink) = stream.mavlink {
+                        let mavlink_seq_enabled = mavlink.enabled && mavlink.track_sequences;
+                        if rtp_seq_enabled && mavlink_seq_enabled {
+                            errors.push(ValidationError {
+                                path: format!("{}.rtp.track_sequences", stream_prefix),
+                                reason: "conflicting sequence tracking: both RTP sequence tracking and MAVLink sequence tracking cannot be enabled simultaneously".to_string(),
+                            });
+                        }
+                    }
+
+                    if let Some(pt) = rtp.payload_type {
+                        if pt > 127 {
+                            errors.push(ValidationError {
+                                path: format!("{}.rtp.payload_type", stream_prefix),
+                                reason: format!(
+                                    "invalid payload type {}: RTP payload type must be between 0 and 127",
+                                    pt
+                                ),
+                            });
                         }
                     }
                 }
@@ -2512,5 +2658,123 @@ instances:
         assert_eq!(stream.source.address, "127.0.0.1:5000");
         assert_eq!(stream.source_framing(), FramingMode::LengthPrefix);
         assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn test_criterion1_rtp_config_yaml_deserialization_defaults_enabled_true() {
+        // Acceptance criterion: In crates/rer/src/config.rs, deserializing a YAML configuration
+        // with an rtp mapping on a stream populates RtpConfig with default enabled set to true.
+        let yaml_mapping = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        rtp: {}
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml_mapping).expect("valid config with rtp mapping");
+        let stream = &config.instances[0].streams[0];
+        let rtp = stream.rtp.as_ref().expect("rtp config present");
+        assert!(rtp.enabled);
+        assert!(rtp.track_sequences);
+        assert!(!rtp.passthrough_on_error);
+        assert_eq!(rtp.payload_type, None);
+
+        // Also test with fields specified in mapping
+        let yaml_with_fields = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        rtp:
+          payload_type: 96
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+"#;
+        let config2 =
+            Config::from_yaml_str(yaml_with_fields).expect("valid config with rtp payload_type");
+        let rtp2 = config2.instances[0].streams[0]
+            .rtp
+            .as_ref()
+            .expect("rtp config present");
+        assert!(rtp2.enabled);
+        assert_eq!(rtp2.payload_type, Some(96));
+        assert!(rtp2.track_sequences);
+        assert!(!rtp2.passthrough_on_error);
+
+        // Also test unit rtp:
+        let yaml_unit = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        rtp:
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+"#;
+        let config3 = Config::from_yaml_str(yaml_unit).expect("valid config with unit rtp");
+        let rtp3 = config3.instances[0].streams[0]
+            .rtp
+            .as_ref()
+            .expect("rtp config present");
+        assert!(rtp3.enabled);
+    }
+
+    #[test]
+    fn test_criterion2_rtp_config_validation_invalid_payload_type() {
+        // Acceptance criterion: In crates/rer/src/config.rs, calling validate on a Config
+        // containing an RtpConfig with payload_type value 128 returns a ValidationError
+        // reporting an invalid payload type.
+        let yaml = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        rtp:
+          payload_type: 128
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml).expect("deserializes successfully");
+        assert_eq!(
+            config.instances[0].streams[0]
+                .rtp
+                .as_ref()
+                .unwrap()
+                .payload_type,
+            Some(128)
+        );
+        let errors = config.validate();
+        assert!(!errors.is_empty());
+        let err = errors
+            .iter()
+            .find(|e| e.path.contains("rtp.payload_type"))
+            .expect("validation error for rtp.payload_type");
+        assert!(
+            err.reason.contains("invalid payload type"),
+            "expected error reporting invalid payload type, got: {}",
+            err.reason
+        );
     }
 }
