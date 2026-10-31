@@ -713,6 +713,37 @@
         "test"
       ]
     },
+    "RtpConfig": {
+      "description": "Configuration for RTP packet inspection, validation, and sequence tracking (SPEC §5, §8, §14).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable RTP packet inspection and validation. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "passthrough_on_error": {
+          "description": "When true, datagrams failing RTP validation are forwarded unchanged to destination. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "payload_type": {
+          "description": "Optional expected payload type (0 to 127).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "track_sequences": {
+          "description": "Track sequence continuity independently per SSRC. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "SecretString": {
       "description": "A sensitive string value (e.g. token or secret) redacted in effective configurations",
       "writeOnly": true,
@@ -920,6 +951,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/MqttConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rtp": {
+          "description": "Optional RTP packet inspection, validation, and sequence tracking configuration (SPEC §5, §8, §14). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RtpConfig"
             },
             {
               "type": "null"
