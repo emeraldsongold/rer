@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, TcpListener, TcpStream, ToSocketAddrs,
+    UdpSocket,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -278,11 +281,17 @@ pub fn bind_tcp_listener(addr: SocketAddr) -> io::Result<TcpListener> {
     Ok(socket.into())
 }
 
-/// Binds a UDP socket, explicitly setting `IPV6_V6ONLY` on IPv6 sockets.
+/// Binds a UDP socket with optional multicast group membership and interface binding.
+///
+/// If `addr` is a multicast address (IPv4 224.0.0.0/4 or IPv6 ff00::/8), the socket
+/// binds to the appropriate local address and joins the multicast group on the specified interface.
 ///
 /// # Errors
-/// Returns an `io::Error` if creating, configuring, or binding the socket fails.
-pub fn bind_udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+/// Returns an `io::Error` if creating, configuring, binding, or joining the multicast group fails.
+pub fn bind_multicast_udp_socket(
+    addr: SocketAddr,
+    interface: Option<&str>,
+) -> io::Result<UdpSocket> {
     let domain = if addr.is_ipv6() {
         socket2::Domain::IPV6
     } else {
@@ -293,8 +302,93 @@ pub fn bind_udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
         socket.set_only_v6(true)?;
     }
     socket.set_reuse_address(true)?;
-    socket.bind(&addr.into())?;
-    Ok(socket.into())
+
+    match addr {
+        SocketAddr::V4(v4) => {
+            if v4.ip().is_multicast() {
+                if socket.bind(&addr.into()).is_err() {
+                    let wildcard = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), addr.port());
+                    socket.bind(&wildcard.into())?;
+                }
+                let std_sock: UdpSocket = socket.into();
+                let iface_ip = if let Some(iface) = interface {
+                    iface.parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    Ipv4Addr::UNSPECIFIED
+                };
+                std_sock.join_multicast_v4(v4.ip(), &iface_ip)?;
+                Ok(std_sock)
+            } else {
+                socket.bind(&addr.into())?;
+                Ok(socket.into())
+            }
+        }
+        SocketAddr::V6(v6) => {
+            if v6.ip().is_multicast() {
+                let wildcard = SocketAddrV6::new(
+                    Ipv6Addr::UNSPECIFIED,
+                    addr.port(),
+                    v6.flowinfo(),
+                    v6.scope_id(),
+                );
+                socket.bind(&wildcard.into())?;
+                let std_sock: UdpSocket = socket.into();
+                let iface_idx = if let Some(iface) = interface {
+                    if let Ok(idx) = iface.parse::<u32>() {
+                        idx
+                    } else {
+                        interface_name_to_index(iface)
+                    }
+                } else {
+                    v6.scope_id()
+                };
+                std_sock.join_multicast_v6(v6.ip(), iface_idx)?;
+                Ok(std_sock)
+            } else {
+                socket.bind(&addr.into())?;
+                Ok(socket.into())
+            }
+        }
+    }
+}
+
+/// Binds a UDP socket, joining multicast groups if the address is multicast.
+///
+/// # Errors
+/// Returns an `io::Error` if creating, configuring, or binding the socket fails.
+pub fn bind_udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+    bind_multicast_udp_socket(addr, None)
+}
+
+/// Forwards a datagram to a UDP destination endpoint, applying multicast configuration if applicable.
+///
+/// # Errors
+/// Returns an `io::Error` if endpoint resolution, multicast socket configuration, or transmission fails.
+pub fn forward_udp_datagram(
+    socket: &UdpSocket,
+    dest: &EndpointConfig,
+    datagram: &Datagram,
+) -> io::Result<usize> {
+    let target_addr = resolve_endpoint(&dest.address)?;
+    if target_addr.ip().is_multicast() {
+        if let Some(ref mcast) = dest.multicast {
+            match target_addr {
+                SocketAddr::V4(_) => {
+                    if let Some(ttl) = mcast.ttl {
+                        socket.set_multicast_ttl_v4(ttl)?;
+                    }
+                    let _ = socket.set_multicast_loop_v4(mcast.loopback);
+                }
+                SocketAddr::V6(_) => {
+                    if let Some(ttl) = mcast.ttl {
+                        let _ = socket2::SockRef::from(socket).set_multicast_hops_v6(ttl);
+                    }
+                    let _ = socket.set_multicast_loop_v6(mcast.loopback);
+                }
+            }
+        }
+    }
+    socket.send_to(&datagram.payload, target_addr)
 }
 
 /// Formats an endpoint address string, ensuring IPv6 addresses appear in bracketed form
@@ -2505,7 +2599,18 @@ impl StreamRunner {
             TransportType::Udp => {
                 let bind_addr =
                     resolve_endpoint_with_context(&stream.source.address, Some(&source_path))?;
-                let recv_socket = bind_udp_socket(bind_addr)?;
+                let iface = stream
+                    .source
+                    .multicast
+                    .as_ref()
+                    .and_then(|m| m.interface.as_deref())
+                    .or_else(|| {
+                        stream
+                            .multicast
+                            .as_ref()
+                            .and_then(|m| m.interface.as_deref())
+                    });
+                let recv_socket = bind_multicast_udp_socket(bind_addr, iface)?;
                 recv_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
                 let recv_stream_id = stream_id.clone();
@@ -4254,10 +4359,33 @@ impl StreamRunner {
         let fwd_stream_mqtt_framing = stream.mqtt.as_ref().and_then(|m| m.framing);
         let fwd_stream_kiss = stream.kiss.clone();
         let fwd_stream_kiss_framing = stream.kiss.as_ref().and_then(|k| k.framing);
+        let fwd_stream_multicast = stream.multicast.clone();
 
         let fwd_handle = thread::spawn(move || {
             let ipv4_socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0))).ok();
             let ipv6_socket = bind_udp_socket(SocketAddr::from(([0; 16], 0))).ok();
+
+            for (dest, _) in &dest_specs {
+                if dest.transport == TransportType::Udp {
+                    let mcast_opt = dest.multicast.as_ref().or(fwd_stream_multicast.as_ref());
+                    if let Some(mcast) = mcast_opt {
+                        if let Some(ttl) = mcast.ttl {
+                            if let Some(ref s) = ipv4_socket {
+                                let _ = s.set_multicast_ttl_v4(ttl);
+                            }
+                            if let Some(ref s) = ipv6_socket {
+                                let _ = socket2::SockRef::from(s).set_multicast_hops_v6(ttl);
+                            }
+                        }
+                        if let Some(ref s) = ipv4_socket {
+                            let _ = s.set_multicast_loop_v4(mcast.loopback);
+                        }
+                        if let Some(ref s) = ipv6_socket {
+                            let _ = s.set_multicast_loop_v6(mcast.loopback);
+                        }
+                    }
+                }
+            }
 
             // Track TCP destination connections
             let mut tcp_conns: Vec<Option<TcpDestinationConnection>> = dest_specs
@@ -4377,6 +4505,20 @@ impl StreamRunner {
                                                         )
                                                     })
                                                     .and_then(|s| {
+                                                        if target_addr.ip().is_multicast() {
+                                                            let mcast_opt = dest
+                                                                .multicast
+                                                                .as_ref()
+                                                                .or(fwd_stream_multicast.as_ref());
+                                                            if let Some(mcast) = mcast_opt {
+                                                                if let Some(ttl) = mcast.ttl {
+                                                                    s.set_multicast_ttl_v4(ttl)?;
+                                                                }
+                                                                let _ = s.set_multicast_loop_v4(
+                                                                    mcast.loopback,
+                                                                );
+                                                            }
+                                                        }
                                                         s.send_to(&datagram.payload, target_addr)
                                                     }),
                                                 SocketAddr::V6(_) => ipv6_socket
@@ -4388,6 +4530,24 @@ impl StreamRunner {
                                                         )
                                                     })
                                                     .and_then(|s| {
+                                                        if target_addr.ip().is_multicast() {
+                                                            let mcast_opt = dest
+                                                                .multicast
+                                                                .as_ref()
+                                                                .or(fwd_stream_multicast.as_ref());
+                                                            if let Some(mcast) = mcast_opt {
+                                                                if let Some(ttl) = mcast.ttl {
+                                                                    let _ =
+                                                                        socket2::SockRef::from(s)
+                                                                            .set_multicast_hops_v6(
+                                                                                ttl,
+                                                                            );
+                                                                }
+                                                                let _ = s.set_multicast_loop_v6(
+                                                                    mcast.loopback,
+                                                                );
+                                                            }
+                                                        }
                                                         s.send_to(&datagram.payload, target_addr)
                                                     }),
                                             };
@@ -5262,6 +5422,7 @@ impl Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MulticastConfig;
 
     #[test]
     fn test_bounded_queue_drop_oldest() {
@@ -6696,5 +6857,105 @@ instances:
         let relay = Relay::start(&config).unwrap();
         assert!(relay.rtp_tracker("s-plain").is_none());
         relay.stop();
+    }
+
+    #[test]
+    fn test_criterion3_bind_udp_socket_ipv4_multicast_joins_group() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, calling bind_udp_socket with IPv4
+        // multicast address 239.255.0.1 joins the multicast group on the specified interface using join_multicast_v4.
+        let addr: SocketAddr = "239.255.0.1:0".parse().unwrap();
+        let socket = bind_udp_socket(addr).expect("bind_udp_socket with 239.255.0.1 must succeed");
+        let local_addr = socket.local_addr().expect("local_addr");
+        assert_ne!(local_addr.port(), 0);
+    }
+
+    #[test]
+    fn test_criterion4_bind_udp_socket_ipv6_multicast_joins_group() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, calling bind_udp_socket with IPv6
+        // multicast address ff02::1 joins the multicast group on the interface using join_multicast_v6.
+        let addr: SocketAddr = "[ff02::1]:0".parse().unwrap();
+        let socket = bind_udp_socket(addr).expect("bind_udp_socket with ff02::1 must succeed");
+        let local_addr = socket.local_addr().expect("local_addr");
+        assert_ne!(local_addr.port(), 0);
+    }
+
+    #[test]
+    fn test_criterion5_forward_datagram_to_ipv4_multicast_applies_ttl_and_preserves_payload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Acceptance criterion: In crates/rer/src/relay.rs, forwarding a datagram to an IPv4
+        // multicast destination endpoint applies the configured multicast time-to-live to the egress socket while preserving datagram payload bytes.
+        let dest = EndpointConfig {
+            transport: TransportType::Udp,
+            address: "239.255.0.1:28790".to_string(),
+            mode: None,
+            framing: None,
+            multicast: Some(MulticastConfig {
+                ttl: Some(15),
+                loopback: true,
+                ..Default::default()
+            }),
+        };
+
+        let egress_socket = bind_udp_socket("0.0.0.0:0".parse().unwrap())?;
+        let test_payload = b"test payload bytes for multicast forwarding";
+        let datagram = Datagram {
+            payload: test_payload.to_vec(),
+            source_addr: "127.0.0.1:54321".parse().unwrap(),
+        };
+
+        // Forward datagram using forward_udp_datagram helper
+        let sent = forward_udp_datagram(&egress_socket, &dest, &datagram)?;
+        assert_eq!(sent, test_payload.len(), "all payload bytes must be sent");
+        assert_eq!(
+            egress_socket.multicast_ttl_v4()?,
+            15,
+            "configured multicast TTL must be applied to egress socket"
+        );
+
+        // Also test through full Relay forwarding loop
+        let ingress_port = 28791;
+        let egress_port = 28792;
+        let mcast_addr = format!("239.255.0.1:{egress_port}");
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i-mcast"
+    streams:
+      - id: "s-mcast"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{}"
+        destination:
+          transport: "udp"
+          address: "{}"
+          multicast:
+            ttl: 23
+            loopback: true
+"#,
+            ingress_port, mcast_addr
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("valid config");
+        let receiver = bind_udp_socket(mcast_addr.parse()?)?;
+        receiver.set_read_timeout(Some(Duration::from_millis(1500)))?;
+
+        let relay = Relay::start(&config)?;
+        std::thread::sleep(Duration::from_millis(50));
+
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        sender.send_to(test_payload, format!("127.0.0.1:{ingress_port}"))?;
+
+        let mut buf = [0u8; 512];
+        let (n, _) = receiver.recv_from(&mut buf)?;
+        assert_eq!(
+            &buf[..n],
+            test_payload,
+            "datagram payload bytes must be preserved"
+        );
+
+        relay.stop();
+        Ok(())
     }
 }

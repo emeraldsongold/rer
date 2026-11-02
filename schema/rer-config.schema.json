@@ -211,6 +211,17 @@
             }
           ]
         },
+        "multicast": {
+          "description": "Optional multicast configuration for UDP endpoints (SPEC §5).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MulticastConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "transport": {
           "description": "Transport protocol (\"udp\" or \"tcp\").",
           "allOf": [
@@ -704,6 +715,41 @@
       },
       "additionalProperties": false
     },
+    "MulticastConfig": {
+      "description": "Multicast socket and egress configuration options (SPEC §5).",
+      "type": "object",
+      "properties": {
+        "interface": {
+          "description": "Local network interface IP address or interface name for multicast membership or transmission (e.g. \"192.168.1.10\" or \"0.0.0.0\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "loopback": {
+          "description": "Enable loopback of transmitted multicast datagrams to local host sockets. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "source": {
+          "description": "Source IP address for Source-Specific Multicast (SSM / IGMPv3, RFC 4607).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttl": {
+          "description": "Multicast Time-to-Live (IPv4) or Hop Limit (IPv6) for egress datagrams (1..=255). Defaults to 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "OperationalMode": {
       "description": "Operational diagnostic modes (SPEC §10).",
       "type": "string",
@@ -951,6 +997,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/MqttConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "multicast": {
+          "description": "Optional multicast socket and egress configuration (SPEC §5). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MulticastConfig"
             },
             {
               "type": "null"

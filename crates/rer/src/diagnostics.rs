@@ -2557,6 +2557,14 @@ pub struct DiagnosticEvent {
     /// Structured RTP metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtp_metadata: Option<RtpMetadata>,
+
+    /// Optional IP multicast group address when stream uses multicast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicast_group: Option<String>,
+
+    /// Optional IP multicast interface identifier when stream uses multicast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicast_interface: Option<String>,
 }
 
 impl DiagnosticEvent {
@@ -2650,7 +2658,17 @@ impl DiagnosticEvent {
             rtp_parse_status: None,
             rtp_inspection: None,
             rtp_metadata: None,
+            multicast_group: None,
+            multicast_interface: None,
         }
+    }
+
+    /// Sets multicast group and interface metadata.
+    #[must_use]
+    pub fn with_multicast_info(mut self, group: Option<&str>, interface: Option<&str>) -> Self {
+        self.multicast_group = group.map(|s| s.to_string());
+        self.multicast_interface = interface.map(|s| s.to_string());
+        self
     }
 
     /// Sets the source endpoint.

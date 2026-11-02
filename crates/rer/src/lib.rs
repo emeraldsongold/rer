@@ -54,8 +54,9 @@ pub use ccsds::{
 pub use config::{
     Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
     InspectionConfig, InstanceConfig, KissConfig, LogicalInterfaceConfig, LtpInspectionConfig,
-    MavlinkConfig, MetricsConfig, MqttConfig, OperationalMode, RtpConfig, SequenceConfig,
-    SrtInspectionConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
+    MavlinkConfig, MetricsConfig, MqttConfig, MulticastConfig, OperationalMode, RtpConfig,
+    SequenceConfig, SrtInspectionConfig, StreamConfig, TestModeConfig, ValidationError,
+    ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, record_mqtt_local_transmission, Ax25Metadata,
@@ -118,11 +119,12 @@ pub use mqtt::{
     MQTT_TYPE_UNSUBSCRIBE,
 };
 pub use relay::{
-    bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,
-    parse_scoped_socket_addr, process_rtp_ingress, resolve_endpoint, resolve_endpoint_with_context,
-    select_socket_addr, BoundedQueue, Datagram, ExtractedRtp, LogicalInterfaceInfo,
-    LogicalInterfaceStats, Relay, RelayHealthHandle, RtpIngressContext, ScopedEndpoint,
-    StreamHealthSnapshot, StreamRunner, StreamStats, StreamStatsSnapshot,
+    bind_multicast_udp_socket, bind_tcp_listener, bind_udp_socket, format_endpoint,
+    forward_udp_datagram, interface_name_to_index, parse_scoped_socket_addr, process_rtp_ingress,
+    resolve_endpoint, resolve_endpoint_with_context, select_socket_addr, BoundedQueue, Datagram,
+    ExtractedRtp, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,
+    RtpIngressContext, ScopedEndpoint, StreamHealthSnapshot, StreamRunner, StreamStats,
+    StreamStatsSnapshot,
 };
 pub use replay::{
     execute_replay_session, is_test_endpoint, matches_filter, ReplayConfig, ReplayReport,
