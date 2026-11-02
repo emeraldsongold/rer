@@ -54,8 +54,8 @@ pub use ccsds::{
 pub use config::{
     Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
     InspectionConfig, InstanceConfig, KissConfig, LogicalInterfaceConfig, LtpInspectionConfig,
-    MavlinkConfig, MetricsConfig, MqttConfig, OperationalMode, SequenceConfig, SrtInspectionConfig,
-    StreamConfig, TestModeConfig, ValidationError, ValidationReport,
+    MavlinkConfig, MetricsConfig, MqttConfig, OperationalMode, RtpConfig, SequenceConfig,
+    SrtInspectionConfig, StreamConfig, TestModeConfig, ValidationError, ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, record_mqtt_local_transmission, Ax25Metadata,
@@ -64,8 +64,8 @@ pub use diagnostics::{
     DiagnosticTestState, IntoDtnTimestamp, KissInspection, KissInspectionEvent, KissMetadata,
     LtpInspection, LtpInspectionEvent, LtpMetadata, ManualClock, MavlinkInspection,
     MavlinkInspectionEvent, MavlinkMetadata, MqttInspection, MqttInspectionEvent, MqttMetadata,
-    RateLimiter, SequenceState, SequenceTracker, SequenceTrackingEvent, SrtInspection,
-    SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
+    RateLimiter, RtpInspection, RtpInspectionEvent, RtpMetadata, SequenceState, SequenceTracker,
+    SequenceTrackingEvent, SrtInspection, SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
 };
 pub use framing::{
     encode_frame, encode_kiss_frame, read_ccsds_frame, read_frame, read_frame_with_mode,
@@ -119,9 +119,10 @@ pub use mqtt::{
 };
 pub use relay::{
     bind_tcp_listener, bind_udp_socket, format_endpoint, interface_name_to_index,
-    parse_scoped_socket_addr, resolve_endpoint, resolve_endpoint_with_context, select_socket_addr,
-    BoundedQueue, Datagram, LogicalInterfaceInfo, LogicalInterfaceStats, Relay, RelayHealthHandle,
-    ScopedEndpoint, StreamHealthSnapshot, StreamRunner, StreamStats, StreamStatsSnapshot,
+    parse_scoped_socket_addr, process_rtp_ingress, resolve_endpoint, resolve_endpoint_with_context,
+    select_socket_addr, BoundedQueue, Datagram, ExtractedRtp, LogicalInterfaceInfo,
+    LogicalInterfaceStats, Relay, RelayHealthHandle, RtpIngressContext, ScopedEndpoint,
+    StreamHealthSnapshot, StreamRunner, StreamStats, StreamStatsSnapshot,
 };
 pub use replay::{
     execute_replay_session, is_test_endpoint, matches_filter, ReplayConfig, ReplayReport,

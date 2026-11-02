@@ -14,13 +14,13 @@ use crate::ccsds::{parse_and_validate_ccsds_packet, CcsdsParseError, CcsdsSequen
 use crate::config::{
     Bpv7InspectionConfig, CcsdsConfig, Config, ConnectionMode, DropPolicy, EndpointConfig,
     FramingMode, InstanceConfig, KissConfig, LtpInspectionConfig, MavlinkConfig, MqttConfig,
-    OperationalMode, SrtInspectionConfig, StreamConfig, TransportType,
+    OperationalMode, RtpConfig, SrtInspectionConfig, StreamConfig, TransportType,
 };
 use crate::diagnostics::{
     kiss_command_name, Ax25Metadata, BundleInspection, DiagnosticBuffer, DiagnosticEvent,
     DiagnosticStage, DiagnosticTestState, KissInspection, KissMetadata, LtpInspection,
-    MavlinkInspection, MavlinkMetadata, MqttInspection, MqttMetadata, SequenceState,
-    SequenceTracker, SequenceTrackingEvent, SrtInspection,
+    MavlinkInspection, MavlinkMetadata, MqttInspection, MqttMetadata, RtpInspection, RtpMetadata,
+    SequenceState, SequenceTracker, SequenceTrackingEvent, SrtInspection,
 };
 use crate::framing;
 use crate::ltp::{evaluate_segment_header, LtpParseStatus, SegmentType};
@@ -32,6 +32,7 @@ use crate::mqtt::{
     parse_mqtt_fixed_header, parse_mqtt_fixed_header_relaxed, MqttFixedHeader, MqttPacketType,
     MqttParseError, MqttParseStatus,
 };
+use crate::rtp::{evaluate_rtp_header, RtpHeader, RtpParseStatus, RtpSequenceTracker};
 use crate::srt::{evaluate_srt_header, SrtParseStatus};
 
 /// Default maximum queue size (packets) when not explicitly configured.
@@ -1218,6 +1219,247 @@ fn process_mavlink_ingress(
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ExtractedRtp {
+    pub header: Option<RtpHeader>,
+    pub status: Option<RtpParseStatus>,
+    pub inspection: Option<RtpInspection>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RtpIngressContext<'a> {
+    pub rtp_cfg: Option<&'a RtpConfig>,
+    pub rtp_tracker: Option<&'a Arc<Mutex<RtpSequenceTracker>>>,
+    pub stats: &'a StreamStats,
+    pub event_buffer: &'a DiagnosticBuffer,
+    pub stream_id: &'a str,
+    pub src_endpoint: &'a str,
+    pub primary_dest: &'a str,
+    pub transport: TransportType,
+}
+
+pub fn process_rtp_ingress(payload: &[u8], ctx: &RtpIngressContext<'_>) -> Option<ExtractedRtp> {
+    let RtpIngressContext {
+        rtp_cfg,
+        rtp_tracker,
+        stats,
+        event_buffer,
+        stream_id,
+        src_endpoint,
+        primary_dest,
+        transport,
+    } = *ctx;
+
+    let Some(rtp_cfg) = rtp_cfg else {
+        return Some(ExtractedRtp::default());
+    };
+    if !rtp_cfg.enabled {
+        return Some(ExtractedRtp::default());
+    }
+
+    let (status, header_opt) = evaluate_rtp_header(payload);
+    let mut validation_error: Option<String> = None;
+
+    if status != RtpParseStatus::Valid || header_opt.is_none() {
+        validation_error = Some(match status {
+            RtpParseStatus::TruncatedHeader => {
+                "invalid RTP packet: buffer shorter than 12-byte header".to_string()
+            }
+            RtpParseStatus::UnsupportedVersion => {
+                "unsupported RTP version (expected version 2)".to_string()
+            }
+            RtpParseStatus::TruncatedCsrcList => "truncated CSRC list in RTP header".to_string(),
+            RtpParseStatus::TruncatedExtensionHeader | RtpParseStatus::TruncatedExtensionData => {
+                "truncated extension header in RTP packet".to_string()
+            }
+            RtpParseStatus::TruncatedPadding => "truncated padding in RTP packet".to_string(),
+            _ => "malformed RTP packet header".to_string(),
+        });
+    } else if let Some(ref header) = header_opt {
+        if let Some(expected_pt) = rtp_cfg.payload_type {
+            if header.payload_type != expected_pt {
+                validation_error = Some(format!(
+                    "RTP payload type mismatch: expected {}, got {}",
+                    expected_pt, header.payload_type
+                ));
+            }
+        }
+    }
+
+    if let Some(err_msg) = validation_error {
+        stats.validation_errors.fetch_add(1, Ordering::Relaxed);
+
+        if !rtp_cfg.passthrough_on_error {
+            stats.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            stats.drops_validation.fetch_add(1, Ordering::Relaxed);
+
+            eprintln!(
+                "[stream {}] Dropped invalid RTP {} packet: {}",
+                stream_id, transport, err_msg
+            );
+
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Dropped,
+                    transport,
+                    payload.len() as u64,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_reason(err_msg),
+            );
+            None
+        } else {
+            eprintln!(
+                "[stream {}] RTP validation failed (passthrough): {}",
+                stream_id, err_msg
+            );
+
+            event_buffer.emit(
+                DiagnosticEvent::new(
+                    event_buffer.clock().monotonic_nanos(),
+                    event_buffer.clock().wall_clock_nanos(),
+                    stream_id,
+                    DiagnosticStage::Failure,
+                    transport,
+                    payload.len() as u64,
+                )
+                .with_source(src_endpoint)
+                .with_destination(primary_dest)
+                .with_reason(err_msg),
+            );
+            Some(ExtractedRtp::default())
+        }
+    } else {
+        let header = header_opt.unwrap();
+        let metadata = RtpMetadata::from(&header);
+
+        let mut insp = RtpInspection::from_header(&header, status);
+        insp.monotonic_timestamp = Some(event_buffer.clock().monotonic_nanos());
+        insp.wall_clock_timestamp = Some(event_buffer.clock().wall_clock_nanos());
+        insp.stream_id = Some(stream_id.to_string());
+        insp.rtp_metadata = Some(metadata);
+
+        let mut insp_ev: DiagnosticEvent = insp.clone().into();
+        insp_ev.transport = transport;
+        insp_ev.payload_length = payload.len() as u64;
+        insp_ev.source_endpoint = Some(src_endpoint.to_string());
+        insp_ev.destination_endpoint = Some(primary_dest.to_string());
+        event_buffer.emit(insp_ev);
+
+        if rtp_cfg.track_sequences {
+            if let Some(t) = rtp_tracker {
+                let tracking_ev = {
+                    let mut tracker = t.lock().unwrap();
+                    tracker.record_sequence(header.sequence_number)
+                };
+                match tracking_ev {
+                    SequenceTrackingEvent::Gap {
+                        expected,
+                        actual,
+                        missing_count,
+                    } => {
+                        event_buffer.emit(
+                            DiagnosticEvent::new(
+                                event_buffer.clock().monotonic_nanos(),
+                                event_buffer.clock().wall_clock_nanos(),
+                                stream_id,
+                                DiagnosticStage::Failure,
+                                transport,
+                                payload.len() as u64,
+                            )
+                            .with_source(src_endpoint)
+                            .with_destination(primary_dest)
+                            .with_rtp_header(&header)
+                            .with_sequence_number(u64::from(header.sequence_number))
+                            .with_reason(format!(
+                                "RTP sequence gap: ssrc {}, expected {}, actual {}, missing {} packets",
+                                header.ssrc, expected, actual, missing_count
+                            )),
+                        );
+                    }
+                    SequenceTrackingEvent::Duplicate { sequence } => {
+                        event_buffer.emit(
+                            DiagnosticEvent::new(
+                                event_buffer.clock().monotonic_nanos(),
+                                event_buffer.clock().wall_clock_nanos(),
+                                stream_id,
+                                DiagnosticStage::Failure,
+                                transport,
+                                payload.len() as u64,
+                            )
+                            .with_source(src_endpoint)
+                            .with_destination(primary_dest)
+                            .with_rtp_header(&header)
+                            .with_sequence_number(sequence)
+                            .with_reason(format!(
+                                "RTP sequence duplicate: ssrc {}, duplicate sequence {}",
+                                header.ssrc, sequence
+                            )),
+                        );
+                    }
+                    SequenceTrackingEvent::OutOfOrder {
+                        sequence,
+                        previous_highest,
+                    } => {
+                        event_buffer.emit(
+                            DiagnosticEvent::new(
+                                event_buffer.clock().monotonic_nanos(),
+                                event_buffer.clock().wall_clock_nanos(),
+                                stream_id,
+                                DiagnosticStage::Failure,
+                                transport,
+                                payload.len() as u64,
+                            )
+                            .with_source(src_endpoint)
+                            .with_destination(primary_dest)
+                            .with_rtp_header(&header)
+                            .with_sequence_number(sequence)
+                            .with_reason(format!(
+                                "RTP sequence out-of-order: ssrc {}, sequence {} arrived after highest {}",
+                                header.ssrc, sequence, previous_highest
+                            )),
+                        );
+                    }
+                    SequenceTrackingEvent::Rollover {
+                        sequence,
+                        missing_count,
+                    } if missing_count > 0 => {
+                        event_buffer.emit(
+                            DiagnosticEvent::new(
+                                event_buffer.clock().monotonic_nanos(),
+                                event_buffer.clock().wall_clock_nanos(),
+                                stream_id,
+                                DiagnosticStage::Failure,
+                                transport,
+                                payload.len() as u64,
+                            )
+                            .with_source(src_endpoint)
+                            .with_destination(primary_dest)
+                            .with_rtp_header(&header)
+                            .with_sequence_number(sequence)
+                            .with_reason(format!(
+                                "RTP sequence rollover with gap: ssrc {}, rollover to {} with {} missing packets",
+                                header.ssrc, sequence, missing_count
+                            )),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Some(ExtractedRtp {
+            header: Some(header),
+            status: Some(status),
+            inspection: Some(insp),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct ExtractedMqtt {
     header: Option<MqttFixedHeader>,
     status: Option<MqttParseStatus>,
@@ -2108,6 +2350,7 @@ pub struct StreamRunner {
     pub sequence_tracker: Arc<Mutex<SequenceTracker>>,
     pub ccsds_tracker: Option<Arc<Mutex<CcsdsSequenceTracker>>>,
     pub mavlink_tracker: Option<Arc<Mutex<MavlinkSequenceTracker>>>,
+    pub rtp_tracker: Option<Arc<Mutex<RtpSequenceTracker>>>,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -2248,6 +2491,11 @@ impl StreamRunner {
             Arc::new(Mutex::new(t))
         });
 
+        let rtp_tracker = stream
+            .rtp
+            .as_ref()
+            .map(|_r| Arc::new(Mutex::new(RtpSequenceTracker::new())));
+
         let mut runner_threads = Vec::new();
 
         // -------------------------------------------------------------------
@@ -2273,6 +2521,8 @@ impl StreamRunner {
                 let recv_ccsds_config = stream.ccsds.clone();
                 let recv_mavlink_tracker = mavlink_tracker.as_ref().map(Arc::clone);
                 let recv_mavlink_config = stream.mavlink.clone();
+                let recv_rtp_tracker = rtp_tracker.as_ref().map(Arc::clone);
+                let recv_rtp_config = stream.rtp.clone();
                 let recv_mqtt_config = stream.mqtt.clone();
                 let recv_kiss_config = stream.kiss.clone();
                 let recv_bpv7_config = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
@@ -2314,6 +2564,22 @@ impl StreamRunner {
                                     &MavlinkIngressContext {
                                         mavlink_cfg: recv_mavlink_config.as_ref(),
                                         mavlink_tracker: recv_mavlink_tracker.as_ref(),
+                                        stats: &recv_stats,
+                                        event_buffer: &recv_event_buffer,
+                                        stream_id: &recv_stream_id,
+                                        src_endpoint: &src_endpoint,
+                                        primary_dest: &recv_primary_dest,
+                                        transport: TransportType::Udp,
+                                    },
+                                ) else {
+                                    continue;
+                                };
+
+                                let Some(rtp_info) = process_rtp_ingress(
+                                    payload_slice,
+                                    &RtpIngressContext {
+                                        rtp_cfg: recv_rtp_config.as_ref(),
+                                        rtp_tracker: recv_rtp_tracker.as_ref(),
                                         stats: &recv_stats,
                                         event_buffer: &recv_event_buffer,
                                         stream_id: &recv_stream_id,
@@ -2409,6 +2675,10 @@ impl StreamRunner {
                                     .map(u64::from)
                                     .or(srt_info.sequence_number.map(u64::from))
                                     .or(mavlink_info.header.as_ref().map(|h| u64::from(h.sequence)))
+                                    .or(rtp_info
+                                        .header
+                                        .as_ref()
+                                        .map(|h| u64::from(h.sequence_number)))
                                     .or(generic_seq);
                                 let extracted_apid = ccsds_info.apid;
                                 let extracted_ccsds_seq = ccsds_info.seq;
@@ -2435,6 +2705,15 @@ impl StreamRunner {
                                     }
                                     if let Some(ref insp) = mavlink_info.inspection {
                                         ev.mavlink_inspection = Some(insp.clone());
+                                    }
+                                    if let Some(ref header) = rtp_info.header {
+                                        ev = ev.with_rtp_header(header);
+                                    }
+                                    if let Some(status) = rtp_info.status {
+                                        ev.rtp_parse_status = Some(status);
+                                    }
+                                    if let Some(ref insp) = rtp_info.inspection {
+                                        ev.rtp_inspection = Some(insp.clone());
                                     }
                                     if let Some(ref header) = mqtt_info.header {
                                         ev = ev.with_mqtt_header(header);
@@ -2717,6 +2996,8 @@ impl StreamRunner {
                 let ccsds_config_for_tcp = stream.ccsds.clone();
                 let mavlink_tracker_for_tcp = mavlink_tracker.as_ref().map(Arc::clone);
                 let mavlink_config_for_tcp = stream.mavlink.clone();
+                let rtp_tracker_for_tcp = rtp_tracker.as_ref().map(Arc::clone);
+                let rtp_config_for_tcp = stream.rtp.clone();
                 let mqtt_config_for_tcp = stream.mqtt.clone();
                 let kiss_config_for_tcp = stream.kiss.clone();
                 let bpv7_config_for_tcp = stream.inspection.as_ref().and_then(|i| i.bpv7.clone());
@@ -2767,6 +3048,9 @@ impl StreamRunner {
                                         let cl_mavlink_tracker =
                                             mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
                                         let cl_mavlink_config = mavlink_config_for_tcp.clone();
+                                        let cl_rtp_tracker =
+                                            rtp_tracker_for_tcp.as_ref().map(Arc::clone);
+                                        let cl_rtp_config = rtp_config_for_tcp.clone();
                                         let cl_mqtt_config = mqtt_config_for_tcp.clone();
                                         let cl_kiss_config = kiss_config_for_tcp.clone();
                                         let cl_bpv7_config = bpv7_config_for_tcp.clone();
@@ -2828,6 +3112,23 @@ impl StreamRunner {
                                                                 },
                                                             )
                                                         else {
+                                                            continue;
+                                                        };
+
+                                                        let Some(rtp_info) = process_rtp_ingress(
+                                                            &payload,
+                                                            &RtpIngressContext {
+                                                                rtp_cfg: cl_rtp_config.as_ref(),
+                                                                rtp_tracker: cl_rtp_tracker
+                                                                    .as_ref(),
+                                                                stats: &cl_stats,
+                                                                event_buffer: &cl_event_buffer,
+                                                                stream_id: &cl_stream_id,
+                                                                src_endpoint: &src_endpoint,
+                                                                primary_dest: &cl_primary_dest,
+                                                                transport: TransportType::Tcp,
+                                                            },
+                                                        ) else {
                                                             continue;
                                                         };
 
@@ -2925,6 +3226,9 @@ impl StreamRunner {
                                                                 .header
                                                                 .as_ref()
                                                                 .map(|h| u64::from(h.sequence)))
+                                                            .or(rtp_info.header.as_ref().map(|h| {
+                                                                u64::from(h.sequence_number)
+                                                            }))
                                                             .or(generic_seq);
                                                         let extracted_apid = ccsds_info.apid;
                                                         let extracted_ccsds_seq = ccsds_info.seq;
@@ -2959,6 +3263,23 @@ impl StreamRunner {
                                                                 mavlink_info.inspection
                                                             {
                                                                 ev.mavlink_inspection =
+                                                                    Some(insp.clone());
+                                                            }
+                                                            if let Some(ref header) =
+                                                                rtp_info.header
+                                                            {
+                                                                ev = ev.with_rtp_header(header);
+                                                            }
+                                                            if let Some(status) =
+                                                                rtp_info.status
+                                                            {
+                                                                ev.rtp_parse_status =
+                                                                    Some(status);
+                                                            }
+                                                            if let Some(ref insp) =
+                                                                rtp_info.inspection
+                                                            {
+                                                                ev.rtp_inspection =
                                                                     Some(insp.clone());
                                                             }
                                                             if let Some(ref header) = mqtt_info.header {
@@ -3332,6 +3653,8 @@ impl StreamRunner {
                         let conn_srt_config = srt_config_for_tcp.clone();
                         let conn_mavlink_config = mavlink_config_for_tcp.clone();
                         let conn_mavlink_tracker = mavlink_tracker_for_tcp.as_ref().map(Arc::clone);
+                        let conn_rtp_config = rtp_config_for_tcp.clone();
+                        let conn_rtp_tracker = rtp_tracker_for_tcp.as_ref().map(Arc::clone);
                         let conn_mqtt_config = mqtt_config_for_tcp.clone();
                         let conn_kiss_config = kiss_config_for_tcp.clone();
                         let recv_handle = thread::spawn(move || {
@@ -3430,6 +3753,22 @@ impl StreamRunner {
                                                         continue;
                                                     };
 
+                                                    let Some(rtp_info) = process_rtp_ingress(
+                                                        &payload,
+                                                        &RtpIngressContext {
+                                                            rtp_cfg: conn_rtp_config.as_ref(),
+                                                            rtp_tracker: conn_rtp_tracker.as_ref(),
+                                                            stats: &recv_stats,
+                                                            event_buffer: &recv_event_buffer,
+                                                            stream_id: &recv_stream_id,
+                                                            src_endpoint: &src_endpoint,
+                                                            primary_dest: &recv_primary_dest,
+                                                            transport: TransportType::Tcp,
+                                                        },
+                                                    ) else {
+                                                        continue;
+                                                    };
+
                                                     let Some(mqtt_info) = process_mqtt_ingress(
                                                         &payload,
                                                         &MqttIngressContext {
@@ -3522,6 +3861,10 @@ impl StreamRunner {
                                                             .header
                                                             .as_ref()
                                                             .map(|h| u64::from(h.sequence)))
+                                                        .or(rtp_info
+                                                            .header
+                                                            .as_ref()
+                                                            .map(|h| u64::from(h.sequence_number)))
                                                         .or(generic_seq);
                                                     let extracted_apid = ccsds_info.apid;
                                                     let extracted_ccsds_seq = ccsds_info.seq;
@@ -3548,6 +3891,15 @@ impl StreamRunner {
                                                         }
                                                         if let Some(ref insp) = mavlink_info.inspection {
                                                             ev.mavlink_inspection = Some(insp.clone());
+                                                        }
+                                                        if let Some(ref header) = rtp_info.header {
+                                                            ev = ev.with_rtp_header(header);
+                                                        }
+                                                        if let Some(status) = rtp_info.status {
+                                                            ev.rtp_parse_status = Some(status);
+                                                        }
+                                                        if let Some(ref insp) = rtp_info.inspection {
+                                                            ev.rtp_inspection = Some(insp.clone());
                                                         }
                                                         if let Some(ref header) = mqtt_info.header {
                                                             ev = ev.with_mqtt_header(header);
@@ -4285,6 +4637,7 @@ impl StreamRunner {
             sequence_tracker: seq_tracker,
             ccsds_tracker,
             mavlink_tracker,
+            rtp_tracker,
             is_active,
             shutdown_flag,
             threads: runner_threads,
@@ -4393,6 +4746,7 @@ struct StreamRunnerHandle {
     sequence_tracker: Arc<Mutex<SequenceTracker>>,
     ccsds_tracker: Option<Arc<Mutex<CcsdsSequenceTracker>>>,
     mavlink_tracker: Option<Arc<Mutex<MavlinkSequenceTracker>>>,
+    rtp_tracker: Option<Arc<Mutex<RtpSequenceTracker>>>,
     is_active: Arc<AtomicBool>,
     shutdown_flag: Arc<AtomicBool>,
 }
@@ -4475,6 +4829,16 @@ impl RelayHealthHandle {
             .iter()
             .find(|r| r.stream_id == stream_id)?;
         runner.mavlink_tracker.as_ref().map(Arc::clone)
+    }
+
+    /// Returns current RTP sequence tracker for a stream if configured.
+    #[must_use]
+    pub fn rtp_tracker(&self, stream_id: &str) -> Option<Arc<Mutex<RtpSequenceTracker>>> {
+        let runner = self
+            .stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)?;
+        runner.rtp_tracker.as_ref().map(Arc::clone)
     }
 
     /// Returns true if the relay is running and all stream runners are healthy.
@@ -4736,6 +5100,7 @@ impl Relay {
                 sequence_tracker: Arc::clone(&r.sequence_tracker),
                 ccsds_tracker: r.ccsds_tracker.as_ref().map(Arc::clone),
                 mavlink_tracker: r.mavlink_tracker.as_ref().map(Arc::clone),
+                rtp_tracker: r.rtp_tracker.as_ref().map(Arc::clone),
                 is_active: Arc::clone(&r.is_active),
                 shutdown_flag: Arc::clone(&r.shutdown_flag),
             })
@@ -4776,6 +5141,16 @@ impl Relay {
             .iter()
             .find(|r| r.stream_id == stream_id)?;
         runner.mavlink_tracker.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the RTP sequence tracker for a stream if configured.
+    #[must_use]
+    pub fn rtp_tracker(&self, stream_id: &str) -> Option<Arc<Mutex<RtpSequenceTracker>>> {
+        let runner = self
+            .stream_runners
+            .iter()
+            .find(|r| r.stream_id == stream_id)?;
+        runner.rtp_tracker.as_ref().map(Arc::clone)
     }
 
     /// Returns all configured logical interfaces.
@@ -6136,5 +6511,190 @@ instances:
 
         relay.stop();
         Ok(())
+    }
+
+    #[test]
+    fn test_criterion3_process_rtp_ingress_drops_invalid_4byte_datagram_and_increments_drops_validation(
+    ) {
+        // Acceptance criterion: In crates/rer/src/relay.rs, calling process_rtp_ingress
+        // with an invalid 4-byte datagram payload drops the datagram and increments
+        // drops_validation on StreamStats.
+        let stats = StreamStats::default();
+        let event_buffer = DiagnosticBuffer::new(100);
+        let rtp_cfg = RtpConfig {
+            enabled: true,
+            payload_type: None,
+            track_sequences: true,
+            passthrough_on_error: false,
+        };
+        let ctx = RtpIngressContext {
+            rtp_cfg: Some(&rtp_cfg),
+            rtp_tracker: None,
+            stats: &stats,
+            event_buffer: &event_buffer,
+            stream_id: "s-rtp-crit3",
+            src_endpoint: "127.0.0.1:5000",
+            primary_dest: "127.0.0.1:5001",
+            transport: TransportType::Udp,
+        };
+        let invalid_4byte_payload = [0x80, 0x60, 0x01, 0x02];
+        let res = process_rtp_ingress(&invalid_4byte_payload, &ctx);
+        assert!(res.is_none(), "invalid 4-byte datagram must be dropped");
+        assert_eq!(
+            stats.drops_validation.load(Ordering::Relaxed),
+            1,
+            "drops_validation must be incremented"
+        );
+        assert_eq!(
+            stats.dropped_packets.load(Ordering::Relaxed),
+            1,
+            "dropped_packets must be incremented"
+        );
+    }
+
+    #[test]
+    fn test_criterion4_process_rtp_ingress_passthrough_on_error_records_failure_event() {
+        // Acceptance criterion: In crates/rer/src/relay.rs, calling process_rtp_ingress
+        // with an invalid datagram on a stream where passthrough_on_error is true forwards
+        // the datagram payload unmodified and records a validation failure event.
+        let stats = StreamStats::default();
+        let event_buffer = DiagnosticBuffer::new(100);
+        let rtp_cfg = RtpConfig {
+            enabled: true,
+            payload_type: None,
+            track_sequences: true,
+            passthrough_on_error: true,
+        };
+        let ctx = RtpIngressContext {
+            rtp_cfg: Some(&rtp_cfg),
+            rtp_tracker: None,
+            stats: &stats,
+            event_buffer: &event_buffer,
+            stream_id: "s-rtp-crit4",
+            src_endpoint: "127.0.0.1:5000",
+            primary_dest: "127.0.0.1:5001",
+            transport: TransportType::Udp,
+        };
+        let invalid_payload = [0x80, 0x60, 0x01, 0x02];
+        let res = process_rtp_ingress(&invalid_payload, &ctx);
+        assert!(
+            res.is_some(),
+            "invalid datagram must be forwarded when passthrough_on_error is true"
+        );
+        assert_eq!(
+            stats.drops_validation.load(Ordering::Relaxed),
+            0,
+            "drops_validation must not be incremented when passthrough_on_error is true"
+        );
+        assert_eq!(stats.dropped_packets.load(Ordering::Relaxed), 0);
+        let snap = event_buffer.snapshot();
+        assert!(
+            snap.events
+                .iter()
+                .any(|e| e.stage == DiagnosticStage::Failure),
+            "must record a validation failure event"
+        );
+    }
+
+    #[test]
+    fn test_rtp_udp_forwarding_preserves_payload_and_records_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ingress_port = 27810;
+        let egress_port = 27811;
+
+        let yaml = format!(
+            r#"
+version: "1"
+instances:
+  - id: "i-rtp"
+    streams:
+      - id: "s-rtp"
+        rtp:
+          payload_type: 96
+          track_sequences: true
+        source:
+          transport: "udp"
+          address: "127.0.0.1:{}"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:{}"
+"#,
+            ingress_port, egress_port
+        );
+
+        let config = Config::from_yaml_str(&yaml).expect("valid config");
+        let receiver = std::net::UdpSocket::bind(format!("127.0.0.1:{}", egress_port))?;
+        receiver.set_read_timeout(Some(Duration::from_millis(1500)))?;
+
+        let relay = Relay::start(&config)?;
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut pkt = crate::rtp::encode_rtp_header(
+            crate::rtp::RTP_VERSION_2,
+            false,
+            false,
+            true,
+            96,
+            1000,
+            90000,
+            0x12345678,
+            &[],
+            None,
+        );
+        pkt.extend_from_slice(b"video-frame-slice");
+
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        sender.send_to(&pkt, format!("127.0.0.1:{}", ingress_port))?;
+
+        let mut buf = [0u8; 1024];
+        let (n, _) = receiver.recv_from(&mut buf)?;
+        assert_eq!(
+            &buf[..n],
+            &pkt[..],
+            "RTP payload must be forwarded byte-for-byte"
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        let stats = relay.stream_stats("s-rtp").expect("stats");
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.forwarded_packets, 1);
+        assert_eq!(stats.dropped_packets, 0);
+
+        let snap = relay.event_buffer().snapshot();
+        let insp_ev = snap
+            .events
+            .iter()
+            .find(|e| e.stage == DiagnosticStage::RtpInspection)
+            .expect("must emit diagnostic event for RTP inspection");
+
+        assert_eq!(insp_ev.rtp_sequence_number, Some(1000));
+        assert_eq!(insp_ev.rtp_payload_type, Some(96));
+        assert_eq!(insp_ev.rtp_ssrc, Some(0x12345678));
+        assert_eq!(insp_ev.rtp_timestamp, Some(90000));
+        assert_eq!(insp_ev.rtp_marker, Some(true));
+
+        relay.stop();
+        Ok(())
+    }
+
+    #[test]
+    fn test_rtp_unconfigured_stream_has_no_tracker() {
+        let yaml = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s-plain"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:27820"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:27821"
+"#;
+        let config = Config::from_yaml_str(yaml).unwrap();
+        let relay = Relay::start(&config).unwrap();
+        assert!(relay.rtp_tracker("s-plain").is_none());
+        relay.stop();
     }
 }

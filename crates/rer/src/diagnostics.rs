@@ -67,6 +67,9 @@ pub enum DiagnosticStage {
     /// KISS framing / AX.25 passive inspection event (SPEC §5, §8, §14).
     #[serde(rename = "kiss_inspection")]
     KissInspection,
+    /// RTP passive inspection event (SPEC §5, §8, §14).
+    #[serde(rename = "rtp_inspection")]
+    RtpInspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -88,6 +91,7 @@ impl fmt::Display for DiagnosticStage {
             Self::MavlinkInspection => write!(f, "mavlink_inspection"),
             Self::MqttInspection => write!(f, "mqtt_inspection"),
             Self::KissInspection => write!(f, "kiss_inspection"),
+            Self::RtpInspection => write!(f, "rtp_inspection"),
         }
     }
 }
@@ -111,6 +115,7 @@ impl FromStr for DiagnosticStage {
             "mavlink_inspection" | "mavlink" => Ok(Self::MavlinkInspection),
             "mqtt_inspection" | "mqtt" => Ok(Self::MqttInspection),
             "kiss_inspection" | "kiss" | "ax25_inspection" | "ax25" => Ok(Self::KissInspection),
+            "rtp_inspection" | "rtp" => Ok(Self::RtpInspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -1962,6 +1967,223 @@ impl From<KissInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_rtp_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::RtpInspection
+}
+
+/// Structured RTP metadata extracted during passive packet inspection (RFC 3550, SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RtpMetadata {
+    /// 2-bit protocol version number (must be 2).
+    pub version: u8,
+
+    /// Padding flag.
+    pub padding: bool,
+
+    /// Extension flag.
+    pub extension: bool,
+
+    /// CSRC count (0..=15).
+    pub csrc_count: u8,
+
+    /// Marker bit.
+    pub marker: bool,
+
+    /// 7-bit payload type identifier (0..=127).
+    pub payload_type: u8,
+
+    /// 16-bit packet sequence number.
+    pub sequence_number: u16,
+
+    /// 32-bit sampling timestamp.
+    pub timestamp: u32,
+
+    /// 32-bit synchronization source (SSRC) identifier.
+    pub ssrc: u32,
+
+    /// Contributing source (CSRC) identifier list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub csrc_list: Vec<u32>,
+
+    /// 16-bit extension profile identifier, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_profile: Option<u16>,
+
+    /// Header length in octets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_length: Option<usize>,
+
+    /// Byte offset where packet payload begins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_offset: Option<usize>,
+}
+
+impl From<&crate::rtp::RtpHeader> for RtpMetadata {
+    fn from(header: &crate::rtp::RtpHeader) -> Self {
+        Self {
+            version: header.version,
+            padding: header.padding,
+            extension: header.extension,
+            csrc_count: header.csrc_count,
+            marker: header.marker,
+            payload_type: header.payload_type,
+            sequence_number: header.sequence_number,
+            timestamp: header.timestamp,
+            ssrc: header.ssrc,
+            csrc_list: header.csrc_list.clone(),
+            extension_profile: header.extension_profile,
+            header_length: Some(header.header_length),
+            payload_offset: Some(header.payload_offset),
+        }
+    }
+}
+
+/// Diagnostic event representing an RTP passive inspection event (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RtpInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `rtp_inspection`).
+    #[serde(default = "default_rtp_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// 16-bit packet sequence number.
+    pub sequence_number: u16,
+
+    /// 7-bit payload type identifier.
+    pub payload_type: u8,
+
+    /// 32-bit synchronization source (SSRC) identifier.
+    pub ssrc: u32,
+
+    /// 32-bit sampling timestamp.
+    pub timestamp: u32,
+
+    /// Marker bit.
+    pub marker: bool,
+
+    /// Protocol version (must be 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
+    /// Parse outcome status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<crate::rtp::RtpParseStatus>,
+
+    /// Structured RTP metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "rtp"
+    )]
+    pub rtp_metadata: Option<RtpMetadata>,
+}
+
+pub type RtpInspectionEvent = RtpInspection;
+
+impl RtpInspection {
+    /// Creates a new `RtpInspection` event.
+    #[must_use]
+    pub fn new(
+        sequence_number: u16,
+        payload_type: u8,
+        ssrc: u32,
+        timestamp: u32,
+        marker: bool,
+    ) -> Self {
+        let metadata = RtpMetadata {
+            version: crate::rtp::RTP_VERSION_2,
+            padding: false,
+            extension: false,
+            csrc_count: 0,
+            marker,
+            payload_type,
+            sequence_number,
+            timestamp,
+            ssrc,
+            csrc_list: Vec::new(),
+            extension_profile: None,
+            header_length: Some(crate::rtp::RTP_FIXED_HEADER_LEN),
+            payload_offset: Some(crate::rtp::RTP_FIXED_HEADER_LEN),
+        };
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::RtpInspection,
+            sequence_number,
+            payload_type,
+            ssrc,
+            timestamp,
+            marker,
+            version: Some(crate::rtp::RTP_VERSION_2),
+            parse_status: Some(crate::rtp::RtpParseStatus::Valid),
+            rtp_metadata: Some(metadata),
+        }
+    }
+
+    /// Creates an `RtpInspection` from a parsed [`crate::rtp::RtpHeader`] and status.
+    #[must_use]
+    pub fn from_header(
+        header: &crate::rtp::RtpHeader,
+        parse_status: crate::rtp::RtpParseStatus,
+    ) -> Self {
+        let metadata = RtpMetadata::from(header);
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::RtpInspection,
+            sequence_number: header.sequence_number,
+            payload_type: header.payload_type,
+            ssrc: header.ssrc,
+            timestamp: header.timestamp,
+            marker: header.marker,
+            version: Some(header.version),
+            parse_status: Some(parse_status),
+            rtp_metadata: Some(metadata),
+        }
+    }
+}
+
+impl From<RtpInspection> for DiagnosticEvent {
+    fn from(insp: RtpInspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp.stream_id.clone().unwrap_or_else(|| "rtp".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::RtpInspection,
+            TransportType::Udp,
+            0,
+        );
+        event.rtp_sequence_number = Some(insp.sequence_number);
+        event.sequence_number = Some(u64::from(insp.sequence_number));
+        event.rtp_payload_type = Some(insp.payload_type);
+        event.rtp_ssrc = Some(insp.ssrc);
+        event.rtp_timestamp = Some(insp.timestamp);
+        event.rtp_marker = Some(insp.marker);
+        event.rtp_version = insp.version.or(Some(crate::rtp::RTP_VERSION_2));
+        event.rtp_parse_status = insp.parse_status;
+        event.rtp_metadata = insp.rtp_metadata.clone();
+        event.rtp_inspection = Some(insp);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -2287,6 +2509,54 @@ pub struct DiagnosticEvent {
     /// Structured AX.25 metadata (SPEC §14, §8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ax25_metadata: Option<Ax25Metadata>,
+
+    /// RTP sequence number (RFC 3550 §5.1, SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_sequence_number: Option<u16>,
+
+    /// RTP payload type (RFC 3550 §5.1, SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_payload_type: Option<u8>,
+
+    /// RTP synchronization source (SSRC) identifier (RFC 3550 §5.1, SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_ssrc: Option<u32>,
+
+    /// RTP sampling timestamp (RFC 3550 §5.1, SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_timestamp: Option<u32>,
+
+    /// RTP marker bit (RFC 3550 §5.1, SPEC §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_marker: Option<bool>,
+
+    /// RTP protocol version number (must be 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_version: Option<u8>,
+
+    /// RTP padding flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_padding: Option<bool>,
+
+    /// RTP extension flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_extension: Option<bool>,
+
+    /// RTP CSRC count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_csrc_count: Option<u8>,
+
+    /// RTP parse evaluation status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_parse_status: Option<crate::rtp::RtpParseStatus>,
+
+    /// RTP inspection event metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "rtp")]
+    pub rtp_inspection: Option<RtpInspection>,
+
+    /// Structured RTP metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtp_metadata: Option<RtpMetadata>,
 }
 
 impl DiagnosticEvent {
@@ -2368,6 +2638,18 @@ impl DiagnosticEvent {
             kiss_inspection: None,
             kiss_metadata: None,
             ax25_metadata: None,
+            rtp_sequence_number: None,
+            rtp_payload_type: None,
+            rtp_ssrc: None,
+            rtp_timestamp: None,
+            rtp_marker: None,
+            rtp_version: None,
+            rtp_padding: None,
+            rtp_extension: None,
+            rtp_csrc_count: None,
+            rtp_parse_status: None,
+            rtp_inspection: None,
+            rtp_metadata: None,
         }
     }
 
@@ -3195,6 +3477,140 @@ impl DiagnosticEvent {
         KissInspection::new(port, command).into()
     }
 
+    fn ensure_rtp_metadata(&mut self) -> &mut RtpMetadata {
+        self.rtp_metadata.get_or_insert_with(|| RtpMetadata {
+            version: self.rtp_version.unwrap_or(crate::rtp::RTP_VERSION_2),
+            padding: self.rtp_padding.unwrap_or(false),
+            extension: self.rtp_extension.unwrap_or(false),
+            csrc_count: self.rtp_csrc_count.unwrap_or(0),
+            marker: self.rtp_marker.unwrap_or(false),
+            payload_type: self.rtp_payload_type.unwrap_or(0),
+            sequence_number: self.rtp_sequence_number.unwrap_or(0),
+            timestamp: self.rtp_timestamp.unwrap_or(0),
+            ssrc: self.rtp_ssrc.unwrap_or(0),
+            csrc_list: Vec::new(),
+            extension_profile: None,
+            header_length: None,
+            payload_offset: None,
+        })
+    }
+
+    /// Sets RTP sequence number.
+    #[must_use]
+    pub fn with_rtp_sequence_number(mut self, seq: u16) -> Self {
+        self.rtp_sequence_number = Some(seq);
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(seq));
+        }
+        let m = self.ensure_rtp_metadata();
+        m.sequence_number = seq;
+        self
+    }
+
+    /// Sets RTP payload type.
+    #[must_use]
+    pub fn with_rtp_payload_type(mut self, payload_type: u8) -> Self {
+        self.rtp_payload_type = Some(payload_type);
+        let m = self.ensure_rtp_metadata();
+        m.payload_type = payload_type;
+        self
+    }
+
+    /// Sets RTP SSRC.
+    #[must_use]
+    pub fn with_rtp_ssrc(mut self, ssrc: u32) -> Self {
+        self.rtp_ssrc = Some(ssrc);
+        let m = self.ensure_rtp_metadata();
+        m.ssrc = ssrc;
+        self
+    }
+
+    /// Sets RTP timestamp.
+    #[must_use]
+    pub fn with_rtp_timestamp(mut self, timestamp: u32) -> Self {
+        self.rtp_timestamp = Some(timestamp);
+        let m = self.ensure_rtp_metadata();
+        m.timestamp = timestamp;
+        self
+    }
+
+    /// Sets RTP marker bit.
+    #[must_use]
+    pub fn with_rtp_marker(mut self, marker: bool) -> Self {
+        self.rtp_marker = Some(marker);
+        let m = self.ensure_rtp_metadata();
+        m.marker = marker;
+        self
+    }
+
+    /// Attaches structured RTP metadata.
+    #[must_use]
+    pub fn with_rtp_metadata(mut self, metadata: RtpMetadata) -> Self {
+        self.rtp_version = Some(metadata.version);
+        self.rtp_padding = Some(metadata.padding);
+        self.rtp_extension = Some(metadata.extension);
+        self.rtp_csrc_count = Some(metadata.csrc_count);
+        self.rtp_marker = Some(metadata.marker);
+        self.rtp_payload_type = Some(metadata.payload_type);
+        self.rtp_sequence_number = Some(metadata.sequence_number);
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(metadata.sequence_number));
+        }
+        self.rtp_timestamp = Some(metadata.timestamp);
+        self.rtp_ssrc = Some(metadata.ssrc);
+        self.rtp_metadata = Some(metadata);
+        self
+    }
+
+    /// Enriches event with a parsed RTP header.
+    #[must_use]
+    pub fn with_rtp_header(mut self, header: &crate::rtp::RtpHeader) -> Self {
+        self.rtp_version = Some(header.version);
+        self.rtp_padding = Some(header.padding);
+        self.rtp_extension = Some(header.extension);
+        self.rtp_csrc_count = Some(header.csrc_count);
+        self.rtp_marker = Some(header.marker);
+        self.rtp_payload_type = Some(header.payload_type);
+        self.rtp_sequence_number = Some(header.sequence_number);
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(header.sequence_number));
+        }
+        self.rtp_timestamp = Some(header.timestamp);
+        self.rtp_ssrc = Some(header.ssrc);
+        let meta = RtpMetadata::from(header);
+        self.rtp_metadata = Some(meta);
+        self
+    }
+
+    /// Attaches RTP inspection event.
+    #[must_use]
+    pub fn with_rtp_inspection(mut self, inspection: RtpInspection) -> Self {
+        self.rtp_sequence_number = Some(inspection.sequence_number);
+        if self.sequence_number.is_none() {
+            self.sequence_number = Some(u64::from(inspection.sequence_number));
+        }
+        self.rtp_payload_type = Some(inspection.payload_type);
+        self.rtp_ssrc = Some(inspection.ssrc);
+        self.rtp_timestamp = Some(inspection.timestamp);
+        self.rtp_marker = Some(inspection.marker);
+        if let Some(v) = inspection.version {
+            self.rtp_version = Some(v);
+        }
+        self.rtp_parse_status = inspection.parse_status;
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::RtpInspection;
+        }
+        self.rtp_metadata = inspection.rtp_metadata.clone();
+        self.rtp_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates an RTP inspection diagnostic event.
+    #[must_use]
+    pub fn rtp_inspection(header: &crate::rtp::RtpHeader) -> Self {
+        RtpInspection::from_header(header, crate::rtp::RtpParseStatus::Valid).into()
+    }
+
     /// Records local transmission of an inspected packet (including MQTT).
     ///
     /// In accordance with SPEC §8, sets stage to [`DiagnosticStage::SendSucceeded`] representing
@@ -3975,6 +4391,26 @@ impl DiagnosticBuffer {
 
     /// Emits a [`KissInspection`] event into the diagnostic buffer.
     pub fn emit_kiss_inspection(&self, inspection: KissInspection) -> bool {
+        self.emit(inspection)
+    }
+
+    /// Creates an [`RtpInspection`] event with timestamps from the buffer's injected clock.
+    #[must_use]
+    pub fn create_rtp_inspection(
+        &self,
+        stream_id: impl Into<String>,
+        header: &crate::rtp::RtpHeader,
+        parse_status: crate::rtp::RtpParseStatus,
+    ) -> RtpInspection {
+        let mut insp = RtpInspection::from_header(header, parse_status);
+        insp.stream_id = Some(stream_id.into());
+        insp.monotonic_timestamp = Some(self.clock.monotonic_nanos());
+        insp.wall_clock_timestamp = Some(self.clock.wall_clock_nanos());
+        insp
+    }
+
+    /// Emits an [`RtpInspection`] event into the diagnostic buffer.
+    pub fn emit_rtp_inspection(&self, inspection: RtpInspection) -> bool {
         self.emit(inspection)
     }
 
@@ -5492,5 +5928,60 @@ mod tests {
         let zero_emitted = zero_buf.emit(kiss_event_zero);
         assert!(!zero_emitted);
         assert_eq!(zero_buf.dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_criterion5_serializing_diagnostic_event_with_rtp_metadata() {
+        // Acceptance criterion: In crates/rer/src/diagnostics.rs, serializing a DiagnosticEvent
+        // containing RTP sequence number 1000 and payload type 96 produces a JSON object
+        // containing the structured RTP metadata fields.
+        let event = DiagnosticEvent::new(
+            1_000_000,
+            1_700_000_000,
+            "test-stream",
+            DiagnosticStage::RtpInspection,
+            TransportType::Udp,
+            120,
+        )
+        .with_rtp_sequence_number(1000)
+        .with_rtp_payload_type(96)
+        .with_rtp_ssrc(0x12345678)
+        .with_rtp_timestamp(90000)
+        .with_rtp_marker(true);
+
+        let json = serde_json::to_string(&event).expect("must serialize DiagnosticEvent to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("must parse JSON");
+
+        // Structured fields on the event
+        assert_eq!(val["rtp_sequence_number"], 1000);
+        assert_eq!(val["rtp_payload_type"], 96);
+        assert_eq!(val["rtp_ssrc"], 0x12345678);
+        assert_eq!(val["rtp_timestamp"], 90000);
+        assert_eq!(val["rtp_marker"], true);
+
+        // Structured rtp_metadata object
+        let meta = &val["rtp_metadata"];
+        assert!(
+            meta.is_object(),
+            "rtp_metadata field must be present as a JSON object"
+        );
+        assert_eq!(meta["sequence_number"], 1000);
+        assert_eq!(meta["payload_type"], 96);
+        assert_eq!(meta["ssrc"], 0x12345678);
+        assert_eq!(meta["timestamp"], 90000);
+        assert_eq!(meta["marker"], true);
+
+        // Also test serialization from RtpInspection
+        let insp = RtpInspection::new(1000, 96, 0x12345678, 90000, true);
+        let insp_event: DiagnosticEvent = insp.into();
+        let insp_json =
+            serde_json::to_string(&insp_event).expect("must serialize RtpInspection event");
+        let insp_val: serde_json::Value =
+            serde_json::from_str(&insp_json).expect("must parse JSON");
+
+        assert_eq!(insp_val["rtp_sequence_number"], 1000);
+        assert_eq!(insp_val["rtp_payload_type"], 96);
+        assert_eq!(insp_val["rtp_metadata"]["sequence_number"], 1000);
+        assert_eq!(insp_val["rtp_metadata"]["payload_type"], 96);
     }
 }
