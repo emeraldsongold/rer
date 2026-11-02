@@ -156,7 +156,38 @@ On Tier 1 platform (`x86_64-unknown-linux-gnu` on Ubuntu hosted runner):
 - **Environments Without IPv6 Loopback**: In container sandboxes where `::1` cannot be bound (such as restricted container execution environments without IPv6 loopback), IPv6 loopback integration tests skip with a visible diagnostic message (`SKIPPED: IPv6 loopback ([::1]) is unavailable...`) and never pass silently.
 - **Link-Local Addresses on Real Network Interfaces**: Link-local addresses (`fe80::/10`) on real network interfaces are not covered by continuous integration because GitHub-hosted CI runners lack physical multi-interface network topologies. Scoped address behavior is tested offline via unit tests and loopback integration tests where the platform allows it.
 
-## 5. Explicitly Out of Scope for Initial Baseline
+## 5. Multicast Support and Operating System Limitations (Milestones RER-F-072, RER-F-073)
+
+RER provides native IP multicast membership, egress forwarding, time-to-live (TTL) configuration, and loopback controls for UDP relay streams across IPv4 (`224.0.0.0/4`) and IPv6 (`ff00::/8`) endpoints (SPEC §5).
+
+### Tested Capabilities in Continuous Integration
+On Tier 1 platform (`x86_64-unknown-linux-gnu` on Ubuntu hosted runner):
+- **IPv4 Group Membership (`join_multicast_v4`)**: Binding UDP sockets to IPv4 multicast addresses (`224.0.0.0/4`) joins the group via standard POSIX `IP_ADD_MEMBERSHIP` socket options across all interfaces or specified local interface addresses (`0.0.0.0` or explicit IP).
+- **IPv6 Group Membership (`join_multicast_v6`)**: Binding UDP sockets to IPv6 multicast addresses (`ff00::/8`) joins the group via `IPV6_ADD_MEMBERSHIP` across all interfaces (index 0) or specific interface indexes resolved from interface names.
+- **Multicast Egress Configuration**: Transparent datagram forwarding to multicast endpoints applies configured Time-to-Live (`IP_MULTICAST_TTL` for IPv4, `IPV6_MULTICAST_HOPS` for IPv6) and local loopback reception controls (`IP_MULTICAST_LOOP` / `IPV6_MULTICAST_LOOP`).
+- **Protocol Rejection**: Configuration validation rejects multicast configurations on TCP endpoints at startup with actionable `ValidationError` reports.
+- **Payload and Boundary Preservation**: Forwarding across multicast endpoints preserves datagram boundaries and payload bytes byte-for-byte.
+
+### Operating System Multicast Limitations and Source-Specific Multicast (SSM) Kernel Support
+- **Source-Specific Multicast (SSM) Kernel Support**:
+  - RFC 4607 defines Source-Specific Multicast (SSM) for IPv4 (`232.0.0.0/8`) and IPv6 (`ff3x::/32`), allowing receivers to subscribe to traffic from designated unicast source addresses only, eliminating shared-tree rendezvous mechanisms.
+  - SSM relies on IGMPv3 (IPv4) and MLDv2 (IPv6). Kernel support requires explicit socket API implementations (`IP_ADD_SOURCE_MEMBERSHIP` / `struct ip_mreq_source` or RFC 3678 protocol-independent `MCAST_JOIN_SOURCE_GROUP`).
+  - **Linux**: Supported since kernel 2.6.8, provided `CONFIG_IP_MULTICAST` is enabled in kernel configuration. However, legacy Linux kernels, minimal embedded distributions, and certain container runtimes lack full IGMPv3/MLDv2 source-filtering support or drop source-filtered reports in the virtual switch layer.
+  - **macOS / BSD / Windows**: macOS and BSD support source filtering via `IP_ADD_SOURCE_MEMBERSHIP`, but differ in multi-interface binding behavior and socket option error handling. Windows (Vista and later) supports RFC 3678 source-filtering APIs, but uses non-POSIX socket option constants.
+  - **RER Design Decision**: In accordance with SPEC §5 and RER's transparent relay architecture, RER implements portable Any-Source Multicast (ASM) via standard `IP_ADD_MEMBERSHIP` and `IPV6_ADD_MEMBERSHIP` APIs supported across all target platforms. Where source filtering is required, RER provides deterministic application-level source filtering (via endpoint address rules in stream configuration) rather than relying on brittle, platform-divergent kernel SSM implementations.
+
+### Container Loopback Multicast Constraints and Virtual Networking
+- **Container Loopback Multicast Route Constraints**:
+  - In containerized environments (Docker, Podman, Kubernetes CRI), each container operates in an isolated network namespace. By default, Linux container network namespaces do not install a multicast route (`224.0.0.0/4` or `ff00::/8`) on the loopback (`lo`) or container `eth0` interface.
+  - Under Linux kernel routing rules, transmitting multicast datagrams on an interface without an explicit multicast route fails with `ENETUNREACH` ("Network is unreachable"). In environments where container loopback multicast is required, an explicit route must be added (e.g., `ip route add 224.0.0.0/4 dev lo`).
+- **Loopback Socket Delivery (`IP_MULTICAST_LOOP` / `IPV6_MULTICAST_LOOP`)**:
+  - When sending multicast datagrams destined for local listeners on the same host or container, the kernel suppresses delivery to local sockets unless `IP_MULTICAST_LOOP` (IPv4) or `IPV6_MULTICAST_LOOP` (IPv6) is enabled (`loopback: true` in RER stream configuration).
+  - Even with loopback enabled, isolated container veth pairs connected to Docker bridges drop transit multicast traffic unless the bridge operates with IGMP snooping disabled or an active IGMP querier daemon (such as `smcroute` or `igmpproxy`) is present.
+- **Port Reuse and Wildcard Binding (`SO_REUSEADDR`)**:
+  - Binding multiple sockets to the same multicast group and port requires `SO_REUSEADDR` (and on BSD/macOS, `SO_REUSEPORT`). RER automatically applies `SO_REUSEADDR` to all multicast sockets.
+  - On Linux, binding directly to a multicast address (`239.255.0.1:port`) falls back to `0.0.0.0:port` if the kernel rejects specific group address binding before joining membership.
+
+## 6. Explicitly Out of Scope for Initial Baseline
 
 The following environments and platforms are intentionally out of scope for initial development:
 - Specialized aerospace embedded processors (e.g., Xiphos hardware)
