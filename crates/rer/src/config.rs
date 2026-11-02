@@ -328,6 +328,14 @@ pub struct StreamConfig {
     /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
+
+    /// Optional multicast socket and egress configuration (SPEC §5). Off by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_multicast_config"
+    )]
+    pub multicast: Option<MulticastConfig>,
 }
 
 const fn default_mqtt_max_packet_size() -> usize {
@@ -696,6 +704,80 @@ where
     deserializer.deserialize_any(RtpConfigVisitor)
 }
 
+/// Multicast socket and egress configuration options (SPEC §5).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MulticastConfig {
+    /// Local network interface IP address or interface name for multicast membership or transmission (e.g. "192.168.1.10" or "0.0.0.0").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+
+    /// Source IP address for Source-Specific Multicast (SSM / IGMPv3, RFC 4607).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// Multicast Time-to-Live (IPv4) or Hop Limit (IPv6) for egress datagrams (1..=255). Defaults to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u32>,
+
+    /// Enable loopback of transmitted multicast datagrams to local host sockets. Defaults to false.
+    #[serde(default)]
+    pub loopback: bool,
+}
+
+fn deserialize_optional_multicast_config<'de, D>(
+    deserializer: D,
+) -> Result<Option<MulticastConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct MulticastConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for MulticastConfigVisitor {
+        type Value = Option<MulticastConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean, null, or a multicast configuration mapping")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(MulticastConfig::default()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(MulticastConfig::default()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v {
+                Ok(Some(MulticastConfig::default()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let config =
+                MulticastConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(config))
+        }
+    }
+
+    deserializer.deserialize_any(MulticastConfigVisitor)
+}
+
 /// Configuration for CCSDS Space Packet parsing, validation, and sequence tracking (SPEC §14).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1023,6 +1105,14 @@ pub struct EndpointConfig {
     /// Optional framing mode for TCP endpoints ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
+
+    /// Optional multicast configuration for UDP endpoints (SPEC §5).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_multicast_config"
+    )]
+    pub multicast: Option<MulticastConfig>,
 }
 
 /// Framing modes for TCP streams (SPEC §5, §14).
@@ -1658,6 +1748,11 @@ impl Config {
                         }
                     }
                 }
+
+                // Validate multicast configuration
+                if let Some(ref mc) = stream.multicast {
+                    validate_multicast(mc, &format!("{}.multicast", stream_prefix), &mut errors);
+                }
             }
 
             // Check logical interfaces
@@ -1782,6 +1877,50 @@ fn validate_buffer(buf: &BufferConfig, path: &str, errors: &mut Vec<ValidationEr
     }
 }
 
+/// Returns true if the endpoint address string parses to a multicast IP address.
+#[must_use]
+pub fn endpoint_ip_is_multicast(addr_str: &str) -> bool {
+    let addr = addr_str.trim();
+    if addr.starts_with('[') {
+        if let Some(close_idx) = addr.find(']') {
+            let mut host = &addr[1..close_idx];
+            if let Some((ip_part, _)) = host.split_once('%') {
+                host = ip_part;
+            }
+            if let Ok(ipv6) = host.parse::<std::net::Ipv6Addr>() {
+                return ipv6.is_multicast();
+            }
+        }
+    } else if let Some((host, _)) = addr.split_once(':') {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return ip.is_multicast();
+        }
+    } else if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+        return ip.is_multicast();
+    }
+    false
+}
+
+/// Validates multicast configuration settings offline and deterministically.
+pub fn validate_multicast(mc: &MulticastConfig, path: &str, errors: &mut Vec<ValidationError>) {
+    if let Some(ttl) = mc.ttl {
+        if ttl == 0 || ttl > 255 {
+            errors.push(ValidationError {
+                path: format!("{}.ttl", path),
+                reason: "out-of-range TTL: multicast ttl must be between 1 and 255; rejecting an out-of-range TTL".to_string(),
+            });
+        }
+    }
+    if let Some(ref src) = mc.source {
+        if src.trim().parse::<std::net::IpAddr>().is_err() {
+            errors.push(ValidationError {
+                path: format!("{}.source", path),
+                reason: "invalid source address: must be a valid IP address".to_string(),
+            });
+        }
+    }
+}
+
 fn validate_endpoint(
     ep: &EndpointConfig,
     path: &str,
@@ -1796,6 +1935,27 @@ fn validate_endpoint(
             path: format!("{}.mode", path),
             reason: "conflicting settings: UDP source cannot be in 'connect' mode".to_string(),
         });
+    }
+
+    // Multicast validation
+    let is_mcast = endpoint_ip_is_multicast(&ep.address);
+    if ep.transport == TransportType::Tcp && is_mcast {
+        errors.push(ValidationError {
+            path: format!("{}.address", path),
+            reason: "multicast address is not supported over TCP: rejecting multicast over TCP"
+                .to_string(),
+        });
+    }
+    if ep.transport == TransportType::Tcp && ep.multicast.is_some() {
+        errors.push(ValidationError {
+            path: format!("{}.multicast", path),
+            reason:
+                "multicast configuration is not supported over TCP: rejecting multicast over TCP"
+                    .to_string(),
+        });
+    }
+    if let Some(ref mc) = ep.multicast {
+        validate_multicast(mc, &format!("{}.multicast", path), errors);
     }
 }
 
@@ -2775,6 +2935,115 @@ instances:
             err.reason.contains("invalid payload type"),
             "expected error reporting invalid payload type, got: {}",
             err.reason
+        );
+    }
+
+    #[test]
+    fn test_criterion1_validate_tcp_endpoint_multicast_rejected() {
+        // Acceptance criterion: In crates/rer/src/config.rs, calling validate on a Config
+        // where an endpoint with transport set to TransportType::Tcp specifies a multicast address
+        // returns a ValidationError rejecting multicast over TCP.
+        let yaml_v4 = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "239.255.0.1:5000"
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+"#;
+        let config_v4 = Config::from_yaml_str(yaml_v4).expect("deserializes successfully");
+        let errors_v4 = config_v4.validate();
+        assert!(
+            !errors_v4.is_empty(),
+            "expected validation errors for IPv4 multicast over TCP"
+        );
+        let err_v4 = errors_v4
+            .iter()
+            .find(|e| {
+                e.path.contains("source")
+                    && (e.reason.contains("rejecting multicast over TCP")
+                        || e.reason.contains("multicast over TCP"))
+            })
+            .expect("validation error rejecting multicast over TCP for IPv4");
+        assert!(
+            err_v4.reason.contains("rejecting multicast over TCP")
+                || err_v4.reason.contains("multicast")
+        );
+
+        let yaml_v6 = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "udp"
+          address: "127.0.0.1:5000"
+        destination:
+          transport: "tcp"
+          address: "[ff02::1]:5001"
+"#;
+        let config_v6 = Config::from_yaml_str(yaml_v6).expect("deserializes successfully");
+        let errors_v6 = config_v6.validate();
+        assert!(
+            !errors_v6.is_empty(),
+            "expected validation errors for IPv6 multicast over TCP"
+        );
+        let err_v6 = errors_v6
+            .iter()
+            .find(|e| {
+                e.path.contains("destination")
+                    && (e.reason.contains("rejecting multicast over TCP")
+                        || e.reason.contains("multicast over TCP"))
+            })
+            .expect("validation error rejecting multicast over TCP for IPv6");
+        assert!(
+            err_v6.reason.contains("rejecting multicast over TCP")
+                || err_v6.reason.contains("multicast")
+        );
+    }
+
+    #[test]
+    fn test_criterion2_validate_multicast_config_ttl_zero_rejected() {
+        // Acceptance criterion: In crates/rer/src/config.rs, calling validate on a Config
+        // containing a MulticastConfig with a ttl value of 0 returns a ValidationError rejecting an out-of-range TTL.
+        let yaml = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "udp"
+          address: "239.255.0.1:5000"
+          multicast:
+            ttl: 0
+        destination:
+          transport: "udp"
+          address: "127.0.0.1:5001"
+"#;
+        let config = Config::from_yaml_str(yaml).expect("deserializes successfully");
+        let errors = config.validate();
+        assert!(
+            !errors.is_empty(),
+            "expected validation error for multicast ttl 0"
+        );
+        let err = errors
+            .iter()
+            .find(|e| {
+                e.path.contains("ttl")
+                    && (e.reason.contains("out-of-range TTL")
+                        || e.reason.contains("rejecting an out-of-range TTL"))
+            })
+            .expect("validation error rejecting an out-of-range TTL");
+        assert!(
+            err.reason.contains("out-of-range TTL")
+                || err.reason.contains("rejecting an out-of-range TTL")
         );
     }
 }
