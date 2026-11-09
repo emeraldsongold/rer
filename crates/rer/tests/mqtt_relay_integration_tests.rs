@@ -114,23 +114,39 @@ instances:
         "PINGREQ payload must be transmitted unmodified"
     );
 
-    let stats = relay.stream_stats("s-mqtt-fwd").expect("stats");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut stats = relay.stream_stats("s-mqtt-fwd").expect("stats");
+    while (stats.received_packets < 3 || stats.forwarded_packets < 3)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+        stats = relay.stream_stats("s-mqtt-fwd").expect("stats");
+    }
     assert_eq!(stats.received_packets, 3);
     assert_eq!(stats.forwarded_packets, 3);
     assert_eq!(stats.dropped_packets, 0);
 
     // Verify diagnostic events
-    let snap = relay.event_buffer().snapshot();
-    let insp_events: Vec<&DiagnosticEvent> = snap
-        .events
-        .iter()
-        .filter(|e| e.stage == DiagnosticStage::MqttInspection)
-        .collect();
+    let mut insp_events = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let snap = relay.event_buffer().snapshot();
+        let events: Vec<DiagnosticEvent> = snap
+            .events
+            .into_iter()
+            .filter(|e| e.stage == DiagnosticStage::MqttInspection)
+            .collect();
+        if events.len() >= 3 {
+            insp_events = events;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     assert_eq!(insp_events.len(), 3);
 
     // First event (PUBLISH QoS 1)
-    let ev1 = insp_events[0];
+    let ev1 = &insp_events[0];
     assert_eq!(ev1.mqtt_packet_type, Some(3));
     assert_eq!(ev1.mqtt_type_name.as_deref(), Some("PUBLISH"));
     assert_eq!(ev1.mqtt_qos, Some(1));
@@ -138,13 +154,13 @@ instances:
     assert!(ev1.mqtt_metadata.is_some());
 
     // Second event (PUBLISH QoS 0)
-    let ev2 = insp_events[1];
+    let ev2 = &insp_events[1];
     assert_eq!(ev2.mqtt_packet_type, Some(3));
     assert_eq!(ev2.mqtt_type_name.as_deref(), Some("PUBLISH"));
     assert_eq!(ev2.mqtt_qos, Some(0));
 
     // Third event (PINGREQ)
-    let ev3 = insp_events[2];
+    let ev3 = &insp_events[2];
     assert_eq!(ev3.mqtt_packet_type, Some(12));
     assert_eq!(ev3.mqtt_type_name.as_deref(), Some("PINGREQ"));
 

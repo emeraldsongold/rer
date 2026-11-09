@@ -4285,7 +4285,7 @@ impl DiagnosticBuffer {
         }
 
         let mut inner_guard = None;
-        for _ in 0..32 {
+        for _ in 0..256 {
             if let Ok(guard) = self.inner.try_lock() {
                 inner_guard = Some(guard);
                 break;
