@@ -270,6 +270,13 @@
           "enum": [
             "kiss"
           ]
+        },
+        {
+          "description": "Modbus TCP MBAP framing (7-octet MBAP header with 16-bit length field).",
+          "type": "string",
+          "enum": [
+            "modbus_tcp"
+          ]
         }
       ]
     },

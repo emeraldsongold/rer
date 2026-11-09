@@ -15,6 +15,7 @@ pub mod health;
 pub mod ltp;
 pub mod management;
 pub mod mavlink;
+pub mod modbus;
 pub mod mqtt;
 pub mod relay;
 pub mod replay;
@@ -70,9 +71,9 @@ pub use diagnostics::{
 };
 pub use framing::{
     encode_frame, encode_kiss_frame, read_ccsds_frame, read_frame, read_frame_with_mode,
-    read_kiss_frame, read_mavlink_frame, read_mqtt_frame, write_ccsds_frame, write_frame,
-    write_frame_with_mode, write_kiss_frame, write_mavlink_frame, write_mqtt_frame, KISS_FEND,
-    KISS_FESC, KISS_TFEND, KISS_TFESC,
+    read_kiss_frame, read_mavlink_frame, read_modbus_frame, read_mqtt_frame, write_ccsds_frame,
+    write_frame, write_frame_with_mode, write_kiss_frame, write_mavlink_frame, write_modbus_frame,
+    write_mqtt_frame, KISS_FEND, KISS_FESC, KISS_TFEND, KISS_TFESC,
 };
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,
@@ -104,6 +105,14 @@ pub use mavlink::{
     MAVLINK_V2_FRAMING_OVERHEAD_SIGNED, MAVLINK_V2_FRAMING_OVERHEAD_UNSIGNED,
     MAVLINK_V2_HEADER_LEN, MAVLINK_V2_MIN_HEADER_LEN, MAVLINK_V2_OVERHEAD_SIGNED,
     MAVLINK_V2_OVERHEAD_UNSIGNED, MAVLINK_V2_STX,
+};
+pub use modbus::{
+    encode_modbus_exception_response, encode_modbus_frame, parse_frame, parse_mbap_header,
+    parse_mbap_header_with_fc, parse_modbus, parse_modbus_frame, parse_modbus_header,
+    parse_modbus_pdu, parse_modbus_response, parse_pdu, ExceptionCode, MbapHeader, ModbusException,
+    ModbusExceptionCode, ModbusFrame, ModbusMetadata, ModbusParseError, ModbusPdu, MBAP_HEADER_LEN,
+    MODBUS_FC_READ_HOLDING_REGISTERS, MODBUS_MAX_FRAME_LEN, MODBUS_MAX_LENGTH,
+    MODBUS_MIN_FRAME_LEN, MODBUS_MIN_LENGTH, MODBUS_PROTOCOL_ID,
 };
 pub use mqtt::{
     decode_variable_byte_integer, decode_variable_length_integer, decode_varint,

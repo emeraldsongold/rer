@@ -1140,6 +1140,15 @@ pub enum FramingMode {
     /// KISS framing (FEND-delimited with byte escaping).
     #[serde(alias = "KISS", alias = "kiss")]
     Kiss,
+    /// Modbus TCP MBAP framing (7-octet MBAP header with 16-bit length field).
+    #[serde(
+        alias = "MODBUS",
+        alias = "modbus",
+        alias = "modbus_tcp",
+        alias = "MODBUS_TCP",
+        alias = "ModbusTcp"
+    )]
+    ModbusTcp,
 }
 
 impl fmt::Display for FramingMode {
@@ -1150,6 +1159,7 @@ impl fmt::Display for FramingMode {
             Self::Mavlink => write!(f, "mavlink"),
             Self::Mqtt => write!(f, "mqtt"),
             Self::Kiss => write!(f, "kiss"),
+            Self::ModbusTcp => write!(f, "modbus_tcp"),
         }
     }
 }
