@@ -530,6 +530,78 @@ pub fn write_kiss_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<(
     writer.write_all(&frame)
 }
 
+/// Reads a single Modbus TCP frame from `reader`.
+///
+/// In Modbus TCP stream framing (SPEC §5, §8, §14):
+/// - A frame begins with a 7-octet MBAP (Modbus Application Protocol) header:
+///   - 2 octets Transaction Identifier (big-endian u16)
+///   - 2 octets Protocol Identifier (big-endian u16, must be 0x0000 for Modbus TCP)
+///   - 2 octets Length field (big-endian u16, number of following octets: Unit ID + PDU)
+///   - 1 octet Unit Identifier (slave/device address)
+/// - The declared Length field must be within `2..=254` (minimum 1 octet Unit ID + 1 octet Function Code).
+/// - Total frame length on the wire is `6 + Length` octets (7 octets MBAP header + `Length - 1` octets PDU).
+/// - Validates that Protocol Identifier is 0x0000, Length is within `2..=254`, and total frame length
+///   does not exceed `max_frame_size` without allocating the declared length.
+pub fn read_modbus_frame<R: Read>(
+    reader: &mut R,
+    max_frame_size: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut header = [0u8; 7];
+    let ok = read_exact_interruptible(reader, &mut header, shutdown)?;
+    if !ok {
+        return Ok(None);
+    }
+
+    let protocol_id = u16::from_be_bytes([header[2], header[3]]);
+    if protocol_id != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid Modbus TCP protocol identifier: expected 0, got {protocol_id}"),
+        ));
+    }
+
+    let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+    if !(2..=254).contains(&length) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("out-of-range Modbus length field: {length} (expected 2..=254)"),
+        ));
+    }
+
+    let total_frame_length = 6 + length;
+    if total_frame_length > max_frame_size || length > max_frame_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Modbus frame total length {total_frame_length} exceeds maximum allowed {max_frame_size}"
+            ),
+        ));
+    }
+
+    let mut frame = vec![0u8; total_frame_length];
+    frame[..7].copy_from_slice(&header);
+
+    let ok = read_exact_interruptible(reader, &mut frame[7..], shutdown)?;
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "stream closed before full Modbus frame payload was read",
+        ));
+    }
+
+    Ok(Some(frame))
+}
+
+/// Writes a Modbus TCP frame to `writer`.
+///
+/// In Modbus TCP stream framing, frames are self-delimiting via the 7-octet MBAP
+/// header length field, so the raw Modbus TCP frame bytes are transmitted directly
+/// without an additional length prefix.
+pub fn write_modbus_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<()> {
+    writer.write_all(packet)
+}
+
 /// Reads a single frame from `reader` using the specified [`FramingMode`].
 pub fn read_frame_with_mode<R: Read>(
     reader: &mut R,
@@ -543,6 +615,7 @@ pub fn read_frame_with_mode<R: Read>(
         FramingMode::Mavlink => read_mavlink_frame(reader, max_frame_size, shutdown),
         FramingMode::Mqtt => read_mqtt_frame(reader, max_frame_size, shutdown),
         FramingMode::Kiss => read_kiss_frame(reader, max_frame_size, shutdown),
+        FramingMode::ModbusTcp => read_modbus_frame(reader, max_frame_size, shutdown),
     }
 }
 
@@ -564,6 +637,7 @@ pub fn write_frame_with_mode<W: Write>(
         FramingMode::Mavlink => write_mavlink_frame(writer, payload),
         FramingMode::Mqtt => write_mqtt_frame(writer, payload),
         FramingMode::Kiss => write_kiss_frame(writer, payload),
+        FramingMode::ModbusTcp => write_modbus_frame(writer, payload),
     }
 }
 
@@ -1499,5 +1573,189 @@ mod tests {
         let mut c4 = Cursor::new(vec![KISS_FEND, 0x00, 0xDB]);
         let err4 = read_kiss_frame(&mut c4, 1024, &shutdown).unwrap_err();
         assert_eq!(err4.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_criterion5_modbus_frame_fragmented_1_byte_reads() {
+        // Acceptance criterion 5:
+        // In crates/rer/src/framing.rs, reading a Modbus frame fragmented across multiple 1-byte reads
+        // reassembles the complete frame matching the transmitted payload bytes.
+        struct OneByteReader<'a> {
+            data: &'a [u8],
+            pos: usize,
+        }
+
+        impl<'a> Read for OneByteReader<'a> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.pos >= self.data.len() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.data[self.pos];
+                self.pos += 1;
+                Ok(1)
+            }
+        }
+
+        // Modbus frame: TxID=1, ProtoID=0, Length=6, UnitID=1, FunctionCode=3, Reg=100, Count=10
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&1u16.to_be_bytes()); // TxID 1
+        frame.extend_from_slice(&0u16.to_be_bytes()); // ProtoID 0
+        frame.extend_from_slice(&6u16.to_be_bytes()); // Length 6
+        frame.push(1); // UnitID 1
+        frame.push(3); // Function Code 3
+        frame.extend_from_slice(&[0x00, 0x64, 0x00, 0x0A]); // Data (4 bytes)
+
+        assert_eq!(frame.len(), 12);
+
+        let mut reader = OneByteReader {
+            data: &frame,
+            pos: 0,
+        };
+        let shutdown = AtomicBool::new(false);
+        let reassembled = read_modbus_frame(&mut reader, 1024, &shutdown)
+            .expect("read_modbus_frame")
+            .expect("some frame");
+
+        assert_eq!(reassembled, frame);
+
+        // Also test through read_frame_with_mode
+        let mut reader_mode = OneByteReader {
+            data: &frame,
+            pos: 0,
+        };
+        let reassembled_mode =
+            read_frame_with_mode(&mut reader_mode, FramingMode::ModbusTcp, 1024, &shutdown)
+                .expect("read_frame_with_mode")
+                .expect("some frame");
+
+        assert_eq!(reassembled_mode, frame);
+    }
+
+    #[test]
+    fn test_criterion6_modbus_frame_exceeds_max_frame_size_no_allocation() {
+        // Acceptance criterion 6:
+        // In crates/rer/src/framing.rs, reading a Modbus frame declaring a length exceeding max_frame_size
+        // returns an invalid data error without allocating the declared length.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&1u16.to_be_bytes()); // TxID 1
+        frame.extend_from_slice(&0u16.to_be_bytes()); // ProtoID 0
+        frame.extend_from_slice(&200u16.to_be_bytes()); // Length 200 (within 2..=254, but exceeds max_frame_size 50)
+        frame.push(1); // UnitID 1
+
+        let mut cursor = Cursor::new(frame);
+        let shutdown = AtomicBool::new(false);
+        let err = read_modbus_frame(&mut cursor, 50, &shutdown).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum allowed 50"));
+
+        // Also test through read_frame_with_mode
+        let mut frame_mode = Vec::new();
+        frame_mode.extend_from_slice(&1u16.to_be_bytes());
+        frame_mode.extend_from_slice(&0u16.to_be_bytes());
+        frame_mode.extend_from_slice(&200u16.to_be_bytes());
+        frame_mode.push(1);
+
+        let mut cursor_mode = Cursor::new(frame_mode);
+        let err_mode =
+            read_frame_with_mode(&mut cursor_mode, FramingMode::ModbusTcp, 50, &shutdown)
+                .unwrap_err();
+
+        assert_eq!(err_mode.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_modbus_read_write_frame_roundtrip() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&42u16.to_be_bytes());
+        frame.extend_from_slice(&0u16.to_be_bytes());
+        frame.extend_from_slice(&4u16.to_be_bytes()); // UnitID + FC + 2 bytes data
+        frame.push(5);
+        frame.push(16); // Write multiple registers
+        frame.extend_from_slice(&[0x12, 0x34]);
+
+        let mut out = Vec::new();
+        write_modbus_frame(&mut out, &frame).expect("write_modbus_frame");
+        assert_eq!(out, frame);
+
+        let mut out_mode = Vec::new();
+        write_frame_with_mode(&mut out_mode, FramingMode::ModbusTcp, &frame)
+            .expect("write_frame_with_mode");
+        assert_eq!(out_mode, frame);
+
+        let mut cursor = Cursor::new(out);
+        let shutdown = AtomicBool::new(false);
+        let read_back = read_modbus_frame(&mut cursor, 1024, &shutdown)
+            .expect("read")
+            .expect("frame");
+        assert_eq!(read_back, frame);
+    }
+
+    #[test]
+    fn test_modbus_invalid_protocol_id() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&1u16.to_be_bytes());
+        frame.extend_from_slice(&99u16.to_be_bytes()); // invalid proto ID
+        frame.extend_from_slice(&6u16.to_be_bytes());
+        frame.push(1);
+
+        let mut cursor = Cursor::new(frame);
+        let shutdown = AtomicBool::new(false);
+        let err = read_modbus_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid Modbus TCP protocol"));
+    }
+
+    #[test]
+    fn test_modbus_out_of_range_length() {
+        let shutdown = AtomicBool::new(false);
+
+        // Length < 2
+        let mut frame_low = Vec::new();
+        frame_low.extend_from_slice(&1u16.to_be_bytes());
+        frame_low.extend_from_slice(&0u16.to_be_bytes());
+        frame_low.extend_from_slice(&1u16.to_be_bytes()); // len 1
+        frame_low.push(1);
+        let mut c_low = Cursor::new(frame_low);
+        let err_low = read_modbus_frame(&mut c_low, 1024, &shutdown).unwrap_err();
+        assert_eq!(err_low.kind(), io::ErrorKind::InvalidData);
+
+        // Length > 254
+        let mut frame_high = Vec::new();
+        frame_high.extend_from_slice(&1u16.to_be_bytes());
+        frame_high.extend_from_slice(&0u16.to_be_bytes());
+        frame_high.extend_from_slice(&255u16.to_be_bytes()); // len 255
+        frame_high.push(1);
+        let mut c_high = Cursor::new(frame_high);
+        let err_high = read_modbus_frame(&mut c_high, 1024, &shutdown).unwrap_err();
+        assert_eq!(err_high.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_modbus_eof_and_unexpected_eof() {
+        let shutdown = AtomicBool::new(false);
+
+        // Empty reader -> Ok(None)
+        let mut c_empty = Cursor::new(Vec::new());
+        assert_eq!(
+            read_modbus_frame(&mut c_empty, 1024, &shutdown).unwrap(),
+            None
+        );
+
+        // Truncated header (< 7 bytes) -> UnexpectedEof
+        let mut c_trunc = Cursor::new(vec![0, 1, 0, 0]);
+        let err_trunc = read_modbus_frame(&mut c_trunc, 1024, &shutdown).unwrap_err();
+        assert_eq!(err_trunc.kind(), io::ErrorKind::UnexpectedEof);
+
+        // Truncated payload -> UnexpectedEof
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&1u16.to_be_bytes());
+        frame.extend_from_slice(&0u16.to_be_bytes());
+        frame.extend_from_slice(&6u16.to_be_bytes());
+        frame.push(1);
+        frame.push(3); // only 1 byte of payload, expects 5
+        let mut c_trunc_payload = Cursor::new(frame);
+        let err_payload = read_modbus_frame(&mut c_trunc_payload, 1024, &shutdown).unwrap_err();
+        assert_eq!(err_payload.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
