@@ -277,6 +277,13 @@
           "enum": [
             "modbus_tcp"
           ]
+        },
+        {
+          "description": "DNP3 FT3 link framing (sync octets 0x05 0x64 with CRC verification).",
+          "type": "string",
+          "enum": [
+            "dnp3"
+          ]
         }
       ]
     },

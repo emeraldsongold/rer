@@ -602,6 +602,140 @@ pub fn write_modbus_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result
     writer.write_all(packet)
 }
 
+/// Maximum number of bytes to scan while searching for DNP3 sync octets (0x05 0x64).
+pub const DNP3_MAX_SYNC_SEARCH_BYTES: usize = 4096;
+
+/// Reads a single DNP3 FT3 frame from `reader`.
+///
+/// In DNP3 stream framing (SPEC §5, §8, §14):
+/// - A frame begins with sync octets `0x05 0x64`. Leading noise bytes before the sync
+///   pattern are scanned through up to a bounded limit.
+/// - Next 8 octets complete the 10-octet FT3 header:
+///   - 1 octet Length field (`5..=255`, octets following Length excluding CRCs)
+///   - 1 octet Control
+///   - 2 octets Destination Address (little-endian)
+///   - 2 octets Source Address (little-endian)
+///   - 2 octets Header CRC (little-endian)
+/// - Total wire length is `10 + (Length - 5) + 2 * ceil((Length - 5) / 16)`.
+/// - Validates that Length is in `5..=255` and total wire length does not exceed
+///   `max_frame_size` without allocating the declared frame size.
+pub fn read_dnp3_frame<R: Read>(
+    reader: &mut R,
+    max_frame_size: usize,
+    shutdown: &AtomicBool,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut scanned = 0usize;
+    let search_limit = max_frame_size.max(DNP3_MAX_SYNC_SEARCH_BYTES);
+    let mut byte_buf = [0u8; 1];
+    let mut sync_state = 0u8;
+
+    while sync_state != 2 {
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let ok = read_exact_interruptible(reader, &mut byte_buf, shutdown)?;
+        if !ok {
+            if scanned == 0 {
+                return Ok(None);
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "stream closed before DNP3 FT3 sync octets were found",
+                ));
+            }
+        }
+        scanned += 1;
+        let b = byte_buf[0];
+
+        match sync_state {
+            0 => {
+                if b == 0x05 {
+                    sync_state = 1;
+                }
+            }
+            1 => {
+                if b == 0x64 {
+                    sync_state = 2;
+                } else if b == 0x05 {
+                    sync_state = 1;
+                } else {
+                    sync_state = 0;
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        if sync_state != 2 && scanned >= search_limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "exceeded synchronization scan limit of {search_limit} bytes without finding DNP3 sync octets"
+                ),
+            ));
+        }
+    }
+
+    let mut header_rest = [0u8; 8];
+    let ok = read_exact_interruptible(reader, &mut header_rest, shutdown)?;
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "stream closed before full DNP3 FT3 header was read",
+        ));
+    }
+
+    let length = header_rest[0] as usize;
+    if length < 5 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("out-of-range DNP3 length field: {length} (expected 5..=255)"),
+        ));
+    }
+
+    let user_data_len = length - 5;
+    let num_blocks = if user_data_len == 0 {
+        0
+    } else {
+        user_data_len.div_ceil(16)
+    };
+    let total_frame_length = 10 + user_data_len + 2 * num_blocks;
+
+    if total_frame_length > max_frame_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "DNP3 frame total length {total_frame_length} exceeds maximum allowed {max_frame_size}"
+            ),
+        ));
+    }
+
+    let mut frame = vec![0u8; total_frame_length];
+    frame[0] = 0x05;
+    frame[1] = 0x64;
+    frame[2..10].copy_from_slice(&header_rest);
+
+    if total_frame_length > 10 {
+        let ok = read_exact_interruptible(reader, &mut frame[10..], shutdown)?;
+        if !ok {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream closed before full DNP3 frame payload was read",
+            ));
+        }
+    }
+
+    Ok(Some(frame))
+}
+
+/// Writes a DNP3 FT3 frame to `writer`.
+///
+/// In DNP3 stream framing, FT3 frames are self-delimiting via the 10-octet
+/// header length field and block structure, so raw LPDU frame bytes are
+/// transmitted directly without an additional length prefix.
+pub fn write_dnp3_frame<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<()> {
+    writer.write_all(packet)
+}
+
 /// Reads a single frame from `reader` using the specified [`FramingMode`].
 pub fn read_frame_with_mode<R: Read>(
     reader: &mut R,
@@ -616,6 +750,7 @@ pub fn read_frame_with_mode<R: Read>(
         FramingMode::Mqtt => read_mqtt_frame(reader, max_frame_size, shutdown),
         FramingMode::Kiss => read_kiss_frame(reader, max_frame_size, shutdown),
         FramingMode::ModbusTcp => read_modbus_frame(reader, max_frame_size, shutdown),
+        FramingMode::Dnp3 => read_dnp3_frame(reader, max_frame_size, shutdown),
     }
 }
 
@@ -638,6 +773,7 @@ pub fn write_frame_with_mode<W: Write>(
         FramingMode::Mqtt => write_mqtt_frame(writer, payload),
         FramingMode::Kiss => write_kiss_frame(writer, payload),
         FramingMode::ModbusTcp => write_modbus_frame(writer, payload),
+        FramingMode::Dnp3 => write_dnp3_frame(writer, payload),
     }
 }
 
@@ -1757,5 +1893,104 @@ mod tests {
         let mut c_trunc_payload = Cursor::new(frame);
         let err_payload = read_modbus_frame(&mut c_trunc_payload, 1024, &shutdown).unwrap_err();
         assert_eq!(err_payload.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_criterion5_dnp3_noise_scanning_and_sync() {
+        // Acceptance criterion 5:
+        // In crates/rer/src/framing.rs, reading from a TCP stream containing leading noise bytes
+        // before sync octets 0x05 and 0x64 scans through up to a bounded limit to synchronize
+        // on the valid FT3 frame.
+        let raw_8 = [0x05, 0x64, 0x05, 0xC0, 0x01, 0x00, 0x02, 0x00];
+        let crc = crate::dnp3::calculate_crc(&raw_8);
+        let mut valid_frame = Vec::new();
+        valid_frame.extend_from_slice(&raw_8);
+        valid_frame.extend_from_slice(&crc.to_le_bytes());
+
+        // Prepend leading noise bytes (including a false sync start 0x05 followed by non-0x64)
+        let mut stream_data = vec![0xAA, 0xBB, 0xCC, 0x05, 0x12, 0xFF, 0xEE];
+        stream_data.extend_from_slice(&valid_frame);
+
+        let mut cursor = Cursor::new(stream_data);
+        let shutdown = AtomicBool::new(false);
+        let frame = read_dnp3_frame(&mut cursor, 1024, &shutdown)
+            .expect("read_dnp3_frame must succeed")
+            .expect("frame must be present");
+
+        assert_eq!(frame, valid_frame);
+
+        // Also test through read_frame_with_mode
+        let mut stream_data2 = vec![0x11, 0x22, 0x33, 0x44];
+        stream_data2.extend_from_slice(&valid_frame);
+        let mut cursor2 = Cursor::new(stream_data2);
+        let frame2 = read_frame_with_mode(&mut cursor2, FramingMode::Dnp3, 1024, &shutdown)
+            .expect("read_frame_with_mode must succeed")
+            .expect("frame must be present");
+        assert_eq!(frame2, valid_frame);
+    }
+
+    #[test]
+    fn test_criterion6_dnp3_length_exceeding_max_frame_size() {
+        // Acceptance criterion 6:
+        // In crates/rer/src/framing.rs, reading a DNP3 frame declaring a length exceeding
+        // max_frame_size returns an invalid data error without allocating the declared frame size.
+        let mut stream_data = Vec::new();
+        stream_data.push(0x05); // sync 0
+        stream_data.push(0x64); // sync 1
+        stream_data.push(100); // length 100: requires wire length > 100, max_frame_size is 50
+        stream_data.extend_from_slice(&[0xC0, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00]);
+
+        let mut cursor = Cursor::new(stream_data);
+        let shutdown = AtomicBool::new(false);
+        let err = read_dnp3_frame(&mut cursor, 50, &shutdown).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum allowed 50"));
+
+        // Also test through read_frame_with_mode
+        let mut stream_data2 = Vec::new();
+        stream_data2.push(0x05);
+        stream_data2.push(0x64);
+        stream_data2.push(255); // max length 255: requires 292 wire octets
+        stream_data2.extend_from_slice(&[0xC0, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00]);
+
+        let mut cursor2 = Cursor::new(stream_data2);
+        let err2 =
+            read_frame_with_mode(&mut cursor2, FramingMode::Dnp3, 100, &shutdown).unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+        assert!(err2.to_string().contains("exceeds maximum allowed 100"));
+    }
+
+    #[test]
+    fn test_dnp3_noise_scan_limit_exceeded() {
+        // More noise bytes than DNP3_MAX_SYNC_SEARCH_BYTES
+        let noise = vec![0xAA; DNP3_MAX_SYNC_SEARCH_BYTES + 10];
+        let mut cursor = Cursor::new(noise);
+        let shutdown = AtomicBool::new(false);
+        let err = read_dnp3_frame(&mut cursor, 1024, &shutdown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err
+            .to_string()
+            .contains("exceeded synchronization scan limit"));
+    }
+
+    #[test]
+    fn test_dnp3_roundtrip_write_read() {
+        let frame = crate::dnp3::encode_dnp3_frame(0xC0, 1, 2, &[0xC0, 0x01, 0x02]);
+        let mut buf = Vec::new();
+        write_dnp3_frame(&mut buf, &frame).expect("write_dnp3_frame");
+        assert_eq!(buf, frame);
+
+        let mut cursor = Cursor::new(buf);
+        let shutdown = AtomicBool::new(false);
+        let read_back = read_dnp3_frame(&mut cursor, 1024, &shutdown)
+            .expect("read_dnp3_frame")
+            .expect("frame");
+        assert_eq!(read_back, frame);
+
+        let mut out_mode = Vec::new();
+        write_frame_with_mode(&mut out_mode, FramingMode::Dnp3, &frame)
+            .expect("write_frame_with_mode");
+        assert_eq!(out_mode, frame);
     }
 }

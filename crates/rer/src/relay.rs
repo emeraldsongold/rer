@@ -753,7 +753,8 @@ impl TcpDestinationConnection {
             FramingMode::Ccsds
             | FramingMode::Mavlink
             | FramingMode::Mqtt
-            | FramingMode::ModbusTcp => s.write_all(payload),
+            | FramingMode::ModbusTcp
+            | FramingMode::Dnp3 => s.write_all(payload),
         };
 
         match write_res {
