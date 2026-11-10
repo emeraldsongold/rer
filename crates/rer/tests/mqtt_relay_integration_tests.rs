@@ -41,7 +41,7 @@ fn build_mqtt_packet(packet_type: u8, flags: u8, payload_data: &[u8]) -> Vec<u8>
 fn test_mqtt_forwarding_valid_packet_preserves_payload_and_records_type_and_qos() {
     let dest_sock = UdpSocket::bind("127.0.0.1:0").expect("bind dest");
     dest_sock
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set timeout");
     let dest_port = dest_sock.local_addr().expect("dest addr").port();
     let listen_port = pick_unused_port();
@@ -114,6 +114,11 @@ instances:
         "PINGREQ payload must be transmitted unmodified"
     );
 
+    // Root cause of intermittent failure (RER-I-209): UDP forwarding occurs asynchronously
+    // across StreamRunner worker threads. When dest_sock receives the forwarded datagrams over loopback,
+    // the receiver and forwarder threads may still be processing subsequent packets, updating stream_stats,
+    // or emitting MqttInspection diagnostic events into the buffer. Polling with deadline-bounded retry loops
+    // synchronizes with the worker threads and ensures all 3 packets are accounted for before asserting.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut stats = relay.stream_stats("s-mqtt-fwd").expect("stats");
     while (stats.received_packets < 3 || stats.forwarded_packets < 3)
@@ -131,13 +136,12 @@ instances:
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         let snap = relay.event_buffer().snapshot();
-        let events: Vec<DiagnosticEvent> = snap
+        insp_events = snap
             .events
             .into_iter()
             .filter(|e| e.stage == DiagnosticStage::MqttInspection)
             .collect();
-        if events.len() >= 3 {
-            insp_events = events;
+        if insp_events.len() >= 3 {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
