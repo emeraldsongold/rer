@@ -10,6 +10,7 @@ pub mod ccsds;
 pub mod cli;
 pub mod config;
 pub mod diagnostics;
+pub mod dnp3;
 pub mod framing;
 pub mod health;
 pub mod ltp;
@@ -69,11 +70,21 @@ pub use diagnostics::{
     RateLimiter, RtpInspection, RtpInspectionEvent, RtpMetadata, SequenceState, SequenceTracker,
     SequenceTrackingEvent, SrtInspection, SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
 };
+pub use dnp3::{
+    calculate_crc, compute_crc, dnp3_crc, encode_dnp3_frame, encode_ft3_header, parse_dnp3,
+    parse_dnp3_frame, parse_dnp3_header, parse_frame as parse_dnp3_lpdu_frame, parse_ft3_header,
+    parse_link_header, parse_transport_control, parse_transport_header, parse_user_data_block,
+    Dnp3Frame, Dnp3LinkHeader, Dnp3Metadata, Dnp3ParseError, Dnp3TransportHeader,
+    Dnp3UserDataBlock, TransportHeader, CRC_POLYNOMIAL, DNP3_BLOCK_SIZE, DNP3_CRC_POLY,
+    DNP3_HEADER_DATA_LEN, DNP3_HEADER_LEN, DNP3_MAX_FRAME_LEN, DNP3_MAX_LENGTH, DNP3_MIN_FRAME_LEN,
+    DNP3_MIN_LENGTH, DNP3_SYNC, DNP3_SYNC_0, DNP3_SYNC_1,
+};
 pub use framing::{
-    encode_frame, encode_kiss_frame, read_ccsds_frame, read_frame, read_frame_with_mode,
-    read_kiss_frame, read_mavlink_frame, read_modbus_frame, read_mqtt_frame, write_ccsds_frame,
-    write_frame, write_frame_with_mode, write_kiss_frame, write_mavlink_frame, write_modbus_frame,
-    write_mqtt_frame, KISS_FEND, KISS_FESC, KISS_TFEND, KISS_TFESC,
+    encode_frame, encode_kiss_frame, read_ccsds_frame, read_dnp3_frame, read_frame,
+    read_frame_with_mode, read_kiss_frame, read_mavlink_frame, read_modbus_frame, read_mqtt_frame,
+    write_ccsds_frame, write_dnp3_frame, write_frame, write_frame_with_mode, write_kiss_frame,
+    write_mavlink_frame, write_modbus_frame, write_mqtt_frame, KISS_FEND, KISS_FESC, KISS_TFEND,
+    KISS_TFESC,
 };
 pub use health::{
     generate_health_report, query_health, HealthReport, HealthServer, StreamHealthReport,

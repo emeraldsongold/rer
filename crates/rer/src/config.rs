@@ -1149,6 +1149,9 @@ pub enum FramingMode {
         alias = "ModbusTcp"
     )]
     ModbusTcp,
+    /// DNP3 FT3 link framing (sync octets 0x05 0x64 with CRC verification).
+    #[serde(alias = "DNP3", alias = "dnp3", alias = "dnp3_tcp", alias = "Dnp3")]
+    Dnp3,
 }
 
 impl fmt::Display for FramingMode {
@@ -1160,6 +1163,7 @@ impl fmt::Display for FramingMode {
             Self::Mqtt => write!(f, "mqtt"),
             Self::Kiss => write!(f, "kiss"),
             Self::ModbusTcp => write!(f, "modbus_tcp"),
+            Self::Dnp3 => write!(f, "dnp3"),
         }
     }
 }
