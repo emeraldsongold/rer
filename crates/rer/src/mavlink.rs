@@ -673,6 +673,26 @@ pub fn evaluate_mavlink_payload(data: &[u8]) -> MavlinkParseStatus {
     evaluate_payload(data)
 }
 
+/// Verifies a frame's CRC-16/MCRF4XX checksum with the `all.xml` CRC_EXTRA
+/// table from `mavlink-tlog` (feature `mavlink-crc`).
+///
+/// Returns `Some(true)` when the checksum matches, `Some(false)` when it does
+/// not (or the payload is longer than the message allows), and `None` when the
+/// buffer is not a complete frame or the message id is outside the table, so
+/// custom dialects are never reported as corrupt.
+#[cfg(feature = "mavlink-crc")]
+#[must_use]
+pub fn verify_mavlink_crc(data: &[u8]) -> Option<bool> {
+    use mavlink_tlog::{CrcPolicy, FrameError, FrameRef};
+    let frame = FrameRef::parse_unchecked(data).ok()?;
+    mavlink_tlog::message_info(frame.msg_id())?;
+    match frame.check(CrcPolicy::Strict) {
+        Ok(()) => Some(true),
+        Err(FrameError::BadCrc { .. } | FrameError::PayloadTooLong { .. }) => Some(false),
+        Err(_) => None,
+    }
+}
+
 pub use evaluate_mavlink_header as evaluate_header;
 pub use evaluate_mavlink_header as evaluate_mavlink_packet;
 pub use evaluate_mavlink_header as evaluate_packet;
@@ -1521,5 +1541,40 @@ mod tests {
         );
         assert_eq!(tracker2.gap_count(sys, comp), 3);
         assert_eq!(tracker2.last_sequence(sys, comp), Some(2));
+    }
+
+    #[cfg(feature = "mavlink-crc")]
+    #[test]
+    fn crc_extra_catches_corrupted_payload_that_header_parse_accepts() {
+        let header = mavlink_tlog::Header {
+            seq: 7,
+            sys_id: 1,
+            comp_id: 1,
+            msg_id: 0, // HEARTBEAT
+        };
+        let mut good = [0u8; 280];
+        let n = mavlink_tlog::encode(
+            mavlink_tlog::Version::V2,
+            header,
+            &[1, 2, 3, 4, 2, 3, 81, 4, 3],
+            None,
+            &mut good,
+        )
+        .unwrap();
+        let good = &good[..n];
+        assert_eq!(verify_mavlink_crc(good), Some(true));
+
+        let mut bad = good.to_vec();
+        bad[MAVLINK_V2_HEADER_LEN] ^= 0x40;
+        assert!(evaluate_mavlink_header(&bad).0.is_valid());
+        assert_eq!(verify_mavlink_crc(&bad), Some(false));
+    }
+
+    #[cfg(feature = "mavlink-crc")]
+    #[test]
+    fn crc_check_skips_ids_outside_the_dialect_table() {
+        let pkt = make_v2_packet(4, 0, 0, 0, 1, 1, 0x00AB_CDEF);
+        assert!(evaluate_mavlink_header(&pkt).0.is_valid());
+        assert_eq!(verify_mavlink_crc(&pkt), None);
     }
 }

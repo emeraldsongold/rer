@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - MAVLink checksum verification (RER-F-050)
+- **CRC_EXTRA Verification**: Added optional `mavlink-crc` feature with `verify_mavlink_crc` in `crates/rer/src/mavlink.rs`, checking MAVLink 1/2 frame checksums against the `all.xml` CRC_EXTRA table from `mavlink-tlog` 0.1.4 (MIT, no dependencies). Message ids outside the table return `None` instead of a false failure.
+
 ### Added - Milestone RER-F-046 (In-tree SRT packet header parser)
 - **In-Tree SRT Header Parser**: Implemented zero-dependency in-tree 16-byte fixed SRT header parsing (`parse_header`, `parse_srt_header`, `parse_data_packet`, `parse_control_packet`) in `crates/rer/src/srt.rs` (SPEC §14, §8), distinguishing data packets from control packets via packet type bit 0/1.
 - **Data Packet Metadata Extraction**: Extracted 31-bit packet sequence number, 26-bit message number, timestamp, destination socket ID, packet position flags, in-order flag, encryption flags, and retransmission flag.

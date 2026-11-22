@@ -17,6 +17,11 @@ serde_path_to_error = { workspace = true }
 schemars = { workspace = true }
 libc = { workspace = true }
 socket2 = { workspace = true }
+mavlink-tlog = { version = "0.1.4", optional = true, default-features = false }
+
+[features]
+# Verify MAVLink frame checksums with the all.xml CRC_EXTRA table.
+mavlink-crc = ["dep:mavlink-tlog"]
 
 [[bench]]
 name = "benchmarks"
