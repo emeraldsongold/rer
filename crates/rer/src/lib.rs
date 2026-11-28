@@ -18,6 +18,7 @@ pub mod management;
 pub mod mavlink;
 pub mod modbus;
 pub mod mqtt;
+pub mod quic;
 pub mod relay;
 pub mod replay;
 pub mod rtp;
@@ -138,6 +139,13 @@ pub use mqtt::{
     MQTT_TYPE_PINGRESP, MQTT_TYPE_PUBACK, MQTT_TYPE_PUBCOMP, MQTT_TYPE_PUBLISH, MQTT_TYPE_PUBREC,
     MQTT_TYPE_PUBREL, MQTT_TYPE_SUBACK, MQTT_TYPE_SUBSCRIBE, MQTT_TYPE_UNSUBACK,
     MQTT_TYPE_UNSUBSCRIBE,
+};
+pub use quic::{
+    encode_quic_varint, extract_connection_ids, format_cid_hex, parse_quic_header,
+    parse_quic_varint, QuicHeaderForm, QuicMetadata, QuicPacketType, QuicParseError,
+    QuicParseStatus, QUIC_FIXED_BIT, QUIC_HEADER_FORM_BIT, QUIC_KEY_PHASE_BIT, QUIC_MAX_CID_LEN,
+    QUIC_MAX_VARINT, QUIC_MIN_LONG_HEADER_LEN, QUIC_SPIN_BIT, QUIC_VERSION_1, QUIC_VERSION_2,
+    QUIC_VERSION_NEGOTIATION,
 };
 pub use relay::{
     bind_multicast_udp_socket, bind_tcp_listener, bind_udp_socket, format_endpoint,
