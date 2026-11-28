@@ -2295,11 +2295,7 @@ fn validate_unbracketed_host(host: &str, path: &str, errors: &mut Vec<Validation
 #[must_use]
 pub fn is_remote_endpoint(endpoint: &str) -> bool {
     let ep = endpoint.trim();
-    if ep.starts_with('/') || ep.starts_with("./") || ep.ends_with(".sock") || ep.contains(".sock")
-    {
-        return false;
-    }
-    true
+    !(ep.starts_with('/') || ep.starts_with("./") || ep.ends_with(".sock") || ep.contains(".sock"))
 }
 
 /// Returns true if an endpoint points to an untrusted remote network (i.e. not local Unix domain socket and not loopback).
