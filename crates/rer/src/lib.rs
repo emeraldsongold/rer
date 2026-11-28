@@ -54,20 +54,21 @@ pub use ccsds::{
     CcsdsSequenceTracker, CCSDS_IDLE_APID, CCSDS_PRIMARY_HEADER_LEN, CCSDS_SEQUENCE_MODULUS,
 };
 pub use config::{
-    Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, DropPolicy, FramingMode,
+    Bpv7InspectionConfig, ByteOrder, CcsdsConfig, Config, Dnp3Config, DropPolicy, FramingMode,
     InspectionConfig, InstanceConfig, KissConfig, LogicalInterfaceConfig, LtpInspectionConfig,
-    MavlinkConfig, MetricsConfig, MqttConfig, MulticastConfig, OperationalMode, RtpConfig,
-    SequenceConfig, SrtInspectionConfig, StreamConfig, TestModeConfig, ValidationError,
+    MavlinkConfig, MetricsConfig, ModbusConfig, MqttConfig, MulticastConfig, OperationalMode,
+    RtpConfig, SequenceConfig, SrtInspectionConfig, StreamConfig, TestModeConfig, ValidationError,
     ValidationReport,
 };
 pub use diagnostics::{
     format_ascii_preview, format_hex_preview, record_mqtt_local_transmission, Ax25Metadata,
     BundleInspection, BundleInspectionEvent, BundleMetadata, Clock, DiagnosticBuffer,
     DiagnosticBufferBuilder, DiagnosticEvent, DiagnosticSnapshot, DiagnosticStage,
-    DiagnosticTestState, IntoDtnTimestamp, KissInspection, KissInspectionEvent, KissMetadata,
-    LtpInspection, LtpInspectionEvent, LtpMetadata, ManualClock, MavlinkInspection,
-    MavlinkInspectionEvent, MavlinkMetadata, MqttInspection, MqttInspectionEvent, MqttMetadata,
-    RateLimiter, RtpInspection, RtpInspectionEvent, RtpMetadata, SequenceState, SequenceTracker,
+    DiagnosticTestState, Dnp3Inspection, Dnp3InspectionEvent, IntoDtnTimestamp, KissInspection,
+    KissInspectionEvent, KissMetadata, LtpInspection, LtpInspectionEvent, LtpMetadata, ManualClock,
+    MavlinkInspection, MavlinkInspectionEvent, MavlinkMetadata, ModbusInspection,
+    ModbusInspectionEvent, MqttInspection, MqttInspectionEvent, MqttMetadata, RateLimiter,
+    RtpInspection, RtpInspectionEvent, RtpMetadata, SequenceState, SequenceTracker,
     SequenceTrackingEvent, SrtInspection, SrtInspectionEvent, SrtMetadata, Stage, SystemClock,
 };
 pub use dnp3::{

@@ -325,7 +325,23 @@ pub struct StreamConfig {
     )]
     pub kiss: Option<KissConfig>,
 
-    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", "mqtt", or "kiss"). Defaults to length_prefix.
+    /// Optional Modbus TCP MBAP framing, inspection, and filtering configuration (SPEC §5, §8, §14). Off by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_modbus_config"
+    )]
+    pub modbus: Option<ModbusConfig>,
+
+    /// Optional DNP3 FT3 framing, CRC validation, inspection, and filtering configuration (SPEC §5, §8, §14). Off by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_dnp3_config"
+    )]
+    pub dnp3: Option<Dnp3Config>,
+
+    /// Optional framing mode for TCP streams ("length_prefix", "ccsds", "mavlink", "mqtt", "kiss", "modbus_tcp", or "dnp3"). Defaults to length_prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<FramingMode>,
 
@@ -540,6 +556,245 @@ where
     }
 
     deserializer.deserialize_any(KissConfigVisitor)
+}
+
+const fn default_modbus_max_frame_size() -> usize {
+    crate::modbus::MODBUS_MAX_FRAME_LEN
+}
+
+/// Configuration for Modbus TCP MBAP framing, inspection, and filtering (SPEC §5, §8, §14, Task RER-F-076).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModbusConfig {
+    /// Enable Modbus TCP MBAP inspection and validation. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Enforce Protocol ID == 0x0000. Defaults to true.
+    #[serde(default = "default_true", alias = "protocol_id")]
+    pub validate_protocol_id: bool,
+
+    /// Validate MBAP length field bounds (2..=254) and frame length consistency. Defaults to true.
+    #[serde(default = "default_true", alias = "length")]
+    pub validate_length: bool,
+
+    /// Optional allowlist of Unit IDs (0..=255) to accept. If None, all unit IDs are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_unit_ids",
+        alias = "unit_ids",
+        alias = "filter_units"
+    )]
+    pub filter_unit_ids: Option<Vec<u8>>,
+
+    /// Optional allowlist of Modbus function codes (0..=127) to accept. If None, all function codes are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_function_codes",
+        alias = "function_codes",
+        alias = "allowed_functions"
+    )]
+    pub filter_function_codes: Option<Vec<u8>>,
+
+    /// Maximum allowed Modbus TCP ADU length in octets. Defaults to 260 (`MODBUS_MAX_FRAME_LEN`).
+    #[serde(
+        default = "default_modbus_max_frame_size",
+        alias = "max_size",
+        alias = "max_packet_size"
+    )]
+    pub max_frame_size: usize,
+
+    /// When true, frames failing Modbus validation are forwarded unchanged to destinations. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("modbus_tcp", "length_prefix", etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+impl Default for ModbusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            validate_protocol_id: true,
+            validate_length: true,
+            filter_unit_ids: None,
+            filter_function_codes: None,
+            max_frame_size: crate::modbus::MODBUS_MAX_FRAME_LEN,
+            passthrough_on_error: false,
+            framing: None,
+        }
+    }
+}
+
+fn deserialize_optional_modbus_config<'de, D>(
+    deserializer: D,
+) -> Result<Option<ModbusConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ModbusConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ModbusConfigVisitor {
+        type Value = Option<ModbusConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean, null, or a Modbus configuration mapping")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(ModbusConfig::default()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(ModbusConfig::default()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(ModbusConfig {
+                enabled: v,
+                ..ModbusConfig::default()
+            }))
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let config =
+                ModbusConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(config))
+        }
+    }
+
+    deserializer.deserialize_any(ModbusConfigVisitor)
+}
+
+const fn default_dnp3_max_frame_size() -> usize {
+    crate::dnp3::DNP3_MAX_FRAME_LEN
+}
+
+/// Configuration for DNP3 FT3 framing, CRC validation, inspection, and filtering (SPEC §5, §8, §14, Task RER-F-076).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Dnp3Config {
+    /// Enable DNP3 FT3 inspection and validation. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Validate 16-bit CRCs on FT3 header and user data blocks. Defaults to true.
+    #[serde(default = "default_true", alias = "crc")]
+    pub validate_crc: bool,
+
+    /// Optional allowlist of DNP3 source station addresses (0..=65535). If None, all sources are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_sources",
+        alias = "sources"
+    )]
+    pub filter_sources: Option<Vec<u16>>,
+
+    /// Optional allowlist of DNP3 destination station addresses (0..=65535). If None, all destinations are accepted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_destinations",
+        alias = "destinations"
+    )]
+    pub filter_destinations: Option<Vec<u16>>,
+
+    /// Maximum allowed DNP3 FT3 LPDU length in octets. Defaults to 292 (`DNP3_MAX_FRAME_LEN`).
+    #[serde(
+        default = "default_dnp3_max_frame_size",
+        alias = "max_size",
+        alias = "max_packet_size"
+    )]
+    pub max_frame_size: usize,
+
+    /// When true, frames failing DNP3 validation are forwarded unchanged to destinations. Defaults to false.
+    #[serde(default, alias = "passthrough")]
+    pub passthrough_on_error: bool,
+
+    /// Optional framing mode override ("dnp3", "length_prefix", etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingMode>,
+}
+
+impl Default for Dnp3Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            validate_crc: true,
+            filter_sources: None,
+            filter_destinations: None,
+            max_frame_size: crate::dnp3::DNP3_MAX_FRAME_LEN,
+            passthrough_on_error: false,
+            framing: None,
+        }
+    }
+}
+
+fn deserialize_optional_dnp3_config<'de, D>(deserializer: D) -> Result<Option<Dnp3Config>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Dnp3ConfigVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for Dnp3ConfigVisitor {
+        type Value = Option<Dnp3Config>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a boolean, null, or a DNP3 configuration mapping")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(Dnp3Config::default()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(Dnp3Config::default()))
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(Dnp3Config {
+                enabled: v,
+                ..Dnp3Config::default()
+            }))
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let config =
+                Dnp3Config::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(Some(config))
+        }
+    }
+
+    deserializer.deserialize_any(Dnp3ConfigVisitor)
 }
 
 /// Configuration for MAVLink packet inspection, validation, and sequence tracking (SPEC §14, §8).
@@ -850,6 +1105,8 @@ impl StreamConfig {
             .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
             .or_else(|| self.mqtt.as_ref().and_then(|m| m.framing))
             .or_else(|| self.kiss.as_ref().and_then(|k| k.framing))
+            .or_else(|| self.modbus.as_ref().and_then(|m| m.framing))
+            .or_else(|| self.dnp3.as_ref().and_then(|d| d.framing))
             .unwrap_or_default()
     }
 
@@ -862,6 +1119,8 @@ impl StreamConfig {
             .or_else(|| self.mavlink.as_ref().and_then(|m| m.framing))
             .or_else(|| self.mqtt.as_ref().and_then(|m| m.framing))
             .or_else(|| self.kiss.as_ref().and_then(|k| k.framing))
+            .or_else(|| self.modbus.as_ref().and_then(|m| m.framing))
+            .or_else(|| self.dnp3.as_ref().and_then(|d| d.framing))
             .unwrap_or_default()
     }
 }
@@ -1760,6 +2019,38 @@ impl Config {
                                 ),
                             });
                         }
+                    }
+                }
+
+                // Validate Modbus configuration
+                if let Some(ref modbus) = stream.modbus {
+                    if modbus.max_frame_size == 0 {
+                        errors.push(ValidationError {
+                            path: format!("{}.modbus.max_frame_size", stream_prefix),
+                            reason: "max_frame_size must be greater than 0".to_string(),
+                        });
+                    }
+                    if let Some(ref fcs) = modbus.filter_function_codes {
+                        for &fc in fcs {
+                            if fc > 127 {
+                                errors.push(ValidationError {
+                                    path: format!("{}.modbus.filter_function_codes", stream_prefix),
+                                    reason: format!(
+                                        "invalid function code {fc}: Modbus function code must be between 0 and 127"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Validate DNP3 configuration
+                if let Some(ref dnp3) = stream.dnp3 {
+                    if dnp3.max_frame_size == 0 {
+                        errors.push(ValidationError {
+                            path: format!("{}.dnp3.max_frame_size", stream_prefix),
+                            reason: "max_frame_size must be greater than 0".to_string(),
+                        });
                     }
                 }
 
@@ -3055,5 +3346,138 @@ instances:
             err.reason.contains("out-of-range TTL")
                 || err.reason.contains("rejecting an out-of-range TTL")
         );
+    }
+
+    #[test]
+    fn test_modbus_config_deserialization_enabled_true() {
+        let yaml = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5020"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5021"
+        modbus:
+          filter_unit_ids: [1, 2]
+          filter_function_codes: [3, 4]
+"#;
+        let config = Config::from_yaml_str(yaml).expect("deserializes successfully");
+        let stream = &config.instances[0].streams[0];
+        let modbus = stream.modbus.as_ref().expect("modbus config present");
+        assert!(modbus.enabled);
+        assert!(modbus.validate_protocol_id);
+        assert!(modbus.validate_length);
+        assert_eq!(modbus.filter_unit_ids.as_deref(), Some(&[1, 2][..]));
+        assert_eq!(modbus.filter_function_codes.as_deref(), Some(&[3, 4][..]));
+
+        // Also test boolean shorthand `modbus: true` and null shorthand `modbus:`
+        let yaml_bool = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5020"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5021"
+        modbus: true
+"#;
+        let config_bool = Config::from_yaml_str(yaml_bool).expect("deserializes bool modbus");
+        assert!(
+            config_bool.instances[0].streams[0]
+                .modbus
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn test_dnp3_config_deserialization_validate_crc_true() {
+        let yaml = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:20000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:20001"
+        dnp3:
+          filter_sources: [10]
+          filter_destinations: [1]
+"#;
+        let config = Config::from_yaml_str(yaml).expect("deserializes successfully");
+        let stream = &config.instances[0].streams[0];
+        let dnp3 = stream.dnp3.as_ref().expect("dnp3 config present");
+        assert!(dnp3.enabled);
+        assert!(dnp3.validate_crc);
+        assert_eq!(dnp3.filter_sources.as_deref(), Some(&[10][..]));
+        assert_eq!(dnp3.filter_destinations.as_deref(), Some(&[1][..]));
+
+        // Also test boolean shorthand `dnp3: true`
+        let yaml_bool = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:20000"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:20001"
+        dnp3: true
+"#;
+        let config_bool = Config::from_yaml_str(yaml_bool).expect("deserializes bool dnp3");
+        assert!(
+            config_bool.instances[0].streams[0]
+                .dnp3
+                .as_ref()
+                .unwrap()
+                .validate_crc
+        );
+    }
+
+    #[test]
+    fn test_modbus_config_validation_rejects_function_code_gt_127() {
+        let yaml = r#"
+version: "1"
+instances:
+  - id: "i1"
+    streams:
+      - id: "s1"
+        source:
+          transport: "tcp"
+          address: "127.0.0.1:5020"
+        destination:
+          transport: "tcp"
+          address: "127.0.0.1:5021"
+        modbus:
+          filter_function_codes: [3, 128]
+"#;
+        let config = Config::from_yaml_str(yaml).expect("deserializes successfully");
+        let errors = config.validate();
+        assert!(
+            !errors.is_empty(),
+            "expected validation error for modbus function code > 127"
+        );
+        let err = errors
+            .iter()
+            .find(|e| e.reason.contains("invalid function code"))
+            .expect("expected validation error reporting invalid function code");
+        assert!(err.path.contains("modbus"));
     }
 }

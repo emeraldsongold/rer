@@ -70,6 +70,12 @@ pub enum DiagnosticStage {
     /// RTP passive inspection event (SPEC §5, §8, §14).
     #[serde(rename = "rtp_inspection")]
     RtpInspection,
+    /// Modbus TCP passive inspection event (SPEC §5, §8, §14).
+    #[serde(rename = "modbus_inspection")]
+    ModbusInspection,
+    /// DNP3 passive inspection event (SPEC §5, §8, §14).
+    #[serde(rename = "dnp3_inspection")]
+    Dnp3Inspection,
 }
 
 pub type Stage = DiagnosticStage;
@@ -92,6 +98,8 @@ impl fmt::Display for DiagnosticStage {
             Self::MqttInspection => write!(f, "mqtt_inspection"),
             Self::KissInspection => write!(f, "kiss_inspection"),
             Self::RtpInspection => write!(f, "rtp_inspection"),
+            Self::ModbusInspection => write!(f, "modbus_inspection"),
+            Self::Dnp3Inspection => write!(f, "dnp3_inspection"),
         }
     }
 }
@@ -116,6 +124,8 @@ impl FromStr for DiagnosticStage {
             "mqtt_inspection" | "mqtt" => Ok(Self::MqttInspection),
             "kiss_inspection" | "kiss" | "ax25_inspection" | "ax25" => Ok(Self::KissInspection),
             "rtp_inspection" | "rtp" => Ok(Self::RtpInspection),
+            "modbus_inspection" | "modbus" => Ok(Self::ModbusInspection),
+            "dnp3_inspection" | "dnp3" => Ok(Self::Dnp3Inspection),
             other => Err(format!("Unknown diagnostic stage: '{other}'")),
         }
     }
@@ -2184,6 +2194,266 @@ impl From<RtpInspection> for DiagnosticEvent {
     }
 }
 
+const fn default_modbus_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::ModbusInspection
+}
+
+/// Diagnostic event representing a Modbus TCP passive inspection event (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModbusInspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `modbus_inspection`).
+    #[serde(default = "default_modbus_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// 16-bit MBAP transaction identifier.
+    pub transaction_id: u16,
+
+    /// 16-bit MBAP protocol identifier (0 for Modbus TCP).
+    pub protocol_id: u16,
+
+    /// 16-bit MBAP length field.
+    pub length: u16,
+
+    /// 8-bit unit identifier (slave address).
+    pub unit_id: u8,
+
+    /// 8-bit function code.
+    pub function_code: u8,
+
+    /// True if this frame represents a Modbus exception response.
+    pub is_exception: bool,
+
+    /// Raw 1-octet exception code if this is an exception response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_code: Option<u8>,
+
+    /// Structured Modbus metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "modbus"
+    )]
+    pub modbus_metadata: Option<crate::modbus::ModbusMetadata>,
+}
+
+pub type ModbusInspectionEvent = ModbusInspection;
+
+impl ModbusInspection {
+    /// Creates a new `ModbusInspection` event.
+    #[must_use]
+    pub fn new(transaction_id: u16, unit_id: u8, function_code: u8) -> Self {
+        let header = crate::modbus::MbapHeader::new(transaction_id, 0, 2, unit_id, function_code);
+        Self::from_header(&header)
+    }
+
+    /// Creates a `ModbusInspection` from a parsed [`crate::modbus::MbapHeader`].
+    #[must_use]
+    pub fn from_header(header: &crate::modbus::MbapHeader) -> Self {
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::ModbusInspection,
+            transaction_id: header.transaction_id,
+            protocol_id: header.protocol_id,
+            length: header.length,
+            unit_id: header.unit_id,
+            function_code: header.function_code,
+            is_exception: header.is_exception,
+            exception_code: header.exception_code,
+            modbus_metadata: Some(*header),
+        }
+    }
+}
+
+impl From<ModbusInspection> for DiagnosticEvent {
+    fn from(insp: ModbusInspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp
+            .stream_id
+            .clone()
+            .unwrap_or_else(|| "modbus".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::ModbusInspection,
+            TransportType::Tcp,
+            0,
+        );
+        event.modbus_transaction_id = Some(insp.transaction_id);
+        event.modbus_protocol_id = Some(insp.protocol_id);
+        event.modbus_length = Some(insp.length);
+        event.modbus_unit_id = Some(insp.unit_id);
+        event.modbus_function_code = Some(insp.function_code);
+        event.modbus_is_exception = Some(insp.is_exception);
+        event.modbus_exception_code = insp.exception_code;
+        event.modbus_metadata = insp.modbus_metadata;
+        event.modbus_inspection = Some(insp);
+        event
+    }
+}
+
+const fn default_dnp3_inspection_stage() -> DiagnosticStage {
+    DiagnosticStage::Dnp3Inspection
+}
+
+/// Diagnostic event representing a DNP3 passive inspection event (SPEC §5, §8, §14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dnp3Inspection {
+    /// Monotonic timestamp in nanoseconds when this event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic_timestamp: Option<u64>,
+
+    /// Wall-clock timestamp in nanoseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_timestamp: Option<u64>,
+
+    /// Forwarding stream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+
+    /// Diagnostic stage or event category (defaults to `dnp3_inspection`).
+    #[serde(default = "default_dnp3_inspection_stage")]
+    pub stage: DiagnosticStage,
+
+    /// Destination station address.
+    pub destination: u16,
+
+    /// Source station address.
+    pub source: u16,
+
+    /// Link control function code (0..=15).
+    pub control_function: u8,
+
+    /// True if primary station initiated.
+    pub is_primary: bool,
+
+    /// Direction bit.
+    pub direction: bool,
+
+    /// Transport FIR flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_fir: Option<bool>,
+
+    /// Transport FIN flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_fin: Option<bool>,
+
+    /// Transport sequence number (0..=63).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_sequence: Option<u8>,
+
+    /// Application function code if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_function: Option<u8>,
+
+    /// True if all checked CRCs passed.
+    pub crc_valid: bool,
+
+    /// Structured DNP3 metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "metadata",
+        alias = "dnp3"
+    )]
+    pub dnp3_metadata: Option<crate::dnp3::Dnp3Metadata>,
+}
+
+pub type Dnp3InspectionEvent = Dnp3Inspection;
+
+impl Dnp3Inspection {
+    /// Creates a new `Dnp3Inspection` event.
+    #[must_use]
+    pub fn new(source: u16, destination: u16, control_function: u8) -> Self {
+        let metadata = crate::dnp3::Dnp3Metadata {
+            destination,
+            source,
+            is_primary: true,
+            direction: true,
+            control_function,
+            transport_fir: None,
+            transport_fin: None,
+            transport_sequence: None,
+            application_function: None,
+            crc_valid: true,
+        };
+        Self::from_metadata(metadata)
+    }
+
+    /// Creates a `Dnp3Inspection` from [`crate::dnp3::Dnp3Metadata`].
+    #[must_use]
+    pub fn from_metadata(metadata: crate::dnp3::Dnp3Metadata) -> Self {
+        Self {
+            monotonic_timestamp: None,
+            wall_clock_timestamp: None,
+            stream_id: None,
+            stage: DiagnosticStage::Dnp3Inspection,
+            destination: metadata.destination,
+            source: metadata.source,
+            control_function: metadata.control_function,
+            is_primary: metadata.is_primary,
+            direction: metadata.direction,
+            transport_fir: metadata.transport_fir,
+            transport_fin: metadata.transport_fin,
+            transport_sequence: metadata.transport_sequence,
+            application_function: metadata.application_function,
+            crc_valid: metadata.crc_valid,
+            dnp3_metadata: Some(metadata),
+        }
+    }
+
+    /// Creates a `Dnp3Inspection` from a parsed [`crate::dnp3::Dnp3Frame`].
+    #[must_use]
+    pub fn from_frame(frame: &crate::dnp3::Dnp3Frame) -> Self {
+        Self::from_metadata(frame.metadata.clone())
+    }
+}
+
+impl From<Dnp3Inspection> for DiagnosticEvent {
+    fn from(insp: Dnp3Inspection) -> Self {
+        let mono = insp.monotonic_timestamp.unwrap_or(0);
+        let wall = insp.wall_clock_timestamp.unwrap_or(0);
+        let stream = insp.stream_id.clone().unwrap_or_else(|| "dnp3".to_string());
+        let mut event = DiagnosticEvent::new(
+            mono,
+            wall,
+            stream,
+            DiagnosticStage::Dnp3Inspection,
+            TransportType::Tcp,
+            0,
+        );
+        event.dnp3_destination = Some(insp.destination);
+        event.dnp3_source = Some(insp.source);
+        event.dnp3_control_function = Some(insp.control_function);
+        event.dnp3_is_primary = Some(insp.is_primary);
+        event.dnp3_direction = Some(insp.direction);
+        event.dnp3_transport_fir = insp.transport_fir;
+        event.dnp3_transport_fin = insp.transport_fin;
+        event.dnp3_transport_sequence = insp.transport_sequence;
+        event.dnp3_application_function = insp.application_function;
+        event.dnp3_crc_valid = Some(insp.crc_valid);
+        event.dnp3_metadata = insp.dnp3_metadata.clone();
+        event.dnp3_inspection = Some(insp);
+        event
+    }
+}
+
 /// Structured diagnostic event (SPEC §8, §10).
 ///
 /// Contains packet inspection metadata and lifecycle status without retaining payload bytes.
@@ -2558,6 +2828,98 @@ pub struct DiagnosticEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtp_metadata: Option<RtpMetadata>,
 
+    /// Modbus TCP transaction identifier (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_transaction_id: Option<u16>,
+
+    /// Modbus TCP protocol identifier (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_protocol_id: Option<u16>,
+
+    /// Modbus TCP MBAP length field (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_length: Option<u16>,
+
+    /// Modbus unit identifier / slave address (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_unit_id: Option<u8>,
+
+    /// Modbus function code (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_function_code: Option<u8>,
+
+    /// Whether the Modbus frame is an exception response (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_is_exception: Option<bool>,
+
+    /// Modbus exception code if the frame is an exception response (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_exception_code: Option<u8>,
+
+    /// Structured Modbus metadata (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modbus_metadata: Option<crate::modbus::ModbusMetadata>,
+
+    /// Modbus inspection event metadata (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "modbus")]
+    pub modbus_inspection: Option<ModbusInspection>,
+
+    /// DNP3 destination station address (SPEC §5, §8, §14).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dnp3_destination_address"
+    )]
+    pub dnp3_destination: Option<u16>,
+
+    /// DNP3 source station address (SPEC §5, §8, §14).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dnp3_source_address"
+    )]
+    pub dnp3_source: Option<u16>,
+
+    /// DNP3 link control function code (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_control_function: Option<u8>,
+
+    /// DNP3 primary station flag (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_is_primary: Option<bool>,
+
+    /// DNP3 direction flag (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_direction: Option<bool>,
+
+    /// DNP3 transport FIR flag (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_transport_fir: Option<bool>,
+
+    /// DNP3 transport FIN flag (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_transport_fin: Option<bool>,
+
+    /// DNP3 transport sequence number (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_transport_sequence: Option<u8>,
+
+    /// DNP3 application function code (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_application_function: Option<u8>,
+
+    /// DNP3 CRC validation outcome (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_crc_valid: Option<bool>,
+
+    /// Structured DNP3 metadata (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnp3_metadata: Option<crate::dnp3::Dnp3Metadata>,
+
+    /// DNP3 inspection event metadata (SPEC §5, §8, §14).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "dnp3")]
+    pub dnp3_inspection: Option<Dnp3Inspection>,
+
     /// Optional IP multicast group address when stream uses multicast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multicast_group: Option<String>,
@@ -2658,6 +3020,27 @@ impl DiagnosticEvent {
             rtp_parse_status: None,
             rtp_inspection: None,
             rtp_metadata: None,
+            modbus_transaction_id: None,
+            modbus_protocol_id: None,
+            modbus_length: None,
+            modbus_unit_id: None,
+            modbus_function_code: None,
+            modbus_is_exception: None,
+            modbus_exception_code: None,
+            modbus_metadata: None,
+            modbus_inspection: None,
+            dnp3_destination: None,
+            dnp3_source: None,
+            dnp3_control_function: None,
+            dnp3_is_primary: None,
+            dnp3_direction: None,
+            dnp3_transport_fir: None,
+            dnp3_transport_fin: None,
+            dnp3_transport_sequence: None,
+            dnp3_application_function: None,
+            dnp3_crc_valid: None,
+            dnp3_metadata: None,
+            dnp3_inspection: None,
             multicast_group: None,
             multicast_interface: None,
         }
@@ -3629,6 +4012,184 @@ impl DiagnosticEvent {
         RtpInspection::from_header(header, crate::rtp::RtpParseStatus::Valid).into()
     }
 
+    /// Sets the Modbus transaction identifier and populates structured `modbus_metadata`.
+    #[must_use]
+    pub fn with_modbus_transaction_id(mut self, transaction_id: u16) -> Self {
+        self.modbus_transaction_id = Some(transaction_id);
+        let meta = self
+            .modbus_metadata
+            .get_or_insert_with(|| crate::modbus::MbapHeader::new(transaction_id, 0, 2, 0, 0));
+        meta.transaction_id = transaction_id;
+        self
+    }
+
+    /// Sets the Modbus unit identifier and populates structured `modbus_metadata`.
+    #[must_use]
+    pub fn with_modbus_unit_id(mut self, unit_id: u8) -> Self {
+        self.modbus_unit_id = Some(unit_id);
+        let meta = self
+            .modbus_metadata
+            .get_or_insert_with(|| crate::modbus::MbapHeader::new(0, 0, 2, unit_id, 0));
+        meta.unit_id = unit_id;
+        self
+    }
+
+    /// Sets the Modbus function code and populates structured `modbus_metadata`.
+    #[must_use]
+    pub fn with_modbus_function_code(mut self, function_code: u8) -> Self {
+        self.modbus_function_code = Some(function_code);
+        let is_exc = (function_code & 0x80) != 0;
+        self.modbus_is_exception = Some(is_exc);
+        let meta = self
+            .modbus_metadata
+            .get_or_insert_with(|| crate::modbus::MbapHeader::new(0, 0, 2, 0, function_code));
+        meta.function_code = function_code;
+        meta.is_exception = is_exc;
+        self
+    }
+
+    /// Sets structured Modbus metadata.
+    #[must_use]
+    pub fn with_modbus_metadata(mut self, metadata: crate::modbus::ModbusMetadata) -> Self {
+        self.modbus_transaction_id = Some(metadata.transaction_id);
+        self.modbus_protocol_id = Some(metadata.protocol_id);
+        self.modbus_length = Some(metadata.length);
+        self.modbus_unit_id = Some(metadata.unit_id);
+        self.modbus_function_code = Some(metadata.function_code);
+        self.modbus_is_exception = Some(metadata.is_exception);
+        self.modbus_exception_code = metadata.exception_code;
+        self.modbus_metadata = Some(metadata);
+        self
+    }
+
+    /// Attaches a Modbus inspection event.
+    #[must_use]
+    pub fn with_modbus_inspection(mut self, inspection: ModbusInspection) -> Self {
+        self.modbus_transaction_id = Some(inspection.transaction_id);
+        self.modbus_protocol_id = Some(inspection.protocol_id);
+        self.modbus_length = Some(inspection.length);
+        self.modbus_unit_id = Some(inspection.unit_id);
+        self.modbus_function_code = Some(inspection.function_code);
+        self.modbus_is_exception = Some(inspection.is_exception);
+        self.modbus_exception_code = inspection.exception_code;
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::ModbusInspection;
+        }
+        self.modbus_metadata = inspection.modbus_metadata;
+        self.modbus_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a Modbus inspection diagnostic event from an MBAP header.
+    #[must_use]
+    pub fn modbus_inspection(header: &crate::modbus::MbapHeader) -> Self {
+        ModbusInspection::from_header(header).into()
+    }
+
+    /// Sets the DNP3 source station address and populates structured `dnp3_metadata`.
+    #[must_use]
+    pub fn with_dnp3_source(mut self, source: u16) -> Self {
+        self.dnp3_source = Some(source);
+        let meta = self.dnp3_metadata.get_or_insert(crate::dnp3::Dnp3Metadata {
+            destination: 0,
+            source,
+            is_primary: true,
+            direction: true,
+            control_function: 0,
+            transport_fir: None,
+            transport_fin: None,
+            transport_sequence: None,
+            application_function: None,
+            crc_valid: true,
+        });
+        meta.source = source;
+        self
+    }
+
+    /// Sets the DNP3 destination station address and populates structured `dnp3_metadata`.
+    #[must_use]
+    pub fn with_dnp3_destination(mut self, destination: u16) -> Self {
+        self.dnp3_destination = Some(destination);
+        let meta = self.dnp3_metadata.get_or_insert(crate::dnp3::Dnp3Metadata {
+            destination,
+            source: 0,
+            is_primary: true,
+            direction: true,
+            control_function: 0,
+            transport_fir: None,
+            transport_fin: None,
+            transport_sequence: None,
+            application_function: None,
+            crc_valid: true,
+        });
+        meta.destination = destination;
+        self
+    }
+
+    /// Sets the DNP3 link control function code and populates structured `dnp3_metadata`.
+    #[must_use]
+    pub fn with_dnp3_control_function(mut self, control_function: u8) -> Self {
+        self.dnp3_control_function = Some(control_function);
+        let meta = self.dnp3_metadata.get_or_insert(crate::dnp3::Dnp3Metadata {
+            destination: 0,
+            source: 0,
+            is_primary: true,
+            direction: true,
+            control_function,
+            transport_fir: None,
+            transport_fin: None,
+            transport_sequence: None,
+            application_function: None,
+            crc_valid: true,
+        });
+        meta.control_function = control_function;
+        self
+    }
+
+    /// Sets structured DNP3 metadata.
+    #[must_use]
+    pub fn with_dnp3_metadata(mut self, metadata: crate::dnp3::Dnp3Metadata) -> Self {
+        self.dnp3_destination = Some(metadata.destination);
+        self.dnp3_source = Some(metadata.source);
+        self.dnp3_control_function = Some(metadata.control_function);
+        self.dnp3_is_primary = Some(metadata.is_primary);
+        self.dnp3_direction = Some(metadata.direction);
+        self.dnp3_transport_fir = metadata.transport_fir;
+        self.dnp3_transport_fin = metadata.transport_fin;
+        self.dnp3_transport_sequence = metadata.transport_sequence;
+        self.dnp3_application_function = metadata.application_function;
+        self.dnp3_crc_valid = Some(metadata.crc_valid);
+        self.dnp3_metadata = Some(metadata);
+        self
+    }
+
+    /// Attaches a DNP3 inspection event.
+    #[must_use]
+    pub fn with_dnp3_inspection(mut self, inspection: Dnp3Inspection) -> Self {
+        self.dnp3_destination = Some(inspection.destination);
+        self.dnp3_source = Some(inspection.source);
+        self.dnp3_control_function = Some(inspection.control_function);
+        self.dnp3_is_primary = Some(inspection.is_primary);
+        self.dnp3_direction = Some(inspection.direction);
+        self.dnp3_transport_fir = inspection.transport_fir;
+        self.dnp3_transport_fin = inspection.transport_fin;
+        self.dnp3_transport_sequence = inspection.transport_sequence;
+        self.dnp3_application_function = inspection.application_function;
+        self.dnp3_crc_valid = Some(inspection.crc_valid);
+        if self.stage == DiagnosticStage::Received || self.stage == DiagnosticStage::Accepted {
+            self.stage = DiagnosticStage::Dnp3Inspection;
+        }
+        self.dnp3_metadata = inspection.dnp3_metadata.clone();
+        self.dnp3_inspection = Some(inspection);
+        self
+    }
+
+    /// Creates a DNP3 inspection diagnostic event from a parsed DNP3 frame.
+    #[must_use]
+    pub fn dnp3_inspection(frame: &crate::dnp3::Dnp3Frame) -> Self {
+        Dnp3Inspection::from_frame(frame).into()
+    }
+
     /// Records local transmission of an inspected packet (including MQTT).
     ///
     /// In accordance with SPEC §8, sets stage to [`DiagnosticStage::SendSucceeded`] representing
@@ -4429,6 +4990,16 @@ impl DiagnosticBuffer {
 
     /// Emits an [`RtpInspection`] event into the diagnostic buffer.
     pub fn emit_rtp_inspection(&self, inspection: RtpInspection) -> bool {
+        self.emit(inspection)
+    }
+
+    /// Emits a [`ModbusInspection`] event into the diagnostic buffer.
+    pub fn emit_modbus_inspection(&self, inspection: ModbusInspection) -> bool {
+        self.emit(inspection)
+    }
+
+    /// Emits a [`Dnp3Inspection`] event into the diagnostic buffer.
+    pub fn emit_dnp3_inspection(&self, inspection: Dnp3Inspection) -> bool {
         self.emit(inspection)
     }
 
@@ -6001,5 +6572,136 @@ mod tests {
         assert_eq!(insp_val["rtp_payload_type"], 96);
         assert_eq!(insp_val["rtp_metadata"]["sequence_number"], 1000);
         assert_eq!(insp_val["rtp_metadata"]["payload_type"], 96);
+    }
+
+    #[test]
+    fn test_serializing_diagnostic_event_with_modbus_metadata() {
+        let event = DiagnosticEvent::new(
+            1_000_000,
+            1_700_000_000,
+            "modbus-stream",
+            DiagnosticStage::ModbusInspection,
+            TransportType::Tcp,
+            12,
+        )
+        .with_modbus_transaction_id(42)
+        .with_modbus_unit_id(7)
+        .with_modbus_function_code(3);
+
+        let json = serde_json::to_string(&event).expect("must serialize DiagnosticEvent to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("must parse JSON");
+
+        assert_eq!(val["modbus_transaction_id"], 42);
+        assert_eq!(val["modbus_unit_id"], 7);
+        assert_eq!(val["modbus_function_code"], 3);
+
+        let meta = &val["modbus_metadata"];
+        assert!(
+            meta.is_object(),
+            "modbus_metadata field must be present as a JSON object"
+        );
+        assert_eq!(meta["transaction_id"], 42);
+        assert_eq!(meta["unit_id"], 7);
+        assert_eq!(meta["function_code"], 3);
+
+        // Also test via ModbusInspection conversion
+        let insp_event: DiagnosticEvent = ModbusInspection::new(42, 7, 3).into();
+        let insp_json =
+            serde_json::to_string(&insp_event).expect("must serialize ModbusInspection event");
+        let insp_val: serde_json::Value =
+            serde_json::from_str(&insp_json).expect("must parse JSON");
+        assert_eq!(insp_val["modbus_transaction_id"], 42);
+        assert_eq!(insp_val["modbus_unit_id"], 7);
+        assert_eq!(insp_val["modbus_function_code"], 3);
+        assert_eq!(insp_val["modbus_metadata"]["transaction_id"], 42);
+        assert_eq!(insp_val["modbus_metadata"]["unit_id"], 7);
+        assert_eq!(insp_val["modbus_metadata"]["function_code"], 3);
+    }
+
+    #[test]
+    fn test_serializing_diagnostic_event_with_dnp3_metadata() {
+        let event = DiagnosticEvent::new(
+            2_000_000,
+            1_700_000_001,
+            "dnp3-stream",
+            DiagnosticStage::Dnp3Inspection,
+            TransportType::Tcp,
+            18,
+        )
+        .with_dnp3_source(10)
+        .with_dnp3_destination(20)
+        .with_dnp3_control_function(4);
+
+        let json = serde_json::to_string(&event).expect("must serialize DiagnosticEvent to JSON");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("must parse JSON");
+
+        assert_eq!(val["dnp3_source"], 10);
+        assert_eq!(val["dnp3_destination"], 20);
+        assert_eq!(val["dnp3_control_function"], 4);
+
+        let meta = &val["dnp3_metadata"];
+        assert!(
+            meta.is_object(),
+            "dnp3_metadata field must be present as a JSON object"
+        );
+        assert_eq!(meta["source"], 10);
+        assert_eq!(meta["destination"], 20);
+        assert_eq!(meta["control_function"], 4);
+
+        // Also test via Dnp3Inspection conversion
+        let insp_event: DiagnosticEvent = Dnp3Inspection::new(10, 20, 4).into();
+        let insp_json =
+            serde_json::to_string(&insp_event).expect("must serialize Dnp3Inspection event");
+        let insp_val: serde_json::Value =
+            serde_json::from_str(&insp_json).expect("must parse JSON");
+        assert_eq!(insp_val["dnp3_source"], 10);
+        assert_eq!(insp_val["dnp3_destination"], 20);
+        assert_eq!(insp_val["dnp3_control_function"], 4);
+        assert_eq!(insp_val["dnp3_metadata"]["source"], 10);
+        assert_eq!(insp_val["dnp3_metadata"]["destination"], 20);
+        assert_eq!(insp_val["dnp3_metadata"]["control_function"], 4);
+    }
+
+    #[test]
+    fn test_emitting_modbus_event_into_full_buffer_drops_without_blocking_or_panicking() {
+        let buf = DiagnosticBuffer::new(2);
+
+        let ev1 = DiagnosticEvent::new(
+            1,
+            100,
+            "modbus-stream",
+            DiagnosticStage::ModbusInspection,
+            TransportType::Tcp,
+            12,
+        )
+        .with_modbus_transaction_id(1)
+        .with_modbus_unit_id(1)
+        .with_modbus_function_code(3);
+        let ev2 = ev1.clone().with_modbus_transaction_id(2);
+        let ev3 = ev1.clone().with_modbus_transaction_id(3);
+
+        assert!(buf.emit(ev1));
+        assert!(buf.emit(ev2));
+        // Buffer is now full (capacity 2); emitting a third Modbus event drops the oldest event without blocking or panicking
+        assert!(buf.emit(ev3));
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.dropped_count(), 1);
+
+        // Zero-capacity buffer drops the incoming event immediately
+        let zero_buf = DiagnosticBuffer::new(0);
+        let ev_zero = DiagnosticEvent::new(
+            4,
+            100,
+            "modbus-stream",
+            DiagnosticStage::ModbusInspection,
+            TransportType::Tcp,
+            12,
+        )
+        .with_modbus_transaction_id(4)
+        .with_modbus_unit_id(1)
+        .with_modbus_function_code(3);
+        assert!(!zero_buf.emit(ev_zero));
+        assert_eq!(zero_buf.len(), 0);
+        assert_eq!(zero_buf.dropped_count(), 1);
     }
 }
