@@ -168,6 +168,70 @@
         "connect"
       ]
     },
+    "Dnp3Config": {
+      "description": "Configuration for DNP3 FT3 framing, CRC validation, inspection, and filtering (SPEC §5, §8, §14, Task RER-F-076).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable DNP3 FT3 inspection and validation. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "filter_destinations": {
+          "description": "Optional allowlist of DNP3 destination station addresses (0..=65535). If None, all destinations are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0.0
+          }
+        },
+        "filter_sources": {
+          "description": "Optional allowlist of DNP3 source station addresses (0..=65535). If None, all sources are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0.0
+          }
+        },
+        "framing": {
+          "description": "Optional framing mode override (\"dnp3\", \"length_prefix\", etc.).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_frame_size": {
+          "description": "Maximum allowed DNP3 FT3 LPDU length in octets. Defaults to 292 (`DNP3_MAX_FRAME_LEN`).",
+          "default": 292,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "passthrough_on_error": {
+          "description": "When true, frames failing DNP3 validation are forwarded unchanged to destinations. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "validate_crc": {
+          "description": "Validate 16-bit CRCs on FT3 header and user data blocks. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "DropPolicy": {
       "description": "Drop policies under queue exhaustion.",
       "type": "string",
@@ -689,6 +753,75 @@
       },
       "additionalProperties": false
     },
+    "ModbusConfig": {
+      "description": "Configuration for Modbus TCP MBAP framing, inspection, and filtering (SPEC §5, §8, §14, Task RER-F-076).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable Modbus TCP MBAP inspection and validation. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "filter_function_codes": {
+          "description": "Optional allowlist of Modbus function codes (0..=127) to accept. If None, all function codes are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "filter_unit_ids": {
+          "description": "Optional allowlist of Unit IDs (0..=255) to accept. If None, all unit IDs are accepted.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "framing": {
+          "description": "Optional framing mode override (\"modbus_tcp\", \"length_prefix\", etc.).",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FramingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_frame_size": {
+          "description": "Maximum allowed Modbus TCP ADU length in octets. Defaults to 260 (`MODBUS_MAX_FRAME_LEN`).",
+          "default": 260,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "passthrough_on_error": {
+          "description": "When true, frames failing Modbus validation are forwarded unchanged to destinations. Defaults to false.",
+          "default": false,
+          "type": "boolean"
+        },
+        "validate_length": {
+          "description": "Validate MBAP length field bounds (2..=254) and frame length consistency. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        },
+        "validate_protocol_id": {
+          "description": "Enforce Protocol ID == 0x0000. Defaults to true.",
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "MqttConfig": {
       "description": "Configuration for MQTT packet parsing, validation, and framing (SPEC §5, §8, §14, Task RER-F-058).",
       "type": "object",
@@ -958,8 +1091,19 @@
             "$ref": "#/definitions/EndpointConfig"
           }
         },
+        "dnp3": {
+          "description": "Optional DNP3 FT3 framing, CRC validation, inspection, and filtering configuration (SPEC §5, §8, §14). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Dnp3Config"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "framing": {
-          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", \"mavlink\", \"mqtt\", or \"kiss\"). Defaults to length_prefix.",
+          "description": "Optional framing mode for TCP streams (\"length_prefix\", \"ccsds\", \"mavlink\", \"mqtt\", \"kiss\", \"modbus_tcp\", or \"dnp3\"). Defaults to length_prefix.",
           "anyOf": [
             {
               "$ref": "#/definitions/FramingMode"
@@ -1000,6 +1144,17 @@
           "anyOf": [
             {
               "$ref": "#/definitions/MavlinkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modbus": {
+          "description": "Optional Modbus TCP MBAP framing, inspection, and filtering configuration (SPEC §5, §8, §14). Off by default.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModbusConfig"
             },
             {
               "type": "null"
